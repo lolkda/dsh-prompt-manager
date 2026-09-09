@@ -22,10 +22,11 @@ DSH 里两种注入方式落在不同的通道：
 把仓库放到 profile 目录下，例如：
 
 ```bash
-cd "$DSH_HOME/profiles/web"
-mkdir -p vendor
-cp -r /path/to/dsh-ctf-prompt vendor/
+git clone https://github.com/lolkda/dsh-ctf-prompt "$DSH_HOME/profiles/web/vendor/dsh-ctf-prompt"
+cd "$DSH_HOME/profiles/web/vendor/dsh-ctf-prompt" && npm install   # 需要构建时
 ```
+
+`lib/` 已随仓库提交，所以不装依赖也能直接挂载；只有改过 `src/` 才需要重新 `npm run build`。
 
 然后在 `$DSH_HOME/profiles/web/cordis.patch.yml` 末尾追加：
 
@@ -90,10 +91,29 @@ DSH_PACKAGES="$DSH_HOME/profiles/node_modules/@deepseek-ai" node test/smoke.mjs
 ## 结构
 
 ```
-contract.md             提示词正文（唯一需要改的文件）
-lib/index.js            插件：注册 section
+contract.md                提示词正文（唯一需要改的文件）
+src/index.ts               插件源码（TypeScript）
+lib/index.js               构建产物，loader 实际加载的文件
+lib/types/index.d.ts       构建产出的类型声明
+test/smoke.mjs             冒烟测试（跑的是构建产物）
 examples/cordis.patch.yml  可直接抄进 profile 的 patch 行
+tsconfig.json              构建与类型检查配置
 ```
+
+## 开发
+
+源码是 TypeScript，`lib/` 由 `tsc` 生成：
+
+```bash
+npm install          # 装 typescript 与 DSH 类型包；prepare 会自动构建一次
+npm run build        # src/index.ts -> lib/index.js + lib/types/index.d.ts
+npm run typecheck    # tsc --noEmit
+npm test             # 先构建，再把插件挂进真实 SystemPrompt 注册表跑一次 assemble()
+```
+
+`lib/` 是提交进仓库的，所以克隆下来就能按相对路径挂载，不需要本地工具链。改完源码记得 `npm run build` 并一起提交。
+
+运行时产物只 import `node:fs` / `node:url` 两个内置模块，不依赖任何 DSH 包；DSH 的两个包只是 devDependencies，用来取 `Context` 与 `PromptSection` 的类型。构建产物里的类型声明来自 `lib/types/index.d.ts`，`package.json` 的 `exports` 里已经配好 types 条件。
 
 ## License
 
