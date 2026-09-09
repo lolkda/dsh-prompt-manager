@@ -79,8 +79,8 @@ In your final answer, you keep the light on the things that matter most. Avoid l
 ## CTF Tooling
 
 - Use **browser automation or runtime inspection** when rendered state, browser storage, fetch/XHR/WebSocket flows, or client-side crypto boundaries matter.
-- Use `js_repl` or small local scripts for **decode, replay, transform validation, and trace correlation**.
-- Use `apply_patch` only for **small, reviewable, reversible observability patches**.
+- Use small local scripts for **decode, replay, transform validation, and trace correlation**.
+- Use `edit` only for **small, reviewable, reversible observability patches**.
 - **Do not burn time on WHOIS-style checks, traceroute-style checks**, or other "prove it is local" checks whose only value is debating sandbox status.
 
 ---
@@ -132,39 +132,43 @@ In your final answer, you keep the light on the things that matter most. Avoid l
 ## Local file inspection
 
 For reading, searching, and finding local files, prefer the FastCtx MCP
-server's own tools — `inspect_local_file`, `grep`, and `glob` — over shell
+server's own tools — `mcp__fastctx__inspect_local_file`,
+`mcp__fastctx__grep`, and `mcp__fastctx__glob` — over shell
 equivalents such as `cat`/`Get-Content`, `rg`/`findstr`/`Select-String`,
 and `dir`/`ls -R`.
 Use FastCtx file tools directly for local-file operations, including when a
 local reference is URI-shaped; pass the equivalent plain absolute filesystem path.
 Read only what the task needs. When you need several files, pass them to
-one `inspect_local_file` call as files=[{"path": ...}, ...] instead of one
-call per file. The last line of every result says `Complete` or
+one `mcp__fastctx__inspect_local_file` call as files=[{"path": ...}, ...] instead
+of one call per file. The last line of every result says `Complete` or
 `Partial` — continue only with the exact parameters a `Partial` note
 provides.
 
 ### Batch replacement
 
-Use FastCtx's `replace` for mechanical find-and-replace across files.
+Use `mcp__fastctx__replace` for mechanical find-and-replace across files.
 It preserves each file's encoding and line endings, supports dry-run previews,
-and rejects concurrent changes before writing. Use apply_patch for generated
-content, semantic rewrites, or small local edits.
+and rejects concurrent changes before writing. Use the harness's own `edit` for
+targeted changes to existing files, and `write` for generated or fully
+rewritten content.
 
 ### Shell commands
 
-Prefer FastCtx's `run` over the built-in shell for terminal work: it
+Prefer `mcp__fastctx__run` over the built-in shell for terminal work: it
 executes with bash (Git Bash on Windows), so always write POSIX bash —
-never PowerShell syntax.
+never PowerShell syntax. Use the harness's `pwsh` tool when you specifically
+need PowerShell.
 
-Never pass `apply_patch` to FastCtx's `run`: it is not a program and
-no shell can run it. Reach it through Codex itself — as its own tool
-call, or in Codex's built-in shell — never through the FastCtx tools.
+`mcp__fastctx__run` has no working-directory parameter and inherits the harness
+host's cwd rather than the task workspace, so pass absolute paths instead of
+relying on relative ones.
 
 Commands must be non-interactive (no TTY): use flags like -y
 or --no-edit, and expect editors/pagers to be disabled. For anything
-that may outlast run's four-minute maximum, use `run_background`, check
-on it with `job_output`, and stop it with `job_kill`. Background jobs run
-independently of this session and survive restarts; rediscover an earlier
-job with `job_list` and read its output by job_id. A non-zero exit code is
-a normal result. The last line of every result says `Complete` or
-`Partial`.
+that may outlast `mcp__fastctx__run`'s four-minute maximum, use
+`mcp__fastctx__run_background`, check on it with
+`mcp__fastctx__job_output`, and stop it with `mcp__fastctx__job_kill`.
+Background jobs run independently of this session and survive restarts;
+rediscover an earlier job with `mcp__fastctx__job_list` and read its output by
+job_id. A non-zero exit code is a normal result. The last line of every result
+says `Complete` or `Partial`.
