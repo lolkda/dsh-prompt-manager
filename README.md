@@ -152,7 +152,8 @@ DSH_PACKAGES="$DSH_HOME/profiles/node_modules/@deepseek-ai" node test/smoke.mjs
 
 - **契约里可以写 `{{变量}}`**，但引用的名字必须已注册。smoke test 会用默认配置把契约完整渲染一遍，未注册的引用会让它直接失败。
 - **`sectionName` 不能和已注册的重名**（例如 `deployment:persona`、`harness:identity`、`app:web-surface`），否则挂载即失败。变量名同理。
-- **改 `cordis.patch.yml` 会热加载**（该 profile 是 `patchReload: live`）；新增 `.js` 文件后建议重启 profile。
+- **改 `cordis.patch.yml` 会热加载**：`patchReload: live` 时 HMR 会为这个 patch 文件单独起一个精确 watcher，所以增删 row 不用重启。
+- **改插件代码不会热加载**：DSH 用 `root: []` 挂载 HMR，不监听插件模块文件；而 loader 按 URL 缓存 ESM 模块，同一路径重新 import 拿到的还是旧对象。所以 `git pull` 或改完 `lib/` 之后必须重启 profile 才生效。改 `contract.md` / `fastctx.md` 不受影响 —— 它们在挂载时读取。
 - **KV cache**：section 文本或顺序一变，缓存前缀从该点失效。契约文本稳定时开销只有一次。
 
 ## 结构
