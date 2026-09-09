@@ -1,0 +1,49 @@
+{
+  "name": "dsh-ctf-prompt",
+  "version": "0.1.0",
+  "description": "Inject a CTF / competition agent contract as a DeepSeek Harness system-prompt section.",
+  "type": "module",
+  "main": "lib/index.js",
+  "scripts": {
+    "test": "node test/smoke.mjs"
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./contract.md": "./contract.md",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "contract.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "cordis",
+    "cordis-plugin",
+    "system-prompt",
+    "ctf"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lolkda/dsh-ctf-prompt.git"
+  },
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.0",
+    "@deepseek-ai/dsh-system-prompt": ">=0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-system-prompt": {
+      "optional": true
+    }
+  }
+}

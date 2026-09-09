@@ -1,0 +1,32 @@
+# Mount dsh-ctf-prompt in a DeepSeek Harness profile.
+#
+# Append one of these blocks to `$DSH_HOME/profiles/<profile>/cordis.patch.yml`
+# (the user patch layer, applied after every bundle layer), then restart the
+# profile. `patchReload: live` profiles pick the edit up without a restart.
+
+# ── Option A: mount a local checkout by relative path ────────────────────────
+# The loader resolves a leading `./` against the profile directory
+# (`new URL(name, ctx.baseUrl)`), so this points at
+# `$DSH_HOME/profiles/<profile>/vendor/dsh-ctf-prompt/lib/index.js`.
+# Copy or symlink this repository to that path first.
+- insert:
+    - id: ctf-prompt
+      name: './vendor/dsh-ctf-prompt/lib/index.js'
+      config:
+        order: 10
+
+# ── Option B: mount by package name ─────────────────────────────────────────
+# Run `pnpm add github:lolkda/dsh-ctf-prompt` inside the profile directory
+# (or `pnpm add dsh-ctf-prompt` once it is published), then use the name.
+# - insert:
+#     - id: ctf-prompt
+#       name: 'dsh-ctf-prompt'
+#       config:
+#         order: 10
+
+# ── Optional overrides ──────────────────────────────────────────────────────
+# order:        section placement; 10 = after persona, before plan mode/tools
+# sectionName:  registered section name; must not collide with an existing one
+# text:         inline prose, replacing contract.md
+# contractPath: absolute path to another markdown file
+# complete:     true replaces the whole system prompt with this section
