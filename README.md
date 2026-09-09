@@ -67,6 +67,9 @@ pnpm add github:lolkda/dsh-ctf-prompt
 | `environment` | `true` | 注册下面那组环境变量。契约里用不到、或别的行已占用这些名字时设为 `false` |
 | `variables` | 空 | 额外的 `{{名字}}` 变量，键值对形式。名字要满足 `[a-z][a-z0-9_]*`，不能和已注册的重名 |
 | `environmentLine` | `false` | 设为 `true` 时，自动在契约前加一行运行环境事实，不用改 `contract.md` |
+| `fastctx` | `true` | 注册 FastCtx 路由 section（见下节）。它的正文只在探测工具可见时下发 |
+| `fastctxTools` | `['mcp__fastctx__inspect_local_file']` | 用来判断 FastCtx 是否可用的探测工具名；serverName 改了就在这里跟着改 |
+| `fastctxMissingText` | 见下 | FastCtx 不可用时替代路由正文的那段话 |
 
 ## 变量
 
@@ -106,6 +109,29 @@ Shell: {{shell}}.
 
 **插值是严格的**：引用未注册的变量、或注册了但 provider 返回 `undefined`，`assemble()` 直接抛错，不会渲染成空串，而且**没有转义语法**（想输出字面 `{{` 目前做不到）。所以给 `contract.md` 加 `{{...}}` 之前，先确认对应变量已经注册。
 
+## FastCtx 路由的条件注入
+
+`fastctx.md` 里那段"优先用 `mcp__fastctx__*`"的指令不能无条件发出去 —— 如果 FastCtx 没装、没连上，模型会去调根本不存在的工具。
+
+所以它被拆成**独立的第二个 section**，`text` 是函数，在每次组装时判断：
+
+```ts
+text: (context) => probesVisible(ctx, probes, context.scope) ? 路由正文 : 降级文案
+```
+
+判断方式是查工具注册表 `ctx.tools.get(name, scope)`，**带上当前 agent 的作用域**，所以"这个 agent 看不到这些工具"和"工具没注册"是同一种结果，都走降级。
+
+| 情况 | 提示词里出现的内容 |
+|---|---|
+| 探测工具可见 | `fastctx.md` 的完整路由正文 |
+| 工具不可见（没装 / 没连上 / 被作用域屏蔽） | 一行降级文案：FastCtx 不可用，改用 harness 自带的 `read`/`grep`/`glob`/`pwsh` |
+| 部署里根本没有 `dsh-tools` 服务 | 同上，降级而不是抛错 |
+| `fastctx: false` | 两个都不注册，section 不存在 |
+
+section 名 `user:fastctx-routing`，order `20`（紧接契约之后）。为什么不用 `{{变量}}`：变量只能让模型读到一个状态词，而那 40 行指令仍然留在提示词里自相矛盾；DSH 对空 section 本来就是丢弃的，按可见性决定发不发才干净。
+
+安装说明是**给人看的**，放在本 README 里，不进提示词 —— 模型没法在会话中途给你装一个宿主二进制。
+
 ## 验证
 
 挂载后新开一个会话，看开场是否出现 `## CTF Core Contract`。也可以确认这一行确实被组合进了配置：
@@ -114,7 +140,7 @@ Shell: {{shell}}.
 dsh --profile web --dump-config
 ```
 
-仓库自带一个 smoke test，它把插件挂进真实的 `SystemPrompt` 注册表并跑一次 `assemble()`，断言 section 落在 persona 之后、契约文本进入渲染结果、四个环境变量能正常插值、未注册变量会抛错：
+仓库自带一个 smoke test，它把插件挂进真实的 `SystemPrompt` 注册表并跑一次 `assemble()`，断言 section 落在 persona 之后、契约文本进入渲染结果、四个环境变量能正常插值、未注册变量会抛错，以及 FastCtx 路由 section 的四种可见性分支：
 
 ```bash
 DSH_PACKAGES="$DSH_HOME/profiles/node_modules/@deepseek-ai" node test/smoke.mjs
@@ -132,7 +158,8 @@ DSH_PACKAGES="$DSH_HOME/profiles/node_modules/@deepseek-ai" node test/smoke.mjs
 ## 结构
 
 ```
-contract.md                提示词正文（唯一需要改的文件）
+contract.md                CTF 契约正文（唯一需要改的提示词文件）
+fastctx.md                 FastCtx 路由正文，按工具可见性条件下发
 src/index.ts               插件源码（TypeScript）
 lib/index.js               构建产物，loader 实际加载的文件
 lib/types/index.d.ts       构建产出的类型声明
@@ -154,7 +181,7 @@ npm test             # 先构建，再把插件挂进真实 SystemPrompt 注册�
 
 `lib/` 是提交进仓库的，所以克隆下来就能按相对路径挂载，不需要本地工具链。改完源码记得 `npm run build` 并一起提交。
 
-运行时产物只 import `node:fs` / `node:url` 两个内置模块，不依赖任何 DSH 包；DSH 的两个包只是 devDependencies，用来取 `Context` 与 `PromptSection` 的类型。构建产物里的类型声明来自 `lib/types/index.d.ts`，`package.json` 的 `exports` 里已经配好 types 条件。
+运行时产物只 import `node:fs` / `node:os` / `node:url` 三个内置模块，不依赖任何 DSH 包；DSH 的包只是 devDependencies，用来取 `Context`、`PromptSection`、`ToolRuntime` 的类型。构建产物里的类型声明来自 `lib/types/index.d.ts`，`package.json` 的 `exports` 里已经配好 types 条件。
 
 ## License
 

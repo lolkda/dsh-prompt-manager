@@ -1,6 +1,6 @@
 {
   "name": "dsh-ctf-prompt",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Inject a CTF / competition agent contract as a DeepSeek Harness system-prompt section.",
   "type": "module",
   "main": "lib/index.js",
@@ -11,11 +11,13 @@
       "default": "./lib/index.js"
     },
     "./contract.md": "./contract.md",
+    "./fastctx.md": "./fastctx.md",
     "./package.json": "./package.json"
   },
   "files": [
     "lib",
     "contract.md",
+    "fastctx.md",
     "README.md",
     "LICENSE"
   ],
@@ -57,6 +59,7 @@
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
     "@deepseek-ai/dsh-system-prompt": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.0.1-rc.1",
     "@types/node": "^26.5.0",
     "typescript": "^5.9.3"
   }

@@ -33,6 +33,10 @@
 # environment:     register {{os}} {{os_release}} {{platform}} {{arch}} (default true)
 # variables:       extra {{name}} variables with fixed values
 # environmentLine: prepend a runtime-environment line to the section (default false)
+# fastctx:         register the conditional FastCtx routing section (default true)
+# fastctxTools:    tool names proving FastCtx is available
+#                  (default ['mcp__fastctx__inspect_local_file'])
+# fastctxMissingText: what to say instead when FastCtx is unavailable
 #
 # Example with every value set:
 # - insert:
@@ -42,6 +46,8 @@
 #         order: 10
 #         environment: true
 #         environmentLine: true
+#         fastctx: true
+#         fastctxTools: ['mcp__fastctx__inspect_local_file']
 #         variables:
 #           shell: 'PowerShell 7 (pwsh)'
 #         sectionName: 'user:ctf-contract'

@@ -2,15 +2,20 @@
  * Inject a CTF / competition agent contract as a DeepSeek Harness system-prompt
  * section.
  *
- * The prose lives in `contract.md` at the package root and is read at mount
- * time, so the text can be edited without touching code. `order` defaults to
- * 10, which lands the section right after the deployment persona (order 0) and
- * before plan-mode policy (500) and the per-tool guidance sections (1000+).
+ * The prose lives in `contract.md` and `fastctx.md` at the package root and is
+ * read at mount time, so the text can be edited without touching code. `order`
+ * defaults to 10, which lands the contract right after the deployment persona
+ * (order 0) and before plan-mode policy (500) and the per-tool guidance
+ * sections (1000+).
  *
  * The section text is interpolated against prompt variables at each assembly.
  * The harness registers `{{model}}`, `{{cwd}}`, and `{{provider}}`; this plugin
  * adds `{{os}}`, `{{os_release}}`, `{{platform}}`, and `{{arch}}`, plus any
  * `variables` given in config.
+ *
+ * The FastCtx routing prose is a second section whose text is resolved per
+ * assembly: it is delivered only while the configured FastCtx tools are visible
+ * to the agent, and replaced by a short fallback line otherwise.
  *
  * @module dsh-ctf-prompt
  */
@@ -29,6 +34,20 @@ export declare const DEFAULT_SECTION_NAME = "user:ctf-contract";
  * plan-mode policy (500) and the per-tool guidance sections (1000+).
  */
 export declare const DEFAULT_ORDER = 10;
+/** Section name for the conditional FastCtx routing prose. */
+export declare const FASTCTX_SECTION_NAME = "user:fastctx-routing";
+/** Placement for the FastCtx routing section, just after the contract. */
+export declare const FASTCTX_ORDER = 20;
+/**
+ * Tools whose visibility proves the FastCtx MCP server connected. One probe is
+ * enough; a deployment that names the server differently overrides this list.
+ */
+export declare const DEFAULT_FASTCTX_TOOLS: string[];
+/**
+ * Delivered in place of the routing prose when FastCtx is unavailable, so the
+ * model does not chase tools that are not there.
+ */
+export declare const FASTCTX_MISSING_TEXT = "The FastCtx MCP server is not available in this session, so its tools cannot be called. Fall back to the harness's own read, grep, glob, and pwsh tools for local file and shell work.";
 /** Facts about the process running the harness, exposed as prompt variables. */
 export interface EnvironmentFacts {
     /** Friendly platform name, e.g. `Windows`. */
@@ -80,6 +99,22 @@ export interface Config {
      * `false`.
      */
     environmentLine?: boolean;
+    /**
+     * Register the FastCtx routing section. Its text is delivered only while the
+     * `fastctxTools` probes resolve, and replaced by `fastctxMissingText`
+     * otherwise. Defaults to `true`.
+     */
+    fastctx?: boolean;
+    /**
+     * Tool names whose visibility means FastCtx is available. Defaults to
+     * {@link DEFAULT_FASTCTX_TOOLS}.
+     */
+    fastctxTools?: string[];
+    /**
+     * Text delivered instead of the routing prose when FastCtx is unavailable.
+     * Defaults to {@link FASTCTX_MISSING_TEXT}.
+     */
+    fastctxMissingText?: string;
 }
 /**
  * Facts about the running process, as prompt-variable values.
@@ -92,7 +127,13 @@ export declare function environmentFacts(): EnvironmentFacts;
  */
 export declare function readContract(): string;
 /**
- * Register the contract section and its prompt variables.
+ * Read the bundled FastCtx routing prose.
+ * @returns the exact UTF-8 routing prose.
+ */
+export declare function readFastctx(): string;
+/**
+ * Register the contract section, its variables, and the conditional FastCtx
+ * routing section.
  * @param ctx - Cordis context carrying the `systemPrompt` service.
  * @param config - optional overrides for placement, name, text, and variables.
  */
