@@ -25,8 +25,23 @@
 #         order: 10
 
 # ── Optional overrides ──────────────────────────────────────────────────────
-# order:        section placement; 10 = after persona, before plan mode/tools
-# sectionName:  registered section name; must not collide with an existing one
-# text:         inline prose, replacing contract.md
-# contractPath: absolute path to another markdown file
-# complete:     true replaces the whole system prompt with this section
+# order:           section placement; 10 = after persona, before plan mode/tools
+# sectionName:     registered section name; must not collide with an existing one
+# text:            inline prose, replacing contract.md
+# contractPath:    absolute path to another markdown file
+# complete:        true replaces the whole system prompt with this section
+# environment:     register {{os}} {{os_release}} {{platform}} {{arch}} (default true)
+# variables:       extra {{name}} variables with fixed values
+# environmentLine: prepend a runtime-environment line to the section (default false)
+#
+# Example with every value set:
+# - insert:
+#     - id: ctf-prompt
+#       name: './vendor/dsh-ctf-prompt/lib/index.js'
+#       config:
+#         order: 10
+#         environment: true
+#         environmentLine: true
+#         variables:
+#           shell: 'PowerShell 7 (pwsh)'
+#         sectionName: 'user:ctf-contract'

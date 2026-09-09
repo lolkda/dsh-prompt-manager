@@ -64,6 +64,47 @@ pnpm add github:lolkda/dsh-ctf-prompt
 | `text` | 空 | 直接给一段文本，替代 `contract.md` |
 | `contractPath` | 空 | 换成另一个 markdown 文件的绝对路径 |
 | `complete` | `false` | 设为 `true` 时这一段会**取代整个 system prompt**（同时只能有一个生效），其余 section 全部消失 |
+| `environment` | `true` | 注册下面那组环境变量。契约里用不到、或别的行已占用这些名字时设为 `false` |
+| `variables` | 空 | 额外的 `{{名字}}` 变量，键值对形式。名字要满足 `[a-z][a-z0-9_]*`，不能和已注册的重名 |
+| `environmentLine` | `false` | 设为 `true` 时，自动在契约前加一行运行环境事实，不用改 `contract.md` |
+
+## 变量
+
+section 文本在每次组装时做 `{{变量}}` 插值，所以提示词里可以写实时事实。DSH 自己注册了 `{{model}}`、`{{cwd}}`、`{{provider}}`；本插件另外注册：
+
+| 变量 | 本机实测值 | 来源 |
+|---|---|---|
+| `{{os}}` | `Windows` | 友好平台名（`win32` → Windows，`darwin` → macOS，`linux` → Linux） |
+| `{{os_release}}` | `10.0.19045` | `os.release()`：Windows 构建号 / Linux 内核版本 / macOS Darwin 版本 |
+| `{{platform}}` | `win32` | `process.platform` |
+| `{{arch}}` | `x64` | `process.arch` |
+
+用法一：直接写进 `contract.md`，比如在开头加一行
+
+```markdown
+Runtime environment: {{os}} ({{platform}}, {{arch}}).
+```
+
+用法二：一行都不改，靠配置自动加
+
+```yaml
+config:
+  environmentLine: true   # 渲染成 "Runtime environment: Windows (win32, x64), OS release 10.0.19045."
+```
+
+用法三：补自己的变量（例如把 shell 也说清楚）
+
+```yaml
+config:
+  variables:
+    shell: 'PowerShell 7 (pwsh)'
+```
+
+```markdown
+Shell: {{shell}}.
+```
+
+**插值是严格的**：引用未注册的变量、或注册了但 provider 返回 `undefined`，`assemble()` 直接抛错，不会渲染成空串，而且**没有转义语法**（想输出字面 `{{` 目前做不到）。所以给 `contract.md` 加 `{{...}}` 之前，先确认对应变量已经注册。
 
 ## 验证
 
@@ -73,7 +114,7 @@ pnpm add github:lolkda/dsh-ctf-prompt
 dsh --profile web --dump-config
 ```
 
-仓库自带一个 smoke test，它把插件挂进真实的 `SystemPrompt` 注册表并跑一次 `assemble()`，断言 section 落在 persona 之后、契约文本进入渲染结果：
+仓库自带一个 smoke test，它把插件挂进真实的 `SystemPrompt` 注册表并跑一次 `assemble()`，断言 section 落在 persona 之后、契约文本进入渲染结果、四个环境变量能正常插值、未注册变量会抛错：
 
 ```bash
 DSH_PACKAGES="$DSH_HOME/profiles/node_modules/@deepseek-ai" node test/smoke.mjs
@@ -83,8 +124,8 @@ DSH_PACKAGES="$DSH_HOME/profiles/node_modules/@deepseek-ai" node test/smoke.mjs
 
 ## 注意
 
-- **不要写 `{{...}}`**。DSH 对 section 文本做严格变量插值，未注册的变量、注册了但返回 `undefined` 的变量、畸形的 `{{` 都会让 `assemble()` 抛错，而且没有转义语法。目前 `contract.md` 里没有这类写法。
-- **`sectionName` 不能和已注册的重名**（例如 `deployment:persona`、`harness:identity`、`app:web-surface`），否则挂载即失败。
+- **契约里可以写 `{{变量}}`**，但引用的名字必须已注册。smoke test 会用默认配置把契约完整渲染一遍，未注册的引用会让它直接失败。
+- **`sectionName` 不能和已注册的重名**（例如 `deployment:persona`、`harness:identity`、`app:web-surface`），否则挂载即失败。变量名同理。
 - **改 `cordis.patch.yml` 会热加载**（该 profile 是 `patchReload: live`）；新增 `.js` 文件后建议重启 profile。
 - **KV cache**：section 文本或顺序一变，缓存前缀从该点失效。契约文本稳定时开销只有一次。
 

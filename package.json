@@ -1,6 +1,6 @@
 {
   "name": "dsh-ctf-prompt",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Inject a CTF / competition agent contract as a DeepSeek Harness system-prompt section.",
   "type": "module",
   "main": "lib/index.js",
