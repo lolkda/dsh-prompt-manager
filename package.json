@@ -1,7 +1,7 @@
 {
-  "name": "dsh-ctf-prompt",
-  "version": "0.3.0",
-  "description": "Inject a CTF / competition agent contract as a DeepSeek Harness system-prompt section.",
+  "name": "dsh-prompt-manager",
+  "version": "2.0.0",
+  "description": "Manage DeepSeek Harness system-prompt sections from the Web GUI: enable, add, edit, and delete markdown prompt entries.",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -10,23 +10,21 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
-    "./contract.md": "./contract.md",
-    "./fastctx.md": "./fastctx.md",
+    "./client": "./client/client.js",
     "./package.json": "./package.json"
   },
   "files": [
     "lib",
-    "contract.md",
-    "fastctx.md",
+    "client",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node --check client/client.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prepare": "npm run build",
     "pretest": "npm run build",
-    "test": "node test/smoke.mjs"
+    "test": "node test/smoke.mjs && node test/store.mjs && node test/routes.mjs && node test/source.mjs && node test/net.mjs && node test/sync.mjs && node test/client.mjs"
   },
   "engines": {
     "node": ">=22"
@@ -37,16 +35,26 @@
     "cordis",
     "cordis-plugin",
     "system-prompt",
-    "ctf"
+    "prompt",
+    "settings"
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lolkda/dsh-ctf-prompt.git"
+    "url": "git+https://github.com/lolkda/dsh-prompt-manager.git"
   },
   "license": "MIT",
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.0",
-    "@deepseek-ai/dsh-system-prompt": ">=0.0.1-rc.1"
+    "@deepseek-ai/dsh-system-prompt": ">=0.0.1-rc.1",
+    "@deepseek-ai/schemastery": ">=3.18.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -54,12 +62,16 @@
     },
     "@deepseek-ai/dsh-system-prompt": {
       "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
     }
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
     "@deepseek-ai/dsh-system-prompt": "^0.0.1-rc.1",
     "@deepseek-ai/dsh-tools": "^0.0.1-rc.1",
+    "@deepseek-ai/schemastery": "^3.18.2",
     "@types/node": "^26.5.0",
     "typescript": "^5.9.3"
   }

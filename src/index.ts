@@ -1,70 +1,65 @@
 /**
- * Inject a CTF / competition agent contract as a DeepSeek Harness system-prompt
- * section.
+ * Manage DeepSeek Harness system-prompt sections from the Web GUI.
  *
- * The prose lives in `contract.md` and `fastctx.md` at the package root and is
- * read at mount time, so the text can be edited without touching code. `order`
- * defaults to 10, which lands the contract right after the deployment persona
- * (order 0) and before plan-mode policy (500) and the per-tool guidance
- * sections (1000+).
+ * The prompt is a list of entries. Each entry's index record — title, order,
+ * enabled — lives in the `prompt-manager` settings namespace, and its markdown
+ * body lives in one file under the store directory, so a person can edit the
+ * prose either in the settings page or in an editor. The plugin ships no entries
+ * of its own: a fresh install starts empty, and prose arrives from the settings
+ * page or from a subscribed repository.
+ *
+ * Section text is resolved per assembly, so enabling, disabling, adding, or
+ * rewriting an entry takes effect on the next model step — no restart. Only the
+ * browser half of this plugin is snapshotted at profile startup.
  *
  * The section text is interpolated against prompt variables at each assembly.
  * The harness registers `{{model}}`, `{{cwd}}`, and `{{provider}}`; this plugin
  * adds `{{os}}`, `{{os_release}}`, `{{platform}}`, and `{{arch}}`, plus any
  * `variables` given in config.
  *
- * The FastCtx routing prose is a second section whose text is resolved per
- * assembly: it is delivered only while the configured FastCtx tools are visible
- * to the agent, and replaced by a short fallback line otherwise.
- *
- * @module dsh-ctf-prompt
+ * @module dsh-prompt-manager
  */
 import type { Context } from '@deepseek-ai/cordis'
-// Type-only side-effect imports: these packages' declarations augment `Context`
-// with the services used below, and an augmentation only applies when its
-// module is part of the program. Erased at emit, so there are no runtime
-// imports.
+// Type-only side-effect import: the declaration augments `Context` with the
+// `systemPrompt` service this plugin contributes to, and an augmentation only
+// applies when its module is part of the program. Erased at emit, so there is no
+// runtime import.
 import type {} from '@deepseek-ai/dsh-system-prompt'
-import type {} from '@deepseek-ai/dsh-tools'
-import { readFileSync } from 'node:fs'
-import { release } from 'node:os'
-import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
+import { homedir, release } from 'node:os'
+import { join } from 'node:path'
+import {
+  buildIndexSchema,
+  entryIdFor,
+  parseEntries,
+  type PromptEntry,
+  type ResolvedBody,
+  type SchemaFactory,
+} from './entries.js'
+import { installPromptRoutes } from './routes.js'
+import { PromptStore } from './store.js'
+import { normalizeMirror, parseSources, type PromptSource } from './source.js'
+import { Subscriptions, type SubscriptionLocation } from './subscriptions.js'
+import type { ProxyConfig } from './net.js'
+
+export { MAX_BODY_BYTES, MAX_ENTRIES } from './entries.js'
+export { PromptStore } from './store.js'
+export { ROUTE_PREFIX } from './routes.js'
 
 /** Cordis plugin name. */
-export const name = 'ctf-prompt'
+export const name = 'prompt-manager'
 
 /** The prompt registry this row contributes to. */
 export const inject: string[] = ['systemPrompt']
 
-/**
- * Default section name. Registered in the global layer, so every agent sees it
- * unless that agent's scope registers the same name.
- */
-export const DEFAULT_SECTION_NAME = 'user:ctf-contract'
+/** Section-name prefix of every entry this plugin registers. */
+export const USER_SECTION_PREFIX = 'user:prompt-manager:'
 
-/**
- * Default placement. 10 sits after the deployment persona (order 0) and before
- * plan-mode policy (500) and the per-tool guidance sections (1000+).
- */
-export const DEFAULT_ORDER = 10
+/** Settings namespace carrying the entry index. */
+export const SETTINGS_NAMESPACE = 'prompt-manager'
 
-/** Section name for the conditional FastCtx routing prose. */
-export const FASTCTX_SECTION_NAME = 'user:fastctx-routing'
-
-/** Placement for the FastCtx routing section, just after the contract. */
-export const FASTCTX_ORDER = 20
-
-/**
- * Tools whose visibility proves the FastCtx MCP server connected. One probe is
- * enough; a deployment that names the server differently overrides this list.
- */
-export const DEFAULT_FASTCTX_TOOLS = ['mcp__fastctx__inspect_local_file']
-
-/**
- * Delivered in place of the routing prose when FastCtx is unavailable, so the
- * model does not chase tools that are not there.
- */
-export const FASTCTX_MISSING_TEXT = "The FastCtx MCP server is not available in this session, so its tools cannot be called. Fall back to the harness's own read, grep, glob, and pwsh tools for local file and shell work."
+/** Directory name appended to the resolved Harness home holding the bodies. */
+export const STORE_DIR_NAME = 'prompt-manager'
 
 /** Valid prompt-variable names, mirroring the registry's own rule. */
 const VARIABLE_NAME = /^[a-z][a-z0-9_]*$/
@@ -93,33 +88,12 @@ export interface EnvironmentFacts {
   arch: string
 }
 
-/** Plugin config: how the contract section and its variables are registered. */
+/** Plugin config: the prompt variables it registers and where bodies are stored. */
 export interface Config {
   /**
-   * Section placement. Sections are concatenated in ascending order, so a value
-   * below 500 keeps the contract ahead of plan-mode policy. Defaults to
-   * {@link DEFAULT_ORDER}.
-   */
-  order?: number
-  /**
-   * Registered section name. Must not collide with a section already registered
-   * in the same layer; an agent scope can shadow it by name. Defaults to
-   * {@link DEFAULT_SECTION_NAME}.
-   */
-  sectionName?: string
-  /** Inline prose, replacing the bundled `contract.md`. */
-  text?: string
-  /** Absolute path to another markdown file, replacing the bundled `contract.md`. */
-  contractPath?: string
-  /**
-   * Treat this section as the complete system prompt, suppressing every other
-   * section. At most one effective complete section may exist per assembly.
-   */
-  complete?: boolean
-  /**
    * Register {@link environmentFacts} as prompt variables. Defaults to `true`;
-   * set `false` when the contract never references them, or when another row
-   * already owns those names.
+   * set `false` when no entry references them, or when another row already owns
+   * those names.
    */
   environment?: boolean
   /**
@@ -128,34 +102,24 @@ export interface Config {
    */
   variables?: Record<string, string>
   /**
-   * Prepend a one-line runtime-environment paragraph to the section text, so
-   * the model learns the platform without editing `contract.md`. Defaults to
-   * `false`.
+   * Directory holding one markdown file per entry, under a `sections/`
+   * subdirectory. Defaults to `$DSH_HOME/prompt-manager`, where `$DSH_HOME` is the
+   * environment value when set and `~/.dsh` otherwise.
    */
-  environmentLine?: boolean
-  /**
-   * Register the FastCtx routing section. Its text is delivered only while the
-   * `fastctxTools` probes resolve, and replaced by `fastctxMissingText`
-   * otherwise. Defaults to `true`.
-   */
-  fastctx?: boolean
-  /**
-   * Tool names whose visibility means FastCtx is available. Defaults to
-   * {@link DEFAULT_FASTCTX_TOOLS}.
-   */
-  fastctxTools?: string[]
-  /**
-   * Text delivered instead of the routing prose when FastCtx is unavailable.
-   * Defaults to {@link FASTCTX_MISSING_TEXT}.
-   */
-  fastctxMissingText?: string
+  storeDir?: string
 }
 
-/** Bundled contract text, resolved relative to the built module in `lib/`. */
-const BUNDLED_CONTRACT = new URL('../contract.md', import.meta.url)
-
-/** Bundled FastCtx routing prose, resolved relative to the built module in `lib/`. */
-const BUNDLED_FASTCTX = new URL('../fastctx.md', import.meta.url)
+/** The `settings` service slice this plugin registers its index with. */
+interface SettingsFace {
+  register(namespace: string, schema: unknown, options?: { base?: unknown }): {
+    /** The resolved index, deep-frozen. */
+    get(): unknown
+    /** Merge a patch into the user layer and persist it. */
+    update(patch: Record<string, unknown>): Promise<unknown>
+    /** Observe committed changes; returns the disposer. */
+    watch(callback: () => void): () => void
+  }
+}
 
 /** Friendly platform name for the running process. */
 function platformName(): string {
@@ -176,88 +140,262 @@ export function environmentFacts(): EnvironmentFacts {
 }
 
 /**
- * Read the bundled contract text.
- * @returns the exact UTF-8 contract prose.
+ * Resolve the directory holding the entry bodies and the settings files.
+ * @param config - plugin config; `storeDir` wins when it names a directory.
+ * @returns an absolute path, without the `sections` leaf.
  */
-export function readContract(): string {
-  return readFileSync(fileURLToPath(BUNDLED_CONTRACT), 'utf8')
+export function resolveStoreDir(config: Config = {}): string {
+  const configured = config.storeDir?.trim()
+  if (configured !== undefined && configured.length > 0) return configured
+  const home = process.env['DSH_HOME']?.trim()
+  const root = home !== undefined && home.length > 0 ? home : join(homedir(), '.dsh')
+  return join(root, STORE_DIR_NAME)
 }
 
 /**
- * Read the bundled FastCtx routing prose.
- * @returns the exact UTF-8 routing prose.
+ * Load the schemastery factory a settings namespace needs.
+ *
+ * Read through `createRequire` rather than a static import: a deployment
+ * without the settings capability also has no schemastery, and this plugin must
+ * still mount there with its composed configuration.
+ *
+ * @returns the schema factory, or `undefined` when it cannot be resolved.
  */
-export function readFastctx(): string {
-  return readFileSync(fileURLToPath(BUNDLED_FASTCTX), 'utf8')
+function loadSchemaFactory(): SchemaFactory | undefined {
+  try {
+    const loaded: unknown = createRequire(import.meta.url)('@deepseek-ai/schemastery')
+    const candidate: unknown = typeof loaded === 'function'
+      ? loaded
+      : (loaded as { default?: unknown } | null)?.default
+    if (typeof candidate !== 'function') return undefined
+    const factory = candidate as unknown as Partial<SchemaFactory>
+    if (typeof factory.object !== 'function' || typeof factory.array !== 'function') return undefined
+    return factory as SchemaFactory
+  } catch {
+    return undefined
+  }
 }
 
 /**
- * Whether any probe tool is visible to a scope. A missing registry reads as
- * unavailable, so a deployment without `dsh-tools` degrades instead of failing.
- * @param ctx - Cordis context whose `tools` service is consulted.
- * @param probes - tool names to look up.
- * @param scope - the agent whose visibility applies, or `undefined` for the global view.
- * @returns `true` when at least one probe resolves to a definition.
+ * Report a non-fatal problem without ever breaking the mount.
+ * @param ctx - plugin context owning the logger.
+ * @param message - the detail to report.
  */
-function probesVisible(
-  ctx: Context,
-  probes: readonly string[],
-  scope: Parameters<Context['tools']['get']>[1],
-): boolean {
-  const tools = ctx.get('tools')
-  if (tools === undefined) return false
-  return probes.some((probe) => tools.get(probe, scope) !== undefined)
+function warn(ctx: Context, message: string): void {
+  try {
+    ctx.logger?.warn(`prompt-manager: ${message}`)
+  } catch {
+    /* logging must never be the reason a session cannot assemble a prompt */
+  }
 }
 
 /**
- * Register the contract section, its variables, and the conditional FastCtx
- * routing section.
+ * Message text of an unknown thrown value.
+ * @param error - the caught value.
+ * @returns a human-facing message.
+ */
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * Register the prompt sections, their variables, the settings index, and the
+ * body-file route.
+ *
  * @param ctx - Cordis context carrying the `systemPrompt` service.
- * @param config - optional overrides for placement, name, text, and variables.
+ * @param config - optional overrides for variables and storage.
  */
 export function apply(ctx: Context, config: Config = {}): void {
-  const order = config.order ?? DEFAULT_ORDER
-  if (!Number.isFinite(order)) throw new TypeError(`ctf-prompt: order must be a finite number (got ${String(order)})`)
-
-  const sectionName = config.sectionName ?? DEFAULT_SECTION_NAME
-  if (sectionName.length === 0) throw new TypeError('ctf-prompt: sectionName must be a non-empty string')
-
   const facts = environmentFacts()
   if (config.environment ?? true) {
     for (const [variable, value] of Object.entries(facts)) {
-      ctx.effect(() => ctx.systemPrompt.variable(variable, () => value), `ctf-prompt.variable(${variable})`)
+      ctx.effect(() => ctx.systemPrompt.variable(variable, () => value), `prompt-manager.variable(${variable})`)
     }
   }
   for (const [variable, value] of Object.entries(config.variables ?? {})) {
     if (!VARIABLE_NAME.test(variable)) {
-      throw new Error(`ctf-prompt: invalid variable name ${JSON.stringify(variable)} (must match ${String(VARIABLE_NAME)})`)
+      throw new Error(`prompt-manager: invalid variable name ${JSON.stringify(variable)} (must match ${String(VARIABLE_NAME)})`)
     }
-    ctx.effect(() => ctx.systemPrompt.variable(variable, () => value), `ctf-prompt.variable(${variable})`)
+    ctx.effect(() => ctx.systemPrompt.variable(variable, () => value), `prompt-manager.variable(${variable})`)
   }
 
-  let text = config.text
-  if (text === undefined) {
-    text = config.contractPath === undefined ? readContract() : readFileSync(config.contractPath, 'utf8')
+  const store = new PromptStore(join(resolveStoreDir(config), 'sections'))
+
+  /** The index in force. */
+  const active: PromptEntry[] = []
+  /** Live lookup for section text callbacks. */
+  const byId = new Map<string, PromptEntry>()
+  /** Registered sections, keyed by entry id. */
+  const sections = new Map<string, { disposer: () => void; name: string; order: number }>()
+  /** The resolved settings document, as the engine reads it. */
+  let resolved: unknown = {
+    entries: [],
+    sources: [],
+    mirror: '',
+    proxy: { kind: 'none', url: '' },
   }
-  if (config.environmentLine === true) {
-    text = `Runtime environment: ${facts.os} (${facts.platform}, ${facts.arch}), OS release ${facts.os_release}.\n\n${text}`
+  /** Where each subscribed entry's body lives; refreshed when settings commit. */
+  let locations = new Map<string, SubscriptionLocation>()
+  /** How the engine writes the index back; present only with a settings service. */
+  let writeEntries: ((entries: PromptEntry[]) => Promise<void>) | undefined
+
+  function field(name: string): unknown {
+    return typeof resolved === 'object' && resolved !== null && !Array.isArray(resolved)
+      ? (resolved as Record<string, unknown>)[name]
+      : undefined
   }
 
-  ctx.effect(() => ctx.systemPrompt.section({
-    name: sectionName,
-    order,
-    text,
-    ...(config.complete === true ? { complete: true } : {}),
-  }), 'ctf-prompt.section()')
-
-  if (config.fastctx ?? true) {
-    const probes = config.fastctxTools ?? DEFAULT_FASTCTX_TOOLS
-    const routing = readFastctx()
-    const missing = config.fastctxMissingText ?? FASTCTX_MISSING_TEXT
-    ctx.effect(() => ctx.systemPrompt.section({
-      name: FASTCTX_SECTION_NAME,
-      order: FASTCTX_ORDER,
-      text: (context) => probesVisible(ctx, probes, context.scope) ? routing : missing,
-    }), 'ctf-prompt.section(fastctx)')
+  function sourcesInForce(): PromptSource[] {
+    return parseSources(field('sources'))
   }
+
+  function proxyInForce(): ProxyConfig {
+    const raw = field('proxy')
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return { kind: 'none', url: '' }
+    const record = raw as Record<string, unknown>
+    return {
+      kind: typeof record['kind'] === 'string' ? record['kind'] : 'none',
+      url: typeof record['url'] === 'string' ? record['url'] : '',
+    }
+  }
+
+  function mirrorInForce(): string {
+    return normalizeMirror(field('mirror')) ?? ''
+  }
+
+  /** The next free placement for an entry the engine adds. */
+  function nextOrder(): number {
+    let highest = 0
+    for (const entry of active) if (entry.order > highest) highest = entry.order
+    return highest + 10
+  }
+
+  const subscriptions = new Subscriptions({
+    sources: sourcesInForce,
+    proxy: proxyInForce,
+    mirror: mirrorInForce,
+    root: () => resolveStoreDir(config),
+    entries: () => active,
+    setEntries: async (next) => {
+      if (writeEntries === undefined) throw new Error('订阅需要 settings 服务，当前部署没有挂载它')
+      await writeEntries(next)
+    },
+    nextOrder,
+    warn: (message) => warn(ctx, message),
+  })
+
+  /**
+   * The body that would reach the prompt for one entry. A subscribed entry reads
+   * its snapshot first — its body is upstream's, not this machine's — then the
+   * local body file. Read per assembly, so an edited or freshly applied file
+   * lands on the next model step.
+   */
+  function describe(id: string): ResolvedBody {
+    if (locations.has(id)) {
+      const subscribed = subscriptions.readBody(id)
+      return subscribed === undefined
+        ? { text: '', source: 'empty' }
+        : { text: subscribed, source: 'subscribed' }
+    }
+    try {
+      const stored = store.read(id)
+      if (stored !== undefined) return { text: stored.body, source: 'user' }
+    } catch (error) {
+      warn(ctx, messageOf(error))
+    }
+    return { text: '', source: 'empty' }
+  }
+
+  /** Every entry registers under the plugin's own prefix. */
+  function sectionNameFor(entry: PromptEntry): string {
+    return `${USER_SECTION_PREFIX}${entry.id}`
+  }
+
+  /** The text one entry contributes right now, or `''` when it contributes none. */
+  function render(id: string): string {
+    const entry = byId.get(id)
+    if (entry === undefined || !entry.enabled) return ''
+    return describe(id).text
+  }
+
+  /**
+   * Bring the registered sections in line with the index. An entry whose name
+   * or placement moved is re-registered, because both are fixed when the
+   * section is declared; adding, removing, enabling, and disabling need no
+   * other bookkeeping because section text is resolved per assembly.
+   */
+  function reconcile(entries: readonly PromptEntry[]): void {
+    byId.clear()
+    for (const entry of entries) byId.set(entry.id, entry)
+    for (const [id, registered] of [...sections]) {
+      const entry = byId.get(id)
+      if (entry !== undefined && registered.name === sectionNameFor(entry) && registered.order === entry.order) continue
+      registered.disposer()
+      sections.delete(id)
+    }
+    for (const entry of entries) {
+      if (sections.has(entry.id)) continue
+      const section = sectionNameFor(entry)
+      const entryOrder = entry.order
+      const disposer = ctx.effect(() => ctx.systemPrompt.section({
+        name: section,
+        order: entryOrder,
+        text: () => render(entry.id),
+      }), `prompt-manager.section(${section})`)
+      sections.set(entry.id, { disposer, name: section, order: entryOrder })
+    }
+  }
+
+  /** Ids a new entry may not take: the index, plus every stored body. */
+  function takenIds(): string[] {
+    return [...new Set([...active.map((entry) => entry.id), ...store.ids()])]
+  }
+
+  installPromptRoutes(ctx, {
+    store,
+    describe,
+    idFor: (title) => entryIdFor(title, takenIds()),
+    warn: (message) => warn(ctx, message),
+    subscriptions,
+  })
+
+  const factory = loadSchemaFactory()
+  if (factory === undefined) {
+    warn(ctx, 'schemastery is unavailable, so prompt entries cannot be edited from Settings')
+  } else {
+    ctx.inject(['settings'], (scoped) => {
+      const settings = (scoped as unknown as { settings?: SettingsFace }).settings
+      if (settings === undefined) return
+      let scope: ReturnType<SettingsFace['register']>
+      try {
+        scope = settings.register(SETTINGS_NAMESPACE, buildIndexSchema(factory), {
+          base: {
+            entries: [],
+            sources: [],
+            mirror: '',
+            proxy: { kind: 'none', url: '' },
+          },
+        })
+      } catch (error) {
+        warn(ctx, `cannot register the ${SETTINGS_NAMESPACE} settings namespace: ${messageOf(error)}`)
+        return
+      }
+      writeEntries = async (next) => {
+        await scope.update({ entries: next })
+      }
+      const sync = (): void => {
+        resolved = scope.get()
+        const entries = parseEntries(resolved)
+        active.length = 0
+        active.push(...entries)
+        locations = subscriptions.locate()
+        reconcile(active)
+      }
+      sync()
+      ctx.effect(() => scope.watch(sync), 'prompt-manager: settings watcher')
+    })
+  }
+
+  locations = subscriptions.locate()
+  reconcile(active)
 }

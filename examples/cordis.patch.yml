@@ -1,53 +1,51 @@
-# Mount dsh-ctf-prompt in a DeepSeek Harness profile.
+# Mount dsh-prompt-manager in a DeepSeek Harness profile.
 #
 # Append one of these blocks to `$DSH_HOME/profiles/<profile>/cordis.patch.yml`
 # (the user patch layer, applied after every bundle layer), then restart the
-# profile. `patchReload: live` profiles pick the edit up without a restart.
+# profile. `patchReload: live` profiles pick the config edit up without a
+# restart, but this package also ships a browser half (`client/client.js`,
+# declared through `dsh.client` in package.json) whose bundle and metadata are
+# snapshotted at startup: adding or changing those needs a restart.
 
 # ── Option A: mount a local checkout by relative path ────────────────────────
 # The loader resolves a leading `./` against the profile directory
 # (`new URL(name, ctx.baseUrl)`), so this points at
-# `$DSH_HOME/profiles/<profile>/vendor/dsh-ctf-prompt/lib/index.js`.
+# `$DSH_HOME/profiles/<profile>/vendor/dsh-prompt-manager/lib/index.js`.
 # Copy or symlink this repository to that path first.
 - insert:
-    - id: ctf-prompt
-      name: './vendor/dsh-ctf-prompt/lib/index.js'
+    - id: prompt-manager
+      name: './vendor/dsh-prompt-manager/lib/index.js'
       config:
-        order: 10
+        environment: true
 
 # ── Option B: mount by package name ─────────────────────────────────────────
-# Run `pnpm add github:lolkda/dsh-ctf-prompt` inside the profile directory
-# (or `pnpm add dsh-ctf-prompt` once it is published), then use the name.
+# Run `pnpm add github:lolkda/dsh-prompt-manager` inside the profile directory
+# (or `pnpm add dsh-prompt-manager` once it is published), then use the name.
 # - insert:
-#     - id: ctf-prompt
-#       name: 'dsh-ctf-prompt'
+#     - id: prompt-manager
+#       name: 'dsh-prompt-manager'
 #       config:
-#         order: 10
+#         environment: true
 
-# ── Optional overrides ──────────────────────────────────────────────────────
-# order:           section placement; 10 = after persona, before plan mode/tools
-# sectionName:     registered section name; must not collide with an existing one
-# text:            inline prose, replacing contract.md
-# contractPath:    absolute path to another markdown file
-# complete:        true replaces the whole system prompt with this section
-# environment:     register {{os}} {{os_release}} {{platform}} {{arch}} (default true)
-# variables:       extra {{name}} variables with fixed values
-# environmentLine: prepend a runtime-environment line to the section (default false)
-# fastctx:         register the conditional FastCtx routing section (default true)
-# fastctxTools:    tool names proving FastCtx is available
-#                  (default ['mcp__fastctx__inspect_local_file'])
-# fastctxMissingText: what to say instead when FastCtx is unavailable
+# ── The whole config ────────────────────────────────────────────────────────
+# The plugin ships no prompt of its own, so the only things left to configure are
+# the variables it registers and where the bodies live. Placement, section names,
+# and the bodies themselves are per-entry and live in Settings → 提示词.
+#
+# environment:  register {{os}} {{os_release}} {{platform}} {{arch}} (default true)
+# variables:    extra {{name}} variables with fixed values; names must match
+#               [a-z][a-z0-9_]* and must not repeat a registered one
+# storeDir:     directory holding one markdown file per entry, under its
+#               `sections/` leaf (default $DSH_HOME/prompt-manager). The index
+#               (title / order / enabled) lives in $DSH_HOME/settings.yaml under
+#               the `prompt-manager:` key, written by Settings → 提示词.
 #
 # Example with every value set:
 # - insert:
-#     - id: ctf-prompt
-#       name: './vendor/dsh-ctf-prompt/lib/index.js'
+#     - id: prompt-manager
+#       name: './vendor/dsh-prompt-manager/lib/index.js'
 #       config:
-#         order: 10
 #         environment: true
-#         environmentLine: true
-#         fastctx: true
-#         fastctxTools: ['mcp__fastctx__inspect_local_file']
 #         variables:
 #           shell: 'PowerShell 7 (pwsh)'
-#         sectionName: 'user:ctf-contract'
+#         storeDir: 'C:/Users/me/.dsh/prompt-manager'

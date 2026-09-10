@@ -1,53 +1,38 @@
 /**
- * Inject a CTF / competition agent contract as a DeepSeek Harness system-prompt
- * section.
+ * Manage DeepSeek Harness system-prompt sections from the Web GUI.
  *
- * The prose lives in `contract.md` and `fastctx.md` at the package root and is
- * read at mount time, so the text can be edited without touching code. `order`
- * defaults to 10, which lands the contract right after the deployment persona
- * (order 0) and before plan-mode policy (500) and the per-tool guidance
- * sections (1000+).
+ * The prompt is a list of entries. Each entry's index record — title, order,
+ * enabled — lives in the `prompt-manager` settings namespace, and its markdown
+ * body lives in one file under the store directory, so a person can edit the
+ * prose either in the settings page or in an editor. The plugin ships no entries
+ * of its own: a fresh install starts empty, and prose arrives from the settings
+ * page or from a subscribed repository.
+ *
+ * Section text is resolved per assembly, so enabling, disabling, adding, or
+ * rewriting an entry takes effect on the next model step — no restart. Only the
+ * browser half of this plugin is snapshotted at profile startup.
  *
  * The section text is interpolated against prompt variables at each assembly.
  * The harness registers `{{model}}`, `{{cwd}}`, and `{{provider}}`; this plugin
  * adds `{{os}}`, `{{os_release}}`, `{{platform}}`, and `{{arch}}`, plus any
  * `variables` given in config.
  *
- * The FastCtx routing prose is a second section whose text is resolved per
- * assembly: it is delivered only while the configured FastCtx tools are visible
- * to the agent, and replaced by a short fallback line otherwise.
- *
- * @module dsh-ctf-prompt
+ * @module dsh-prompt-manager
  */
 import type { Context } from '@deepseek-ai/cordis';
+export { MAX_BODY_BYTES, MAX_ENTRIES } from './entries.js';
+export { PromptStore } from './store.js';
+export { ROUTE_PREFIX } from './routes.js';
 /** Cordis plugin name. */
-export declare const name = "ctf-prompt";
+export declare const name = "prompt-manager";
 /** The prompt registry this row contributes to. */
 export declare const inject: string[];
-/**
- * Default section name. Registered in the global layer, so every agent sees it
- * unless that agent's scope registers the same name.
- */
-export declare const DEFAULT_SECTION_NAME = "user:ctf-contract";
-/**
- * Default placement. 10 sits after the deployment persona (order 0) and before
- * plan-mode policy (500) and the per-tool guidance sections (1000+).
- */
-export declare const DEFAULT_ORDER = 10;
-/** Section name for the conditional FastCtx routing prose. */
-export declare const FASTCTX_SECTION_NAME = "user:fastctx-routing";
-/** Placement for the FastCtx routing section, just after the contract. */
-export declare const FASTCTX_ORDER = 20;
-/**
- * Tools whose visibility proves the FastCtx MCP server connected. One probe is
- * enough; a deployment that names the server differently overrides this list.
- */
-export declare const DEFAULT_FASTCTX_TOOLS: string[];
-/**
- * Delivered in place of the routing prose when FastCtx is unavailable, so the
- * model does not chase tools that are not there.
- */
-export declare const FASTCTX_MISSING_TEXT = "The FastCtx MCP server is not available in this session, so its tools cannot be called. Fall back to the harness's own read, grep, glob, and pwsh tools for local file and shell work.";
+/** Section-name prefix of every entry this plugin registers. */
+export declare const USER_SECTION_PREFIX = "user:prompt-manager:";
+/** Settings namespace carrying the entry index. */
+export declare const SETTINGS_NAMESPACE = "prompt-manager";
+/** Directory name appended to the resolved Harness home holding the bodies. */
+export declare const STORE_DIR_NAME = "prompt-manager";
 /** Facts about the process running the harness, exposed as prompt variables. */
 export interface EnvironmentFacts {
     /** Friendly platform name, e.g. `Windows`. */
@@ -59,33 +44,12 @@ export interface EnvironmentFacts {
     /** Raw `process.arch`, e.g. `x64`. */
     arch: string;
 }
-/** Plugin config: how the contract section and its variables are registered. */
+/** Plugin config: the prompt variables it registers and where bodies are stored. */
 export interface Config {
     /**
-     * Section placement. Sections are concatenated in ascending order, so a value
-     * below 500 keeps the contract ahead of plan-mode policy. Defaults to
-     * {@link DEFAULT_ORDER}.
-     */
-    order?: number;
-    /**
-     * Registered section name. Must not collide with a section already registered
-     * in the same layer; an agent scope can shadow it by name. Defaults to
-     * {@link DEFAULT_SECTION_NAME}.
-     */
-    sectionName?: string;
-    /** Inline prose, replacing the bundled `contract.md`. */
-    text?: string;
-    /** Absolute path to another markdown file, replacing the bundled `contract.md`. */
-    contractPath?: string;
-    /**
-     * Treat this section as the complete system prompt, suppressing every other
-     * section. At most one effective complete section may exist per assembly.
-     */
-    complete?: boolean;
-    /**
      * Register {@link environmentFacts} as prompt variables. Defaults to `true`;
-     * set `false` when the contract never references them, or when another row
-     * already owns those names.
+     * set `false` when no entry references them, or when another row already owns
+     * those names.
      */
     environment?: boolean;
     /**
@@ -94,27 +58,11 @@ export interface Config {
      */
     variables?: Record<string, string>;
     /**
-     * Prepend a one-line runtime-environment paragraph to the section text, so
-     * the model learns the platform without editing `contract.md`. Defaults to
-     * `false`.
+     * Directory holding one markdown file per entry, under a `sections/`
+     * subdirectory. Defaults to `$DSH_HOME/prompt-manager`, where `$DSH_HOME` is the
+     * environment value when set and `~/.dsh` otherwise.
      */
-    environmentLine?: boolean;
-    /**
-     * Register the FastCtx routing section. Its text is delivered only while the
-     * `fastctxTools` probes resolve, and replaced by `fastctxMissingText`
-     * otherwise. Defaults to `true`.
-     */
-    fastctx?: boolean;
-    /**
-     * Tool names whose visibility means FastCtx is available. Defaults to
-     * {@link DEFAULT_FASTCTX_TOOLS}.
-     */
-    fastctxTools?: string[];
-    /**
-     * Text delivered instead of the routing prose when FastCtx is unavailable.
-     * Defaults to {@link FASTCTX_MISSING_TEXT}.
-     */
-    fastctxMissingText?: string;
+    storeDir?: string;
 }
 /**
  * Facts about the running process, as prompt-variable values.
@@ -122,20 +70,17 @@ export interface Config {
  */
 export declare function environmentFacts(): EnvironmentFacts;
 /**
- * Read the bundled contract text.
- * @returns the exact UTF-8 contract prose.
+ * Resolve the directory holding the entry bodies and the settings files.
+ * @param config - plugin config; `storeDir` wins when it names a directory.
+ * @returns an absolute path, without the `sections` leaf.
  */
-export declare function readContract(): string;
+export declare function resolveStoreDir(config?: Config): string;
 /**
- * Read the bundled FastCtx routing prose.
- * @returns the exact UTF-8 routing prose.
- */
-export declare function readFastctx(): string;
-/**
- * Register the contract section, its variables, and the conditional FastCtx
- * routing section.
+ * Register the prompt sections, their variables, the settings index, and the
+ * body-file route.
+ *
  * @param ctx - Cordis context carrying the `systemPrompt` service.
- * @param config - optional overrides for placement, name, text, and variables.
+ * @param config - optional overrides for variables and storage.
  */
 export declare function apply(ctx: Context, config?: Config): void;
 //# sourceMappingURL=index.d.ts.map
