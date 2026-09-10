@@ -9,11 +9,11 @@
 | 索引（标题 / 顺序 / 开关） | `$DSH_HOME/settings.yaml` 的 `prompt-manager:` 段 | 设置页，或手改文件 |
 | 正文（markdown） | `$DSH_HOME/prompt-manager/sections/<id>.md` | 设置页，或任意编辑器 |
 
-插件自己**不带任何提示词**：新装起来列表是空的，正文要么在设置页里自己写，要么从可订阅的仓库拉（见下节）。一份现成的提示词包在 [lolkda/dsh-prompt-pack](https://github.com/lolkda/dsh-prompt-pack)，里面是 CTF 作业契约和 FastCtx 工具路由两份。
+插件自己**不带任何提示词**：新装起来列表是空的，正文要么在设置页里自己写，要么从可订阅的仓库拉（见下节）。一份现成的提示词包在 [lolkda/dsh-prompt-pack](https://github.com/lolkda/dsh-prompt-pack)，里面是机器环境、CTF 作业契约和 FastCtx 工具路由三份。
 
-## 从 dsh-ctf-prompt 升级（2.0.0）
+## 从 1.x 升级（2.0.0）
 
-2.0.0 把插件从「CTF 契约注入器」改名成通用的提示词管理器，身份字符串全换了：包名 / 插件名 `dsh-prompt-manager`、settings 命名空间 `prompt-manager`、正文目录 `$DSH_HOME/prompt-manager/sections`、section 名 `user:prompt-manager:*`（原来 `user:ctf-contract` / `user:fastctx-routing`）。升级要动三处：
+2.0.0 把插件从「CTF 契约注入器」改名成通用的提示词管理器，插件名与仓库名一起从 `dsh-ctf-prompt` 换成了 `dsh-prompt-manager`（GitHub 上旧地址会 301 跳转），身份字符串也跟着换了：包名 / 插件名 `dsh-prompt-manager`、settings 命名空间 `prompt-manager`、正文目录 `$DSH_HOME/prompt-manager/sections`、section 名 `user:prompt-manager:*`（原来 `user:ctf-contract` / `user:fastctx-routing`）。升级要动三处：
 
 1. 挂载行改成 `name: './vendor/dsh-prompt-manager/lib/index.js'`，vendor 目录跟着改名。
 2. `settings.yaml` 里的 `ctf-prompt:` 段改名成 `prompt-manager:`，里面的 `entries` 不用动。
