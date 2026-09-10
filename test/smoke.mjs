@@ -302,6 +302,13 @@ try {
     const resolved = schema({ entries: [{ id: 'note', title: '补充说明', order: 40, enabled: true }] })
     assert.equal(resolved.entries.length, 1, 'the real schema must resolve a stored index')
     assert.equal(resolved.entries[0].id, 'note', 'the entry survives the round trip')
+    assert.equal(
+      resolved.entries[0].source,
+      undefined,
+      'a local entry must resolve without a source value, or every entry reads as subscribed',
+    )
+    const subscribedEntry = schema({ entries: [{ id: 'note', order: 40, enabled: true, source: 'src-a' }] })
+    assert.equal(subscribedEntry.entries[0].source, 'src-a', 'a subscribed entry keeps its source')
     assert.equal(resolved.sources.length, 0, 'an absent source list resolves to empty')
     schemaNote = 'real schemastery resolves the index and serializes for the wire'
   } catch (error) {

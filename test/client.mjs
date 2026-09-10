@@ -23,7 +23,9 @@ const BUNDLE = fileURLToPath(new URL('../client/client.js', import.meta.url))
 /** Index the fake settings scope serves. */
 const ENTRIES = [
   { id: 'alpha', title: '第一条', order: 10, enabled: true },
-  { id: 'beta', title: '第二条', order: 20, enabled: false },
+  // The settings schema resolves a missing source to an empty string, so a
+  // local entry reaches the page like this — and must not read as subscribed.
+  { id: 'beta', title: '第二条', order: 20, enabled: false, source: '' },
   { id: 'note', title: '补充说明', order: 40, enabled: true },
 ]
 
@@ -426,6 +428,24 @@ assert.ok(controls.some((label) => label.startsWith('来源（')), 'the list mus
 const tabs = inspect(tree).text
 assert.ok(tabs.includes('全部') && tabs.includes('本地') && tabs.includes('订阅'), 'the list must offer the three layers')
 
+// `source: ''` is what a local entry looks like after the schema resolves it.
+// Badging by presence rather than by value once marked every entry subscribed.
+const badges = () => inspect(renderer.tree, 'span').nodes
+  .filter((node) => String(node.props.className ?? '').includes('__badge'))
+assert.equal(badges().length, 0, 'a local entry must not carry the subscribed badge')
+
+const tabButton = (label) => inspect(renderer.tree, 'button').nodes.find((node) => textOf(node) === label)
+tabButton('本地').props.onClick()
+await renderer.settle()
+const localLayer = inspect(renderer.tree).text
+for (const entry of ENTRIES) assert.ok(localLayer.includes(entry.title), `the local layer must keep ${entry.title}`)
+
+tabButton('订阅').props.onClick()
+await renderer.settle()
+assert.ok(inspect(renderer.tree).text.includes('还没有订阅来的提示词'), 'the subscribed layer must be empty when nothing is subscribed')
+tabButton('全部').props.onClick()
+await renderer.settle()
+
 const switches = inspect(tree, SWITCH).nodes
 assert.equal(switches.length, ENTRIES.length, 'every entry must carry one switch')
 assert.equal(switches[0].props.checked, true, 'the first switch must mirror the index')
@@ -543,7 +563,7 @@ renderer.mount(component, { scope })
 await renderer.settle()
 const subscribedRow = inspect(renderer.tree).text
 assert.ok(subscribedRow.includes('订阅 src-a'), 'a subscribed row names its source')
-assert.ok(subscribedRow.includes('订阅'), 'a subscribed row carries the badge')
+assert.equal(badges().length, 1, 'exactly the subscribed row carries the badge')
 
 const rowButton = inspect(renderer.tree, 'button').nodes.find((node) => textOf(node).includes('订阅来的'))
 rowButton.props.onClick()

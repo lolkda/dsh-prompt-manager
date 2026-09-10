@@ -124,6 +124,17 @@ window.__ModuleLoader__.load({
       return list.filter((entry) => entry !== null && typeof entry === 'object' && typeof entry.id === 'string')
     }
 
+    /**
+     * Whether an entry came from a subscription.
+     *
+     * Tested by value, not by presence: the settings schema resolves a missing
+     * source to an empty string, so `'source' in entry` is true for every local
+     * entry as well — which used to badge them all as subscribed.
+     */
+    function isSubscribed(entry) {
+      return typeof entry.source === 'string' && entry.source.length > 0
+    }
+
     /** The next free placement for an added entry. */
     function nextOrder(entries) {
       let highest = 0
@@ -746,8 +757,8 @@ window.__ModuleLoader__.load({
       // ── the list page ───────────────────────────────────────────────────────
 
       const visible = entries.filter((entry) => {
-        if (filter === 'local') return entry.source === undefined
-        if (filter === 'subscribed') return entry.source !== undefined
+        if (filter === 'local') return !isSubscribed(entry)
+        if (filter === 'subscribed') return isSubscribed(entry)
         return true
       })
 
@@ -763,11 +774,11 @@ window.__ModuleLoader__.load({
         }, [
           h('span', { key: 'title', className: 'dsh-prompt-manager__title' }, entry.title),
           h('span', { key: 'meta', className: 'dsh-prompt-manager__meta' }, [
-            entry.source !== undefined ? `订阅 ${entry.source}` : '',
+            isSubscribed(entry) ? `订阅 ${entry.source}` : '',
             entry.enabled === true ? '' : '已关闭',
           ].filter((part) => part.length > 0).join(' · ')),
         ]),
-        entry.source === undefined ? null : h('span', { key: 'badge', className: 'dsh-prompt-manager__badge' }, '订阅'),
+        isSubscribed(entry) ? h('span', { key: 'badge', className: 'dsh-prompt-manager__badge' }, '订阅') : null,
         h(Switch, {
           key: 'switch',
           checked: entry.enabled === true,
