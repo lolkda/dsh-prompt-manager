@@ -52,6 +52,12 @@ export interface PromptRouteHost {
   warn(message: string): void
   /** The subscription engine, for the source routes. */
   subscriptions: Subscriptions
+  /**
+   * The prompt variables this row registered, with the values in force. Probes
+   * run once at mount, so this is how a deployment checks what they measured
+   * without making a model step.
+   */
+  variables(): Record<string, string>
 }
 
 /**
@@ -100,7 +106,7 @@ function createHandler(host: PromptRouteHost): (request: IncomingMessage, respon
       const tail = slash < 0 ? '' : rest.slice(slash + 1)
 
       if (head === 'status' && method === 'GET') {
-        sendJson(response, 200, host.store.status())
+        sendJson(response, 200, { ...host.store.status(), variables: host.variables() })
         return
       }
       if (head === 'id' && method === 'POST') {

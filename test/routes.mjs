@@ -115,6 +115,7 @@ try {
     idFor: (title) => entryIdFor(title, store.ids()),
     warn: (message) => warnings.push(message),
     subscriptions: engine,
+    variables: () => ({ os: 'Windows', node: '24.18.0' }),
   })
 
   assert.equal(routes.length, 1, 'the plugin must register exactly one route')
@@ -138,6 +139,11 @@ try {
   const status = await call({ url: `${ROUTE_PREFIX}/status` })
   assert.equal(status.state.status, 200, 'status must answer 200')
   assert.equal(status.json().dir, SECTIONS, 'status must report the body directory')
+  assert.deepEqual(
+    status.json().variables,
+    { os: 'Windows', node: '24.18.0' },
+    'status must report the prompt variables in force, so a deployment can check what the probes measured',
+  )
 
   const bodyless = await call({ url: `${ROUTE_PREFIX}/body/nobody` })
   assert.equal(bodyless.json().body, '', 'an entry with no body file must report an empty body')

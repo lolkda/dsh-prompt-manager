@@ -24,7 +24,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prepare": "npm run build",
     "pretest": "npm run build",
-    "test": "node test/smoke.mjs && node test/store.mjs && node test/routes.mjs && node test/source.mjs && node test/net.mjs && node test/sync.mjs && node test/client.mjs"
+    "test": "node test/smoke.mjs && node test/probe.mjs && node test/store.mjs && node test/routes.mjs && node test/source.mjs && node test/net.mjs && node test/sync.mjs && node test/client.mjs"
   },
   "engines": {
     "node": ">=22"

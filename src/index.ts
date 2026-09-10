@@ -13,9 +13,12 @@
  * browser half of this plugin is snapshotted at profile startup.
  *
  * The section text is interpolated against prompt variables at each assembly.
- * The harness registers `{{model}}`, `{{cwd}}`, and `{{provider}}`; this plugin
- * adds `{{os}}`, `{{os_release}}`, `{{platform}}`, and `{{arch}}`, plus any
- * `variables` given in config.
+ * This plugin registers `{{os}}`, `{{os_release}}`, `{{platform}}`, and
+ * `{{arch}}`, plus any fixed `variables` given in config, plus one variable per
+ * `probes` entry — a command whose output is measured once at mount, because a
+ * provider is evaluated synchronously on every assembly and must not spawn a
+ * process. Any other row may register variables as well; a name this plugin
+ * cannot take is reported and skipped rather than failing the mount.
  *
  * @module dsh-prompt-manager
  */
@@ -41,10 +44,19 @@ import { PromptStore } from './store.js'
 import { normalizeMirror, parseSources, type PromptSource } from './source.js'
 import { Subscriptions, type SubscriptionLocation } from './subscriptions.js'
 import type { ProxyConfig } from './net.js'
+import {
+  DEFAULT_PROBE_TEXTS,
+  MAX_PROBES,
+  normalizeProbes,
+  runProbes,
+  type ProbeSpec,
+  type ProbeTexts,
+} from './probe.js'
 
 export { MAX_BODY_BYTES, MAX_ENTRIES } from './entries.js'
 export { PromptStore } from './store.js'
 export { ROUTE_PREFIX } from './routes.js'
+export { MAX_PROBES } from './probe.js'
 
 /** Cordis plugin name. */
 export const name = 'prompt-manager'
@@ -101,6 +113,19 @@ export interface Config {
    * `[a-z][a-z0-9_]*` and must not repeat a registered name.
    */
   variables?: Record<string, string>
+  /**
+   * Commands to run once when this plugin mounts, one prompt variable each. The
+   * value is the first non-empty output line, narrowed by the probe's `pattern`
+   * when it has one; a tool that is absent, silent, or too slow contributes a
+   * placeholder from {@link Config.probeTexts} instead. Nothing here runs again
+   * until the row remounts, so a newly installed tool shows up after a
+   * composition change or a restart, not on its own.
+   */
+  probes?: Record<string, ProbeSpec>
+  /** Replace the placeholder texts a probe contributes when it yields no version. */
+  probeTexts?: Partial<ProbeTexts>
+  /** Total time the pass may spend, in milliseconds. Defaults to 8000. */
+  probeBudgetMs?: number
   /**
    * Directory holding one markdown file per entry, under a `sections/`
    * subdirectory. Defaults to `$DSH_HOME/prompt-manager`, where `$DSH_HOME` is the
@@ -206,17 +231,53 @@ function messageOf(error: unknown): string {
  * @param config - optional overrides for variables and storage.
  */
 export function apply(ctx: Context, config: Config = {}): void {
+  /** Values this row registered, as the status route reports them. */
+  const variableValues: Record<string, string> = {}
+
+  /**
+   * Register one prompt variable, and remember its value for the status route.
+   *
+   * A name another row already owns is reported and skipped: the registry
+   * refuses duplicates, and one contested name must not cost the whole mount.
+   *
+   * @param variable - the `{{name}}` to register; already validated by callers.
+   * @param value - the value every assembly will see.
+   */
+  function registerVariable(variable: string, value: string): void {
+    try {
+      ctx.effect(() => ctx.systemPrompt.variable(variable, () => value), `prompt-manager.variable(${variable})`)
+      variableValues[variable] = value
+    } catch (error) {
+      warn(ctx, `cannot register the prompt variable ${variable}, so entries referencing it will not assemble: ${messageOf(error)}`)
+    }
+  }
+
   const facts = environmentFacts()
   if (config.environment ?? true) {
-    for (const [variable, value] of Object.entries(facts)) {
-      ctx.effect(() => ctx.systemPrompt.variable(variable, () => value), `prompt-manager.variable(${variable})`)
-    }
+    for (const [variable, value] of Object.entries(facts)) registerVariable(variable, value)
   }
   for (const [variable, value] of Object.entries(config.variables ?? {})) {
     if (!VARIABLE_NAME.test(variable)) {
       throw new Error(`prompt-manager: invalid variable name ${JSON.stringify(variable)} (must match ${String(VARIABLE_NAME)})`)
     }
-    ctx.effect(() => ctx.systemPrompt.variable(variable, () => value), `prompt-manager.variable(${variable})`)
+    registerVariable(variable, value)
+  }
+
+  // A malformed probe is a composition mistake, so it fails the mount loudly
+  // rather than leaving a `{{name}}` that no assembly can resolve. Whether a
+  // probed tool exists, stays silent, or hangs is a value, not an error.
+  const probed = normalizeProbes(config.probes)
+  if (probed.problems.length > 0) throw new Error(`prompt-manager: ${probed.problems.join('; ')}`)
+  const probeNames = Object.keys(probed.specs)
+  if (probeNames.length > MAX_PROBES) {
+    throw new Error(`prompt-manager: at most ${String(MAX_PROBES)} probes are allowed, got ${String(probeNames.length)}`)
+  }
+  if (probeNames.length > 0) {
+    const report = runProbes(probed.specs, {
+      texts: { ...DEFAULT_PROBE_TEXTS, ...config.probeTexts },
+      budgetMs: config.probeBudgetMs,
+    })
+    for (const outcome of report.outcomes) registerVariable(outcome.name, outcome.value)
   }
 
   const store = new PromptStore(join(resolveStoreDir(config), 'sections'))
@@ -357,6 +418,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     idFor: (title) => entryIdFor(title, takenIds()),
     warn: (message) => warn(ctx, message),
     subscriptions,
+    variables: () => variableValues,
   })
 
   const factory = loadSchemaFactory()

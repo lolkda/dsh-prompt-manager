@@ -29,16 +29,23 @@
 
 # ── The whole config ────────────────────────────────────────────────────────
 # The plugin ships no prompt of its own, so the only things left to configure are
-# the variables it registers and where the bodies live. Placement, section names,
-# and the bodies themselves are per-entry and live in Settings → 提示词.
+# the variables it registers, the commands it probes, and where the bodies live.
+# Placement, section names, and the bodies themselves are per-entry and live in
+# Settings → 提示词.
 #
-# environment:  register {{os}} {{os_release}} {{platform}} {{arch}} (default true)
-# variables:    extra {{name}} variables with fixed values; names must match
-#               [a-z][a-z0-9_]* and must not repeat a registered one
-# storeDir:     directory holding one markdown file per entry, under its
-#               `sections/` leaf (default $DSH_HOME/prompt-manager). The index
-#               (title / order / enabled) lives in $DSH_HOME/settings.yaml under
-#               the `prompt-manager:` key, written by Settings → 提示词.
+# environment:   register {{os}} {{os_release}} {{platform}} {{arch}} (default true)
+# variables:     extra {{name}} variables with fixed values; names must match
+#                [a-z][a-z0-9_]* and must not repeat a registered one
+# probes:        commands run once at mount, one variable each. Value is the
+#                first non-empty stdout or stderr line, narrowed by `pattern`
+#                when present. Absent / silent / slow tools become a placeholder
+#                instead, so a reference never renders empty. At most 64.
+# probeTexts:    replace those placeholders (missing / empty / timeout / skipped)
+# probeBudgetMs: ceiling on the whole pass (default 8000); the rest are skipped
+# storeDir:      directory holding one markdown file per entry, under its
+#                `sections/` leaf (default $DSH_HOME/prompt-manager). The index
+#                (title / order / enabled) lives in $DSH_HOME/settings.yaml under
+#                the `prompt-manager:` key, written by Settings → 提示词.
 #
 # Example with every value set:
 # - insert:
@@ -48,4 +55,11 @@
 #         environment: true
 #         variables:
 #           shell: 'PowerShell 7 (pwsh)'
+#         probes:
+#           pwsh:   { command: pwsh, args: ['-NoProfile', '-Command', '$PSVersionTable.PSVersion.ToString()'] }
+#           git:    { command: git, args: ['--version'], pattern: '([0-9]+\.[0-9]+\.[0-9]+)' }
+#           node:   { command: node, args: ['--version'], pattern: 'v?([0-9.]+)' }
+#           python: { command: python, args: ['--version'], pattern: '([0-9.]+)' }
+#           rust:   { command: rustc, args: ['--version'] }
+#         probeTexts: { missing: '无' }
 #         storeDir: 'C:/Users/me/.dsh/prompt-manager'

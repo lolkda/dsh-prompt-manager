@@ -159,12 +159,59 @@ $DSH_HOME/prompt-manager/
 | 字段 | 默认值 | 说明 |
 |---|---|---|
 | `environment` | `true` | 注册下面那组环境变量。没有条目用到、或别的行已占用这些名字时设为 `false` |
-| `variables` | 空 | 额外的 `{{名字}}` 变量，键值对形式。名字要满足 `[a-z][a-z0-9_]*`，不能和已注册的重名 |
+| `variables` | 空 | 额外的 `{{名字}}` 变量，固定值，键值对形式。名字要满足 `[a-z][a-z0-9_]*`，不能和已注册的重名 |
+| `probes` | 空 | 挂载时跑一次的命令，每个命令注册一个变量（见下节）。名字规则同 `variables`，最多 64 项 |
+| `probeTexts` | 英文占位符 | 探测没拿到版本时用的文案，可覆盖 `missing` / `empty` / `timeout` / `skipped` |
+| `probeBudgetMs` | `8000` | 整轮探测的时间上限，超出的探测直接记 `skipped` 文案，不再执行 |
 | `storeDir` | `$DSH_HOME/prompt-manager` | 正文文件所在目录（插件在其中使用 `sections/` 子目录）。`$DSH_HOME` 取值规则：显式 `storeDir` > 非空 `$DSH_HOME` > `~/.dsh` |
+
+## 探测：把工具版本变成变量
+
+想写「这台机器上 Git 是几版、有没有 Rust」，手写会过期。`probes` 让插件在**挂载时**跑一遍命令，把结果注册成变量：
+
+```yaml
+config:
+  probes:
+    pwsh:   { command: pwsh,   args: ['-NoProfile', '-Command', '$PSVersionTable.PSVersion.ToString()'] }
+    git:    { command: git,    args: ['--version'], pattern: '([0-9]+\.[0-9]+\.[0-9]+)' }
+    node:   { command: node,   args: ['--version'], pattern: 'v?([0-9.]+)' }
+    python: { command: python, args: ['--version'], pattern: '([0-9.]+)' }
+    rust:   { command: rustc,  args: ['--version'] }
+  probeTexts: { missing: '无' }
+```
+
+```markdown
+- Git {{git}}，Node {{node}}，Python {{python}}，Rust {{rust}}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `command` | 可执行名（走 `PATH`）或绝对路径。不在 `PATH` 上的工具必须写绝对路径 |
+| `args` | 固定参数数组，默认不经 shell 传递 |
+| `shell` | 经平台 shell 执行。Windows 上 `npm` / `pnpm` 这类 `.cmd` 垫片必须设 `true`（不经 shell 直接起会 `EINVAL`） |
+| `pattern` | 可选正则，取第一个捕获组当值；匹配不上就退回整行 |
+| `timeoutMs` | 这一项的超时，默认 1500 |
+
+取值规则，四种结果都是**有值的字符串**：
+
+| 情况 | 值 |
+|---|---|
+| 有输出 | `stdout` 或 `stderr` 的第一条非空行，套 `pattern` 后截断到 120 字符（`java -version` 这类版本走 stderr，一样能取到） |
+| 进程起不来（`ENOENT` / `EINVAL`，或 shell 报 127 / 9009） | `missing` 文案，默认 `(not installed)` |
+| 起来了但什么都没印（例如 Windows 上 `python3` 是个空壳） | `empty` 文案，默认 `(no output)` |
+| 超时 / 预算用尽 | `timeout` / `skipped` 文案 |
+
+几条要紧的话：
+
+- **探测只在挂载时跑一次**。DSH 的变量 provider 是**每次组装同步求值**的，把命令放进去等于每个模型步骤都起一批子进程。所以装/卸了工具后，改一下这一行的 config（`patchReload: live` 会重挂它）或重启 profile 才会更新。实测一轮 5 项约 0.4 秒，全在本机跑。
+- **占位符必须存在**。provider 返回 `undefined` 会让引用它的条目渲染失败，所以插件从不注册空值 —— 缺工具也是一个值。
+- **名字被占了只警告、不炸**。别的行已经注册过同名变量时，这一项被跳过并写进日志；其余变量照常注册，挂载不受影响。
+- **写错的配置会拒绝挂载**。变量名不合法、`probes` 不是键值对、缺 `command`、`pattern` 不是合法正则、超过 64 项 —— 这些是组合文件的错，直接抛错比留下一个渲染不了的 `{{名字}}` 好。
+- **探测在宿主进程里执行，不经 DSH 的工具沙箱**。命令只来自组合配置（部署自己的文件），永不接受来自模型或页面的输入。
 
 ## 变量
 
-section 文本在每次组装时做 `{{变量}}` 插值，所以提示词里可以写实时事实。DSH 自己注册了 `{{model}}`、`{{cwd}}`、`{{provider}}`；本插件另外注册：
+section 文本在每次组装时做 `{{变量}}` 插值，所以提示词里可以写实时事实。**变量必须由某一行注册**：本部署里 `@deepseek-ai/*` 的包没有注册任何提示词变量，所以 `{{...}}` 认的就是下面这 4 个，加上 `variables` 和 `probes` 补进来的那些。
 
 | 变量 | 本机实测值 | 来源 |
 |---|---|---|
@@ -205,7 +252,7 @@ Shell: {{shell}}.
 
 | 方法 + 路径 | 作用 | 网关 |
 |---|---|---|
-| `GET /prompt-manager/status` | `{ dir, writable, ids }` | 仅 loopback 对端 |
+| `GET /prompt-manager/status` | `{ dir, writable, ids, variables }` | 仅 loopback 对端 |
 | `GET /prompt-manager/body/<id>` | `{ body, source, sha1, fileSha1 }` | 仅 loopback 对端 |
 | `PUT /prompt-manager/body/<id>` | 写入正文，body 是 `{ body, fileSha1 }`，上限 256 KiB | loopback + same-origin |
 | `DELETE /prompt-manager/body/<id>` | 删除覆盖文件（= 恢复默认） | loopback + same-origin |
@@ -218,6 +265,7 @@ Shell: {{shell}}.
 | `DELETE /prompt-manager/sources/<slug>` | 删除来源，它导入的条目一起移除 | loopback + same-origin |
 
 - **并发保护**：页面读到的 `fileSha1` 会随写入回传，文件在编辑期间被外部改动就返回 409，页面提示重载；新建条目用 `fileSha1: null` 表示"这个 id 必须还没有文件"。
+- **`/status` 顺带回报变量表**：探测在挂载时跑完就固定了，`status` 里的 `variables` 是不用等一个模型步骤就能核对探测结果的地方。
 - **路径安全**：`<id>` 必须匹配 `^[a-z0-9][a-z0-9-]*$`（最长 64 字符），解析后的路径必须仍在 `sections/` 里，否则 400，不会碰文件系统。
 - **原子写**：先写临时文件再 `rename`，中断不会留下半截正文。
 - **添加来源**：Host 只做三件事 —— 校验 `repo`/`ref`/`mirror`（`mirror` 只收 https 源，且不带凭据、查询、锚点）、分配一个未占用的 slug、把规范化后的三样回显给页面。来源列表本身仍由设置页写进 settings，和条目索引同一条通道，所以不存在第二个写入者。重复的 `repo@ref` 直接 409（同一个仓库导两遍会让条目翻倍），来源总数上限 20、每个来源最多 50 条提示词。
@@ -237,7 +285,8 @@ dsh --profile web --dump-config
 DSH_PACKAGES="$DSH_HOME/profiles/node_modules/@deepseek-ai" npm test
 ```
 
-- `test/smoke.mjs`：把插件挂进真实的 `SystemPrompt` 注册表，断言新装不带任何 section、settings 驱动的增删开关与排序、正文来自本地文件 / 订阅快照 / 缺失三种情况、垃圾索引清洗、四个环境变量与严格插值，以及真实 schemastery 能解析这份索引 schema。
+- `test/smoke.mjs`：把插件挂进真实的 `SystemPrompt` 注册表，断言新装不带任何 section、settings 驱动的增删开关与排序、正文来自本地文件 / 订阅快照 / 缺失三种情况、垃圾索引清洗、四个环境变量与严格插值、探测变量（含缺工具与撞名两种情况），以及真实 schemastery 能解析这份索引 schema。
+- `test/probe.mjs`：探测的取值规则（stdout / stderr / 空输出 / 起不来 / 超时 / 预算用尽）、`pattern` 抽取与三种退回、截断、`probes` 配置的形状校验，末尾再用真 runner 跑两个真命令。
 - `test/store.mjs`：id 语法、路径不外逃、`absent`/`sha1`/`any` 三种写入栅栏、256 KiB 上限、原子写不留临时文件、目录不可用时的降级。
 - `test/routes.mjs`：用假 req/res 直打路由 handler，覆盖 loopback 与 same-origin 网关、409 栅栏、400/404/405 状态码、遍历 id、超大请求，新增来源的校验（repo / ref / mirror）与 slug 分配、重复来源与来源上限，以及订阅源的六个动作与「订阅正文只读」。
 - `test/source.mjs`：仓库/ref/slug 语法、条目 id 派生（长 slug 下仍逐文件唯一）、清单校验（含路径遍历）、镜像的两种写法与 https-only、atom feed 取 head sha。
@@ -252,7 +301,7 @@ DSH_PACKAGES="$DSH_HOME/profiles/node_modules/@deepseek-ai" npm test
 ## 注意
 
 - **条目正文里可以写 `{{变量}}`**，但引用的名字必须已注册。smoke test 会把一段带环境变量的正文完整渲染一遍，未注册的引用会让它直接失败。
-- **section 名是派生出来的**：每条固定注册为 `user:prompt-manager:<id>`，所以只要 id 不重复就不会和 `deployment:persona`、`harness:identity`、`app:web-surface` 这类已注册的 section 撞名。变量名同理，不能与已注册的重名。
+- **section 名是派生出来的**：每条固定注册为 `user:prompt-manager:<id>`，所以只要 id 不重复就不会和 `deployment:persona`、`harness:identity`、`app:web-surface` 这类已注册的 section 撞名。变量名撞上别的行时，这一项被跳过并记一条警告，挂载照常进行 —— 但正文里那个 `{{名字}}` 就会让组装失败，所以看到警告要么改名，要么把引用删掉。
 - **`package.json` 里的 `dsh.client` 和 `client/client.js` 必须同时存在**：只声明浏览器半边而没有 bundle，浏览器插件表在挂载时会直接报错。两者的包名必须都叫 `dsh-prompt-manager`。
 - **改 `cordis.patch.yml` 会热加载**：`patchReload: live` 时 HMR 会为这个 patch 文件单独起一个精确 watcher，所以增删 row 不用重启。
 - **改插件代码要重启**：DSH 不监听插件模块文件，而 loader 按 URL 缓存 ESM 模块。浏览器半边的包元数据（`dsh.client`）与 bundle 字节也在启动时快照，所以 `git pull` 或改完 `lib/`、`client/` 之后必须重启 profile 才生效。
@@ -266,6 +315,7 @@ src/index.ts                插件入口：设置索引注册、section 调和�
 src/entries.ts              条目模型、id 语法、settings schema
 src/store.ts                正文文件存储（路径限定、原子写、sha1 栅栏）
 src/source.ts               订阅源：slug/id 派生、清单校验、镜像拼接、URL 构造
+src/probe.ts                挂载时探测：命令取值规则、配置校验、结果兜底
 src/net.ts                  唯一出网口径：代理 dispatcher 与条件 GET
 src/sync.ts                 源的三槽轮转：检查、应用、还原、state.json
 src/subscriptions.ts        订阅引擎：源列表、检查/应用/还原、索引同步
@@ -274,6 +324,7 @@ client/client.js            浏览器半边（设置页），手写的懒加载 
 lib/                        构建产物，loader 实际加载的文件
 test/smoke.mjs              宿主行为冒烟测试（跑的是构建产物）
 test/store.mjs              存储测试
+test/probe.mjs              探测测试（注入 runner，末尾两个真命令）
 test/routes.mjs             路由测试
 test/source.mjs             订阅源与清单测试
 test/net.mjs                出网与代理测试（本地假镜像）

@@ -13,16 +13,21 @@
  * browser half of this plugin is snapshotted at profile startup.
  *
  * The section text is interpolated against prompt variables at each assembly.
- * The harness registers `{{model}}`, `{{cwd}}`, and `{{provider}}`; this plugin
- * adds `{{os}}`, `{{os_release}}`, `{{platform}}`, and `{{arch}}`, plus any
- * `variables` given in config.
+ * This plugin registers `{{os}}`, `{{os_release}}`, `{{platform}}`, and
+ * `{{arch}}`, plus any fixed `variables` given in config, plus one variable per
+ * `probes` entry — a command whose output is measured once at mount, because a
+ * provider is evaluated synchronously on every assembly and must not spawn a
+ * process. Any other row may register variables as well; a name this plugin
+ * cannot take is reported and skipped rather than failing the mount.
  *
  * @module dsh-prompt-manager
  */
 import type { Context } from '@deepseek-ai/cordis';
+import { type ProbeSpec, type ProbeTexts } from './probe.js';
 export { MAX_BODY_BYTES, MAX_ENTRIES } from './entries.js';
 export { PromptStore } from './store.js';
 export { ROUTE_PREFIX } from './routes.js';
+export { MAX_PROBES } from './probe.js';
 /** Cordis plugin name. */
 export declare const name = "prompt-manager";
 /** The prompt registry this row contributes to. */
@@ -57,6 +62,19 @@ export interface Config {
      * `[a-z][a-z0-9_]*` and must not repeat a registered name.
      */
     variables?: Record<string, string>;
+    /**
+     * Commands to run once when this plugin mounts, one prompt variable each. The
+     * value is the first non-empty output line, narrowed by the probe's `pattern`
+     * when it has one; a tool that is absent, silent, or too slow contributes a
+     * placeholder from {@link Config.probeTexts} instead. Nothing here runs again
+     * until the row remounts, so a newly installed tool shows up after a
+     * composition change or a restart, not on its own.
+     */
+    probes?: Record<string, ProbeSpec>;
+    /** Replace the placeholder texts a probe contributes when it yields no version. */
+    probeTexts?: Partial<ProbeTexts>;
+    /** Total time the pass may spend, in milliseconds. Defaults to 8000. */
+    probeBudgetMs?: number;
     /**
      * Directory holding one markdown file per entry, under a `sections/`
      * subdirectory. Defaults to `$DSH_HOME/prompt-manager`, where `$DSH_HOME` is the

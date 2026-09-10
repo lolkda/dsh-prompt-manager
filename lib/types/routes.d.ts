@@ -29,6 +29,12 @@ export interface PromptRouteHost {
     warn(message: string): void;
     /** The subscription engine, for the source routes. */
     subscriptions: Subscriptions;
+    /**
+     * The prompt variables this row registered, with the values in force. Probes
+     * run once at mount, so this is how a deployment checks what they measured
+     * without making a model step.
+     */
+    variables(): Record<string, string>;
 }
 /**
  * Register the prompt-store route.

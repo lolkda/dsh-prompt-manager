@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import { SETTINGS_NAMESPACE, apply, environmentFacts, inject, name } from '../lib/index.js'
+import { MAX_PROBES, SETTINGS_NAMESPACE, apply, environmentFacts, inject, name } from '../lib/index.js'
 import { buildIndexSchema } from '../lib/entries.js'
 
 /** Throwaway home for the body files, so the test never touches a real one. */
@@ -247,6 +247,39 @@ try {
     'environment:false must leave the built-in variables unregistered, so a reference fails loudly',
   )
 
+  // ── probes register as variables, and their failures stay values ────────────
+
+  writeBody('tooling', 'node={{nodever}} rust={{rustver}}')
+  const probed = fakeSettings([])
+  const withProbes = await assembleWith({
+    probes: {
+      nodever: { command: process.execPath, args: ['--version'], pattern: 'v?([0-9.]+)' },
+      rustver: { command: 'prompt-manager-definitely-not-a-command', args: ['--version'] },
+    },
+    probeTexts: { missing: '无' },
+  }, BARE, [probed.plugin])
+  probed.state.value = { entries: [{ id: 'tooling', title: '工具版本', order: 10, enabled: true }] }
+  probed.state.watcher()
+  const probedPrompt = (await withProbes.read()).prompt
+  assert.equal(
+    probedPrompt,
+    `node=${process.version.replace(/^v/, '')} rust=无`,
+    `probes must be measured at mount and rendered like any variable: ${probedPrompt}`,
+  )
+
+  // A name another row already owns is reported and skipped, and the rest of the
+  // variables still register: one contested name must not cost the mount.
+  const contested = fakeSettings([])
+  const guarded = await assembleWith({ probes: { os: { command: process.execPath, args: ['--version'] } } }, BARE, [contested.plugin])
+  writeBody('contested', 'os={{os}}')
+  contested.state.value = { entries: [{ id: 'contested', title: '重名', order: 10, enabled: true }] }
+  contested.state.watcher()
+  assert.equal(
+    (await guarded.read()).prompt,
+    `os=${facts.os}`,
+    'a probe whose name is already registered must be skipped, leaving the original variable intact',
+  )
+
   // ── unusable index entries are dropped, never thrown ────────────────────────
 
   settings.state.value = { entries: [{ id: '../escape', title: 'bad', order: 1, enabled: true }, 'nonsense'] }
@@ -293,6 +326,23 @@ try {
     () => apply(fakeCtx, { storeDir: STORE_ROOT, variables: { 'Bad-Name': 'x' } }),
     /invalid variable name/,
   )
+  assert.throws(
+    () => apply(fakeCtx, { storeDir: STORE_ROOT, probes: { 'Bad-Name': { command: 'x' } } }),
+    /invalid variable name|not a usable variable name/,
+    'a malformed probe name must fail the mount rather than leave an unusable reference',
+  )
+  assert.throws(
+    () => apply(fakeCtx, { storeDir: STORE_ROOT, probes: { tool: { args: ['--version'] } } }),
+    /needs a non-empty command/,
+    'a probe without a command must fail the mount',
+  )
+  const tooMany = {}
+  for (let index = 0; index <= MAX_PROBES; index += 1) tooMany[`tool${String(index)}`] = { command: 'x' }
+  assert.throws(
+    () => apply(fakeCtx, { storeDir: STORE_ROOT, probes: tooMany }),
+    /at most 64 probes/,
+    'the probe cap must fail the mount rather than probe silently in part',
+  )
 
   console.log('smoke ok')
   console.log('  empty       a fresh install registers no section and injects nothing')
@@ -300,6 +350,7 @@ try {
   console.log('  index       settings-driven add / enable / disable / order / sanitize')
   console.log('  bodies      store file, subscribed snapshot, and a bodyless entry')
   console.log(`  variables   os=${facts.os} platform=${facts.platform} arch=${facts.arch} release=${facts.os_release}`)
+  console.log(`  probes      measured at mount (node ${process.version}), absent tool -> 无, contested name skipped`)
   console.log(`  schema      ${schemaNote}`)
 } finally {
   rmSync(STORE_ROOT, { recursive: true, force: true })
