@@ -3,10 +3,10 @@
  *
  * The prompt is a list of entries. Each entry's index record — title, order,
  * enabled — lives in the `prompt-manager` settings namespace, and its markdown
- * body lives in one file under the store directory, so a person can edit the
- * prose either in the settings page or in an editor. The plugin ships no entries
- * of its own: a fresh install starts empty, and prose arrives from the settings
- * page or from a subscribed repository.
+ * body is resolved from the first source that has one: a subscription snapshot,
+ * a file under the store directory, or the body this package ships. A fresh
+ * install therefore starts with the built-in machine-environment prompt, and
+ * anything a person writes or subscribes replaces it.
  *
  * Section text is resolved per assembly, so enabling, disabling, adding, or
  * rewriting an entry takes effect on the next model step — no restart. Only the
@@ -28,6 +28,7 @@ export { MAX_BODY_BYTES, MAX_ENTRIES } from './entries.js';
 export { PromptStore } from './store.js';
 export { ROUTE_PREFIX } from './routes.js';
 export { MAX_PROBES } from './probe.js';
+export { BUILTIN_PROMPTS } from './entries.js';
 /** Cordis plugin name. */
 export declare const name = "prompt-manager";
 /** The prompt registry this row contributes to. */
@@ -69,8 +70,17 @@ export interface Config {
      * placeholder from {@link Config.probeTexts} instead. Nothing here runs again
      * until the row remounts, so a newly installed tool shows up after a
      * composition change or a restart, not on its own.
+     *
+     * These override {@link DEFAULT_PROBES} by name.
      */
     probes?: Record<string, ProbeSpec>;
+    /**
+     * Run the package's own {@link DEFAULT_PROBES} alongside `probes`. Defaults to
+     * `true`, which is what makes the built-in environment entry resolve without
+     * any configuration. Set `false` only together with entries that reference none
+     * of those variables.
+     */
+    probeDefaults?: boolean;
     /** Replace the placeholder texts a probe contributes when it yields no version. */
     probeTexts?: Partial<ProbeTexts>;
     /** Total time the pass may spend, in milliseconds. Defaults to 8000. */

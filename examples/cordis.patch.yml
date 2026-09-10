@@ -28,10 +28,10 @@
 #         environment: true
 
 # ── The whole config ────────────────────────────────────────────────────────
-# The plugin ships no prompt of its own, so the only things left to configure are
-# the variables it registers, the commands it probes, and where the bodies live.
-# Placement, section names, and the bodies themselves are per-entry and live in
-# Settings → 提示词.
+# The package ships one prompt body (environment.md, entry id `env`), and the
+# only things left to configure are the variables it registers, the commands it
+# probes, and where per-entry bodies live. Placement, section names, and the
+# bodies themselves are per-entry and live in Settings → 提示词.
 #
 # environment:   register {{os}} {{os_release}} {{platform}} {{arch}} (default true)
 # variables:     extra {{name}} variables with fixed values; names must match
@@ -40,6 +40,11 @@
 #                first non-empty stdout or stderr line, narrowed by `pattern`
 #                when present. Absent / silent / slow tools become a placeholder
 #                instead, so a reference never renders empty. At most 64.
+#                Merged by name over the package's own defaults, which are the
+#                five the built-in entry references: pwsh, bash, git, node, python.
+# probeDefaults: run those package defaults as well (default true). Turning them
+#                off while the built-in entry is in force leaves its variables
+#                unregistered, which fails assembly rather than rendering empty.
 # probeTexts:    replace those placeholders (missing / empty / timeout / skipped)
 # probeBudgetMs: ceiling on the whole pass (default 8000); the rest are skipped
 # storeDir:      directory holding one markdown file per entry, under its

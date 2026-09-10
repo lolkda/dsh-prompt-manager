@@ -9,7 +9,7 @@
 | 索引（标题 / 顺序 / 开关） | `$DSH_HOME/settings.yaml` 的 `prompt-manager:` 段 | 设置页，或手改文件 |
 | 正文（markdown） | `$DSH_HOME/prompt-manager/sections/<id>.md` | 设置页，或任意编辑器 |
 
-插件自己**不带任何提示词**：新装起来列表是空的，正文要么在设置页里自己写，要么从可订阅的仓库拉（见下节）。一份现成的提示词包在 [lolkda/dsh-prompt-pack](https://github.com/lolkda/dsh-prompt-pack)，里面是机器环境、CTF 作业契约和 FastCtx 工具路由三份。
+插件**只内置一条**提示词：机器环境（系统 / shell / 工具链版本，值由变量在挂载时探测填充）。其余提示词自己写，或从可订阅的仓库拉（见下节）。一份现成的提示词包在 [lolkda/dsh-prompt-pack](https://github.com/lolkda/dsh-prompt-pack)，里面是 CTF 作业契约和 FastCtx 工具路由两份。
 
 ## 从 1.x 升级（2.0.0）
 
@@ -161,13 +161,31 @@ $DSH_HOME/prompt-manager/
 | `environment` | `true` | 注册下面那组环境变量。没有条目用到、或别的行已占用这些名字时设为 `false` |
 | `variables` | 空 | 额外的 `{{名字}}` 变量，固定值，键值对形式。名字要满足 `[a-z][a-z0-9_]*`，不能和已注册的重名 |
 | `probes` | 空 | 挂载时跑一次的命令，每个命令注册一个变量（见下节）。名字规则同 `variables`，最多 64 项 |
+| `probeDefaults` | `true` | 同时运行包内自带的探测默认值（`pwsh` / `bash` / `git` / `node` / `python`），内置条目靠它们解析变量。设为 `false` 只跑 `probes` 里写的 |
 | `probeTexts` | 英文占位符 | 探测没拿到版本时用的文案，可覆盖 `missing` / `empty` / `timeout` / `skipped` |
 | `probeBudgetMs` | `8000` | 整轮探测的时间上限，超出的探测直接记 `skipped` 文案，不再执行 |
 | `storeDir` | `$DSH_HOME/prompt-manager` | 正文文件所在目录（插件在其中使用 `sections/` 子目录）。`$DSH_HOME` 取值规则：显式 `storeDir` > 非空 `$DSH_HOME` > `~/.dsh` |
 
+## 内置条目
+
+包里只有一条：`environment.md`（id `env`，标题「机器环境」，order 5）。正文是随包发布的 markdown 文件，索引放在 settings 的 **base 层**，所以新装起来打开设置页就能看到它、能拨开关、也能编辑。`id` 相同时的取值优先级：
+
+| 优先级 | 来源 | 说明 |
+|---|---|---|
+| 1 | 订阅快照 | 该 id 来自订阅源时，正文只读，跟随上游 |
+| 2 | 本机正文文件 | `sections/env.md` 存在就用它 —— 在设置页保存正文即写到这儿 |
+| 3 | 包内正文 | 上面都没有时的默认内容（设置页会标「插件内置正文，保存即覆盖」） |
+
+两点要知道的：
+
+- **关掉**在设置页把开关拨掉即可。**删掉**会往 user 层写一份不含该 id 的 `entries` 数组，base 层随之被整体遮蔽 —— 想恢复就在 `settings.yaml` 里删掉 `prompt-manager.entries` 这一项，或手写回一条 `{id: env, title: 机器环境, order: 5, enabled: true}`。
+- 部署**没有 settings 服务**时也照样注入（此时索引就是内置条目本身），不会被静默丢掉。
+
+内置正文引用的 `{{...}}` 由包内自带的探测默认值提供（下一节），所以开箱即可渲染。反过来，把 `probeDefaults` 关掉却留着这条条目，组装会因为未注册的变量直接抛错 —— 两者是一对。
+
 ## 探测：把工具版本变成变量
 
-想写「这台机器上 Git 是几版、有没有 Rust」，手写会过期。`probes` 让插件在**挂载时**跑一遍命令，把结果注册成变量：
+想写「这台机器上 Git 是几版、有没有 Rust」，手写会过期。`probes` 让插件在**挂载时**跑一遍命令，把结果注册成变量。包内已经带了一组默认探测（`pwsh` / `bash` / `git` / `node` / `python`，正是内置条目用到的那几个），下面的写法是覆盖或补充它们：
 
 ```yaml
 config:
@@ -204,6 +222,7 @@ config:
 几条要紧的话：
 
 - **探测只在挂载时跑一次**。DSH 的变量 provider 是**每次组装同步求值**的，把命令放进去等于每个模型步骤都起一批子进程。所以装/卸了工具后，改一下这一行的 config（`patchReload: live` 会重挂它）或重启 profile 才会更新。实测一轮 5 项约 0.4 秒，全在本机跑。
+- **`probes` 与默认值按名字合并**，config 里的同名项覆盖默认值（例如这台机器要把 `bash` 写成绝对路径，就在 `probes.bash` 里覆盖）。整组默认值用 `probeDefaults: false` 关掉。
 - **占位符必须存在**。provider 返回 `undefined` 会让引用它的条目渲染失败，所以插件从不注册空值 —— 缺工具也是一个值。
 - **名字被占了只警告、不炸**。别的行已经注册过同名变量时，这一项被跳过并写进日志；其余变量照常注册，挂载不受影响。
 - **写错的配置会拒绝挂载**。变量名不合法、`probes` 不是键值对、缺 `command`、`pattern` 不是合法正则、超过 64 项 —— 这些是组合文件的错，直接抛错比留下一个渲染不了的 `{{名字}}` 好。
@@ -285,7 +304,7 @@ dsh --profile web --dump-config
 DSH_PACKAGES="$DSH_HOME/profiles/node_modules/@deepseek-ai" npm test
 ```
 
-- `test/smoke.mjs`：把插件挂进真实的 `SystemPrompt` 注册表，断言新装不带任何 section、settings 驱动的增删开关与排序、正文来自本地文件 / 订阅快照 / 缺失三种情况、垃圾索引清洗、四个环境变量与严格插值、探测变量（含缺工具与撞名两种情况），以及真实 schemastery 能解析这份索引 schema。
+- `test/smoke.mjs`：把插件挂进真实的 `SystemPrompt` 注册表，断言新装即注入内置的机器环境条目（含包内正文的静态校验、本机正文覆盖内置、base 层索引）、settings 驱动的增删开关与排序、正文来自本地文件 / 订阅快照 / 缺失三种情况、垃圾索引清洗、四个环境变量与严格插值、探测变量（含缺工具与撞名两种情况），以及真实 schemastery 能解析这份索引 schema。
 - `test/probe.mjs`：探测的取值规则（stdout / stderr / 空输出 / 起不来 / 超时 / 预算用尽）、`pattern` 抽取与三种退回、截断、`probes` 配置的形状校验，末尾再用真 runner 跑两个真命令。
 - `test/store.mjs`：id 语法、路径不外逃、`absent`/`sha1`/`any` 三种写入栅栏、256 KiB 上限、原子写不留临时文件、目录不可用时的降级。
 - `test/routes.mjs`：用假 req/res 直打路由 handler，覆盖 loopback 与 same-origin 网关、409 栅栏、400/404/405 状态码、遍历 id、超大请求，新增来源的校验（repo / ref / mirror）与 slug 分配、重复来源与来源上限，以及订阅源的六个动作与「订阅正文只读」。
@@ -312,10 +331,10 @@ DSH_PACKAGES="$DSH_HOME/profiles/node_modules/@deepseek-ai" npm test
 
 ```
 src/index.ts                插件入口：设置索引注册、section 调和、变量、路由装配
-src/entries.ts              条目模型、id 语法、settings schema
+src/entries.ts              条目模型、id 语法、settings schema、内置条目与包内正文
 src/store.ts                正文文件存储（路径限定、原子写、sha1 栅栏）
 src/source.ts               订阅源：slug/id 派生、清单校验、镜像拼接、URL 构造
-src/probe.ts                挂载时探测：命令取值规则、配置校验、结果兜底
+src/probe.ts                挂载时探测：命令取值规则、配置校验、结果兜底、默认探测组
 src/net.ts                  唯一出网口径：代理 dispatcher 与条件 GET
 src/sync.ts                 源的三槽轮转：检查、应用、还原、state.json
 src/subscriptions.ts        订阅引擎：源列表、检查/应用/还原、索引同步
@@ -331,6 +350,7 @@ test/net.mjs                出网与代理测试（本地假镜像）
 test/sync.mjs               检查/应用/还原测试
 test/client.mjs             浏览器 bundle 测试
 examples/cordis.patch.yml   可直接抄进 profile 的 patch 行
+environment.md              内置的机器环境条目正文（随包发布，可被本机正文覆盖）
 tsconfig.json               构建与类型检查配置
 ```
 

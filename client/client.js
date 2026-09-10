@@ -319,6 +319,8 @@ window.__ModuleLoader__.load({
         || draft.title !== saved.title || draft.order !== saved.order || draft.body !== saved.body)
       // A subscribed body belongs to upstream: it is shown, never edited here.
       const subscribedDraft = draft !== null && draft.source === 'subscribed'
+      // A built-in body ships with the plugin; editing and saving overrides it.
+      const builtinDraft = draft !== null && draft.source === 'builtin'
 
       /** Load one entry's body and enter the editor page. */
       const open = React.useCallback(async (id) => {
@@ -604,7 +606,11 @@ window.__ModuleLoader__.load({
             h('span', { key: 'id', className: 'dsh-prompt-manager__note' }, [
               `id ${draft.id}`,
               draft.isNew ? '（尚未保存）' : '',
-              subscribedDraft ? ' · 订阅正文，只读' : (draft.fileSha1 === null ? ' · 还没有正文文件' : ' · 已保存'),
+              subscribedDraft
+                ? ' · 订阅正文，只读'
+                : builtinDraft
+                  ? ' · 插件内置正文，保存即覆盖'
+                  : (draft.fileSha1 === null ? ' · 还没有正文文件' : ' · 已保存'),
             ].join('')),
           ]),
           h('div', { key: 'fields', className: 'dsh-prompt-manager__fields' }, [
@@ -629,7 +635,9 @@ window.__ModuleLoader__.load({
             ]),
           ]),
           h('div', { key: 'body', className: 'dsh-prompt-manager__pane' }, [
-            h('span', { key: 'label', className: 'dsh-prompt-manager__paneLabel' }, subscribedDraft ? 'Markdown 正文（来自订阅，只读）' : 'Markdown 正文'),
+            h('span', { key: 'label', className: 'dsh-prompt-manager__paneLabel' }, subscribedDraft
+              ? 'Markdown 正文（来自订阅，只读）'
+              : builtinDraft ? 'Markdown 正文（插件内置，保存即覆盖）' : 'Markdown 正文'),
             h('textarea', {
               key: 'textarea',
               value: draft.body,
@@ -650,7 +658,9 @@ window.__ModuleLoader__.load({
               : null,
             subscribedDraft
               ? h('span', { key: 'note', className: 'dsh-prompt-manager__note' }, '订阅条目的正文来自上游，只能通过「检查更新」改；想自己改就先 fork。')
-              : null,
+              : builtinDraft
+                ? h('span', { key: 'note', className: 'dsh-prompt-manager__note' }, '这条正文是插件内置的默认内容；保存后会写成本机的覆盖版本，插件升级也不会覆盖它。')
+                : null,
           ]),
           statusLine,
         ])

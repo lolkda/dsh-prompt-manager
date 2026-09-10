@@ -3,10 +3,10 @@
  *
  * The prompt is a list of entries. Each entry's index record — title, order,
  * enabled — lives in the `prompt-manager` settings namespace, and its markdown
- * body lives in one file under the store directory, so a person can edit the
- * prose either in the settings page or in an editor. The plugin ships no entries
- * of its own: a fresh install starts empty, and prose arrives from the settings
- * page or from a subscribed repository.
+ * body is resolved from the first source that has one: a subscription snapshot,
+ * a file under the store directory, or the body this package ships. A fresh
+ * install therefore starts with the built-in machine-environment prompt, and
+ * anything a person writes or subscribes replaces it.
  *
  * Section text is resolved per assembly, so enabling, disabling, adding, or
  * rewriting an entry takes effect on the next model step — no restart. Only the
@@ -32,9 +32,12 @@ import { createRequire } from 'node:module'
 import { homedir, release } from 'node:os'
 import { join } from 'node:path'
 import {
+  BUILTIN_PROMPTS,
   buildIndexSchema,
+  builtinEntries,
   entryIdFor,
   parseEntries,
+  readBuiltinBody,
   type PromptEntry,
   type ResolvedBody,
   type SchemaFactory,
@@ -45,6 +48,7 @@ import { normalizeMirror, parseSources, type PromptSource } from './source.js'
 import { Subscriptions, type SubscriptionLocation } from './subscriptions.js'
 import type { ProxyConfig } from './net.js'
 import {
+  DEFAULT_PROBES,
   DEFAULT_PROBE_TEXTS,
   MAX_PROBES,
   normalizeProbes,
@@ -57,6 +61,7 @@ export { MAX_BODY_BYTES, MAX_ENTRIES } from './entries.js'
 export { PromptStore } from './store.js'
 export { ROUTE_PREFIX } from './routes.js'
 export { MAX_PROBES } from './probe.js'
+export { BUILTIN_PROMPTS } from './entries.js'
 
 /** Cordis plugin name. */
 export const name = 'prompt-manager'
@@ -120,8 +125,17 @@ export interface Config {
    * placeholder from {@link Config.probeTexts} instead. Nothing here runs again
    * until the row remounts, so a newly installed tool shows up after a
    * composition change or a restart, not on its own.
+   *
+   * These override {@link DEFAULT_PROBES} by name.
    */
   probes?: Record<string, ProbeSpec>
+  /**
+   * Run the package's own {@link DEFAULT_PROBES} alongside `probes`. Defaults to
+   * `true`, which is what makes the built-in environment entry resolve without
+   * any configuration. Set `false` only together with entries that reference none
+   * of those variables.
+   */
+  probeDefaults?: boolean
   /** Replace the placeholder texts a probe contributes when it yields no version. */
   probeTexts?: Partial<ProbeTexts>
   /** Total time the pass may spend, in milliseconds. Defaults to 8000. */
@@ -268,12 +282,16 @@ export function apply(ctx: Context, config: Config = {}): void {
   // probed tool exists, stays silent, or hangs is a value, not an error.
   const probed = normalizeProbes(config.probes)
   if (probed.problems.length > 0) throw new Error(`prompt-manager: ${probed.problems.join('; ')}`)
-  const probeNames = Object.keys(probed.specs)
+  const specs: Record<string, ProbeSpec> = {
+    ...((config.probeDefaults ?? true) ? DEFAULT_PROBES : {}),
+    ...probed.specs,
+  }
+  const probeNames = Object.keys(specs)
   if (probeNames.length > MAX_PROBES) {
     throw new Error(`prompt-manager: at most ${String(MAX_PROBES)} probes are allowed, got ${String(probeNames.length)}`)
   }
   if (probeNames.length > 0) {
-    const report = runProbes(probed.specs, {
+    const report = runProbes(specs, {
       texts: { ...DEFAULT_PROBE_TEXTS, ...config.probeTexts },
       budgetMs: config.probeBudgetMs,
     })
@@ -282,15 +300,19 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   const store = new PromptStore(join(resolveStoreDir(config), 'sections'))
 
-  /** The index in force. */
-  const active: PromptEntry[] = []
+  /**
+   * The index in force. Seeded with the built-in entries so a deployment without
+   * a settings service still gets them; the settings sync below replaces this
+   * with the resolved document as soon as one is available.
+   */
+  const active: PromptEntry[] = builtinEntries()
   /** Live lookup for section text callbacks. */
   const byId = new Map<string, PromptEntry>()
   /** Registered sections, keyed by entry id. */
   const sections = new Map<string, { disposer: () => void; name: string; order: number }>()
   /** The resolved settings document, as the engine reads it. */
   let resolved: unknown = {
-    entries: [],
+    entries: builtinEntries(),
     sources: [],
     mirror: '',
     proxy: { kind: 'none', url: '' },
@@ -347,9 +369,9 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   /**
    * The body that would reach the prompt for one entry. A subscribed entry reads
-   * its snapshot first — its body is upstream's, not this machine's — then the
-   * local body file. Read per assembly, so an edited or freshly applied file
-   * lands on the next model step.
+   * its snapshot first — its body is upstream's, not this machine's — then a body
+   * written here, then the body this package ships for that id. Read per
+   * assembly, so an edited or freshly applied file lands on the next model step.
    */
   function describe(id: string): ResolvedBody {
     if (locations.has(id)) {
@@ -364,6 +386,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     } catch (error) {
       warn(ctx, messageOf(error))
     }
+    const builtin = readBuiltinBody(id)
+    if (builtin !== undefined) return { text: builtin, source: 'builtin' }
     return { text: '', source: 'empty' }
   }
 
@@ -407,9 +431,13 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
   }
 
-  /** Ids a new entry may not take: the index, plus every stored body. */
+  /** Ids a new entry may not take: the index, every stored body, and the built-ins. */
   function takenIds(): string[] {
-    return [...new Set([...active.map((entry) => entry.id), ...store.ids()])]
+    return [...new Set([
+      ...active.map((entry) => entry.id),
+      ...store.ids(),
+      ...BUILTIN_PROMPTS.map((prompt) => prompt.id),
+    ])]
   }
 
   installPromptRoutes(ctx, {
@@ -432,7 +460,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       try {
         scope = settings.register(SETTINGS_NAMESPACE, buildIndexSchema(factory), {
           base: {
-            entries: [],
+            entries: builtinEntries(),
             sources: [],
             mirror: '',
             proxy: { kind: 'none', url: '' },

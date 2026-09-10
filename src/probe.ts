@@ -82,6 +82,23 @@ export interface ProbeSpec {
   timeoutMs?: number | undefined
 }
 
+/**
+ * Probes the built-in machine-environment prompt needs, so a deployment that
+ * configures nothing still resolves every `{{...}}` that body references.
+ *
+ * They are ordinary probes: `config.probes` overrides any of them by name, and
+ * `probeDefaults: false` drops them all. Dropping them while the built-in body
+ * is still in force leaves its variables unregistered, which fails assembly, so
+ * the two settings belong together.
+ */
+export const DEFAULT_PROBES: Readonly<Record<string, ProbeSpec>> = {
+  pwsh: { command: 'pwsh', args: ['-NoProfile', '-Command', '$PSVersionTable.PSVersion.ToString()'] },
+  bash: { command: 'bash', args: ['--version'], pattern: 'version ([0-9.]+)' },
+  git: { command: 'git', args: ['--version'], pattern: '([0-9]+\.[0-9]+\.[0-9]+)' },
+  node: { command: 'node', args: ['--version'], pattern: 'v?([0-9.]+)' },
+  python: { command: 'python', args: ['--version'], pattern: '([0-9.]+)' },
+}
+
 /** What one process run reported, normalized across success and failure. */
 export interface ProbeRun {
   /** `error.code` when the process could not be started at all, e.g. `ENOENT`. */

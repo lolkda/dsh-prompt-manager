@@ -16,7 +16,7 @@
  * `DSH_PACKAGES=C:/Users/me/.dsh/profiles/node_modules/@deepseek-ai node test/smoke.mjs`.
  */
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -131,13 +131,28 @@ function writeBody(id, text) {
 }
 
 try {
-  // ── a fresh install carries nothing ─────────────────────────────────────────
+  // ── a fresh install carries the built-in environment prompt ─────────────────
 
   const fresh = await assembleWith({}, BARE)
-  assert.equal(fresh.prompt, '', 'a fresh install must inject nothing')
   assert.ok(
-    !fresh.assembly.sections.some((section) => section.name.startsWith('user:prompt-manager:')),
-    'the plugin must register no section of its own',
+    fresh.prompt.includes('# Machine environment'),
+    `a fresh install must inject the built-in environment prompt, got: ${fresh.prompt.slice(0, 120)}`,
+  )
+  assert.ok(
+    /- \*\*git\*\* `[^`]+`/.test(fresh.prompt),
+    'the built-in body must interpolate the tool variables, which the probe defaults supply',
+  )
+  assert.ok(
+    fresh.assembly.sections.some((section) => section.name === sectionName('env')),
+    'the built-in entry must register under its own id',
+  )
+
+  // The packaged body is shipped prose, so it is checked statically too: a
+  // literal brace pair that is not a variable name makes assembly throw.
+  const packaged = readFileSync(new URL('../environment.md', import.meta.url), 'utf8')
+  assert.ok(
+    !/\{\{(?![a-z][a-z0-9_]*\}\})/.test(packaged),
+    'the built-in body must not carry a malformed variable reference',
   )
 
   // ── the settings index drives the prompt ────────────────────────────────────
@@ -148,10 +163,15 @@ try {
   assert.equal(settings.state.registered.namespace, SETTINGS_NAMESPACE, 'the namespace must be prompt-manager')
   assert.deepEqual(
     settings.state.registered.options?.base?.entries,
-    [],
-    'the composition base layer must carry no entries',
+    [{ id: 'env', title: '机器环境', order: 5, enabled: true }],
+    'the composition base layer must carry the built-in entry',
   )
-  assert.equal(driven.prompt, '', 'the composed base must inject nothing')
+  assert.ok(driven.prompt.includes('# Machine environment'), 'the composed base must inject the built-in prompt')
+
+  // A body written here replaces the packaged one, body and all.
+  writeBody('env', 'MY-OWN-ENVIRONMENT')
+  const overridden = await driven.read()
+  assert.equal(overridden.prompt, 'MY-OWN-ENVIRONMENT', 'a local body must override the built-in one')
 
   writeBody('early', 'EARLY-BODY')
   writeBody('note', 'NOTE-BODY')

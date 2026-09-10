@@ -9,8 +9,10 @@
  * revision fencing, and the "user overrode this" flag from the shared settings
  * transport, while the bodies stay plain `.md` files a person can edit directly.
  *
- * No entry ships with the plugin: a fresh install starts empty, and prose arrives
- * either from the settings page or from a subscribed repository.
+ * Entry bodies live either as plain `.md` files a person can edit directly, or
+ * as one markdown file shipped with this package: a fresh install starts with
+ * the built-in machine-environment prompt, and anything a person writes or
+ * subscribes overrides it.
  *
  * @module dsh-prompt-manager/entries
  */
@@ -48,13 +50,43 @@ export interface PromptEntry {
      */
     source?: string;
 }
-/** One entry resolved against the store and any source. */
+/** One entry resolved against the store, a subscription, or the package. */
 export interface ResolvedBody {
     /** The body that would reach the prompt. */
     text: string;
     /** Where that body came from. */
-    source: 'user' | 'subscribed' | 'empty';
+    source: 'user' | 'subscribed' | 'builtin' | 'empty';
 }
+/** One prompt body this package ships, so a fresh install is not empty. */
+export interface BuiltinPrompt {
+    /** Entry id a user override or a subscription with the same id replaces. */
+    id: string;
+    /** Title the base layer gives the entry. */
+    title: string;
+    /** Placement the base layer gives the entry. */
+    order: number;
+    /** The packaged markdown, resolved relative to the built module in `lib/`. */
+    file: URL;
+}
+/** The prompts this package ships. */
+export declare const BUILTIN_PROMPTS: readonly BuiltinPrompt[];
+/**
+ * The base layer's entries: one per {@link BUILTIN_PROMPTS} entry, enabled.
+ *
+ * They behave like any other entry — the page lists them, a write overrides
+ * them, a toggle disables them — so the built-in prose is a starting point
+ * rather than something the deployment cannot reach.
+ *
+ * @returns fresh entry records, safe to hand to a settings base layer.
+ */
+export declare function builtinEntries(): PromptEntry[];
+/**
+ * The packaged body for one entry id.
+ * @param id - entry id to look up.
+ * @returns the exact UTF-8 markdown, or `undefined` when the package ships none
+ * for that id, or the packaged file cannot be read.
+ */
+export declare function readBuiltinBody(id: string): string | undefined;
 /** The slice of a schemastery schema node this plugin constructs. */
 export interface SchemaNode {
     /** Value used when neither the user layer nor the base layer supplies one. */
