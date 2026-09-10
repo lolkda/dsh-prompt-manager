@@ -731,7 +731,7 @@ window.__ModuleLoader__.load({
               h('input', {
                 key: 'input',
                 value: newRepo,
-                placeholder: 'lolkda/dsh-prompt-manager',
+                placeholder: 'owner/repo',
                 disabled: busy,
                 onChange: (event) => setNewRepo(event.target.value),
               }),

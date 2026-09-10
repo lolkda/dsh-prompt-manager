@@ -525,7 +525,7 @@ assert.ok(sourcesPage.text.includes('订阅来源'), 'the sources page must say 
 assert.ok(sourcesPage.text.includes('o/r@main'), 'a configured source is listed')
 assert.ok(sourcesPage.text.includes('prompt-manager.json'), 'the page must explain the manifest requirement')
 
-const repoField = inspect(renderer.tree, 'input').nodes.find((node) => node.props.placeholder === 'lolkda/dsh-prompt-manager')
+const repoField = inspect(renderer.tree, 'input').nodes.find((node) => node.props.placeholder === 'owner/repo')
 repoField.props.onChange({ target: { value: 'o/r' } })
 await renderer.settle()
 const addSource = button(renderer.tree, '添加来源')
