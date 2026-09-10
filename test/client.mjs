@@ -384,9 +384,14 @@ function inspect(tree, type) {
 /** The menu item with one id. */
 const item = (menu, id) => menu.props.items.find((candidate) => candidate.id === id)
 
-/** The first button whose flattened children contain a label. */
+/**
+ * The first button whose flattened children contain a label. The section draws
+ * its own buttons — the shell's own settings pages do the same, because the
+ * `Button` primitive is the larger dialog-sized control — so these are plain
+ * elements, found by the text they render.
+ */
 function button(tree, label) {
-  return inspect(tree, 'stub-button').nodes.find((node) => [].concat(node.children ?? []).flat(Infinity).includes(label))
+  return inspect(tree, 'button').nodes.find((node) => textOf(node).includes(label))
 }
 
 /** Every text node under one element, joined — for buttons whose children are elements. */
@@ -423,8 +428,8 @@ assert.ok(listing.text.includes('新增提示词'), 'the list must offer an add 
 assert.ok(listing.text.includes('下一个模型步骤生效'), 'the list must say when a change takes effect')
 assert.ok(listing.text.includes('/tmp/prompt-manager/sections'), 'the list must show where the bodies live')
 
-const controls = inspect(tree, 'stub-button').nodes.map((node) => [].concat(node.children ?? []).flat(Infinity).join(''))
-assert.ok(controls.some((label) => label.startsWith('来源（')), 'the list must link to the sources page')
+const controls = inspect(tree, 'button').nodes.map((node) => textOf(node))
+assert.ok(controls.some((label) => label.includes('来源（')), 'the list must link to the sources page')
 const tabs = inspect(tree).text
 assert.ok(tabs.includes('全部') && tabs.includes('本地') && tabs.includes('订阅'), 'the list must offer the three layers')
 
@@ -514,9 +519,9 @@ assert.ok(!backToList.text.includes('Markdown 正文'), 'returning must leave th
 
 // ── the sources page ──────────────────────────────────────────────────────────
 
-const sourcesButton = inspect(renderer.tree, 'stub-button').nodes.find((node) => {
-  const label = [].concat(node.children ?? []).flat(Infinity).join('')
-  return label.startsWith('来源（')
+const sourcesButton = inspect(renderer.tree, 'button').nodes.find((node) => {
+  const label = textOf(node)
+  return label.includes('来源（')
 })
 sourcesButton.props.onClick()
 await renderer.settle()

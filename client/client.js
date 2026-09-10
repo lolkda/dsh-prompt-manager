@@ -38,52 +38,103 @@ window.__ModuleLoader__.load({
     /** Style tag identity, so unload removes exactly this bundle's styles. */
     const STYLE_ID = 'dsh-prompt-manager/Section.css'
 
+    // Every value below is copied from the shell's own settings pages — the
+    // plugin page (heading/intro/tab row/card list) and the model page (row
+    // card, chip, row buttons, dashed add buttons, status dot) — so this section
+    // sits in the same visual language, and in the same theme, as the pages it
+    // appears beside. Only aliases that exist in the shell's theme are used: an
+    // unknown custom property would silently fall back and leave the element
+    // unstyled.
     const CSS = `
-.dsh-prompt-manager{display:flex;flex-direction:column;gap:14px;padding-bottom:12px;min-width:0}
-.dsh-prompt-manager__lede{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-text-secondary,inherit)}
-.dsh-prompt-manager__note{margin:0;font-size:11px;line-height:16px;color:var(--dsw-alias-text-tertiary,inherit)}
-.dsh-prompt-manager__status{margin:0;font-size:12px;line-height:18px}
-.dsh-prompt-manager__status--error{color:var(--dsw-alias-state-error-primary,inherit)}
-.dsh-prompt-manager__block{display:flex;flex-direction:column;gap:8px;min-width:0}
-.dsh-prompt-manager__head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
-.dsh-prompt-manager__headTitle{font-size:13px;font-weight:600;line-height:20px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsh-prompt-manager{max-width:760px;min-width:0;display:flex;flex-direction:column;gap:12px;padding-bottom:12px;color:var(--dsw-alias-label-primary)}
+.dsh-prompt-manager__heading{margin:0;font-size:18px;font-weight:600}
+.dsh-prompt-manager__intro{margin:0;font-size:13px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
+.dsh-prompt-manager__note{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
+.dsh-prompt-manager__status{margin:0;font-size:12px;line-height:1.5}
+.dsh-prompt-manager__status--error{color:var(--dsw-alias-label-error)}
+.dsh-prompt-manager__status--ok{color:var(--dsw-alias-state-success-primary)}
+.dsh-prompt-manager__block{display:flex;flex-direction:column;gap:12px;min-width:0}
+.dsh-prompt-manager__head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0}
+.dsh-prompt-manager__headTitle{margin:0;font-size:18px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsh-prompt-manager__headSpacer{flex:1 1 auto}
-.dsh-prompt-manager__list{display:flex;flex-direction:column;gap:6px;min-width:0}
-.dsh-prompt-manager__row{display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:8px;border:1px solid var(--dsw-alias-border-tertiary,transparent);min-width:0}
-.dsh-prompt-manager__rowMain{flex:1 1 auto;min-width:0;display:flex;align-items:baseline;gap:8px;background:none;border:0;padding:2px 4px;cursor:pointer;text-align:left;color:inherit;font:inherit}
-.dsh-prompt-manager__title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dsh-prompt-manager__meta{font-size:11px;line-height:16px;color:var(--dsw-alias-text-tertiary,inherit);white-space:nowrap}
-.dsh-prompt-manager__iconButton{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0;border:0;border-radius:6px;background:none;color:inherit;cursor:pointer}
-.dsh-prompt-manager__iconButton:hover{background:var(--dsw-alias-bg-secondary,transparent)}
-.dsh-prompt-manager__inlineMenu{display:flex;flex-direction:column;gap:2px;padding:4px;margin:0 0 6px 28px;border-radius:8px;border:1px solid var(--dsw-alias-border-tertiary,currentColor)}
-.dsh-prompt-manager__inlineMenu button{background:none;border:0;padding:4px 6px;border-radius:6px;text-align:left;color:inherit;font:inherit;cursor:pointer}
-.dsh-prompt-manager__inlineMenu button:disabled{color:var(--dsw-alias-text-tertiary,inherit);cursor:default}
+
+/* the tab row: plain labels, the active one underlined, hairline underneath */
+.dsh-prompt-manager__tabs{display:flex;align-items:flex-end;gap:22px;margin-top:2px;border-bottom:.5px solid var(--dsw-alias-border-l2)}
+.dsh-prompt-manager__tab{position:relative;background:0 0;border:0;padding:7px 1px 9px;font:inherit;font-size:13px;line-height:20px;color:var(--dsw-alias-label-tertiary);cursor:pointer}
+.dsh-prompt-manager__tab:hover{color:var(--dsw-alias-label-primary)}
+.dsh-prompt-manager__tab--active{color:var(--dsw-alias-label-primary)}
+.dsh-prompt-manager__tab--active:after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;border-radius:2px 2px 0 0;background:var(--dsw-alias-label-primary)}
+
+/* one card per entry, matching the model page's row card */
+.dsh-prompt-manager__list{display:flex;flex-direction:column;gap:8px;margin:0;padding:0;list-style:none;min-width:0}
+.dsh-prompt-manager__card{display:flex;align-items:center;gap:10px;padding:12px 14px;border:.5px solid var(--dsw-alias-border-l4);border-radius:16px;min-width:0}
+.dsh-prompt-manager__cardMain{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px;margin:0;padding:0;background:0 0;border:0;text-align:left;color:inherit;font:inherit;cursor:pointer}
+.dsh-prompt-manager__cardMain:disabled{cursor:default}
+.dsh-prompt-manager__cardSide{display:inline-flex;align-items:center;gap:8px;margin-left:auto;flex:0 0 auto}
+.dsh-prompt-manager__title{font-size:14px;font-weight:500;line-height:22px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsh-prompt-manager__meta{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsh-prompt-manager__iconButton{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;border-radius:14px;background:0 0;color:var(--dsw-alias-label-secondary);cursor:pointer}
+.dsh-prompt-manager__iconButton:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.dsh-prompt-manager__inlineMenu{display:flex;flex-direction:column;gap:2px;padding:6px;margin:0 0 6px 28px;border:.5px solid var(--dsw-alias-border-l3);border-radius:12px}
+.dsh-prompt-manager__inlineMenu button{background:0 0;border:0;padding:6px 8px;border-radius:8px;text-align:left;color:inherit;font:inherit;font-size:13px;cursor:pointer}
+.dsh-prompt-manager__inlineMenu button:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.dsh-prompt-manager__inlineMenu button:disabled{color:var(--dsw-alias-label-quaternary);cursor:default}
+
+/* chip and status dot, as on the model page */
+.dsh-prompt-manager__badge{flex:0 0 auto;padding:1px 6px;border:.5px solid var(--dsw-alias-border-l3);border-radius:4px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary)}
+.dsh-prompt-manager__dot{width:6px;height:6px;border-radius:50%;flex:0 0 auto;background:var(--dsw-alias-state-success-primary)}
+.dsh-prompt-manager__dot--idle{background:var(--dsw-alias-label-quaternary)}
+.dsh-prompt-manager__dot--pending{background:var(--dsw-alias-state-warn-primary)}
+.dsh-prompt-manager__dot--error{background:var(--dsw-alias-state-error-primary)}
+
+/* buttons: the shell's own settings pages hand-roll these three shapes */
+.dsh-prompt-manager__button{box-sizing:border-box;height:28px;padding:0 10px;display:inline-flex;align-items:center;justify-content:center;gap:6px;border:.5px solid var(--dsw-alias-border-l3);border-radius:14px;background:0 0;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;line-height:1;white-space:nowrap;cursor:pointer}
+.dsh-prompt-manager__button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
+.dsh-prompt-manager__button:disabled{color:var(--dsw-alias-label-quaternary);border-color:var(--dsw-alias-border-l4);cursor:default}
+.dsh-prompt-manager__button--primary{height:32px;padding:0 14px;border-radius:16px;border-color:transparent;background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground);font-size:13px}
+.dsh-prompt-manager__button--primary:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}
+.dsh-prompt-manager__button--primary:disabled{background:var(--dsw-alias-button-primary-dimmed);color:var(--dsw-alias-label-quaternary)}
+.dsh-prompt-manager__button--danger{color:var(--dsw-alias-state-error-primary)}
+.dsh-prompt-manager__button--danger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-danger)}
+.dsh-prompt-manager__button--ghost{border-color:transparent;color:var(--dsw-alias-label-secondary)}
+.dsh-prompt-manager__addRow{display:flex;flex-wrap:wrap;gap:10px}
+.dsh-prompt-manager__addButton{flex:1 1 0;min-width:180px;height:44px;display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px dashed var(--dsw-alias-border-l3);border-radius:16px;background:0 0;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;cursor:pointer}
+.dsh-prompt-manager__addButton:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
+.dsh-prompt-manager__addButton:disabled{color:var(--dsw-alias-label-quaternary);cursor:default}
+
+/* surfaces and fields */
+.dsh-prompt-manager__surface{display:flex;flex-direction:column;gap:14px;padding:14px 16px;border-radius:12px;background:var(--dsw-alias-bg-module-platform);min-width:0}
 .dsh-prompt-manager__fields{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;min-width:0}
-.dsh-prompt-manager__field{display:flex;flex-direction:column;gap:4px;min-width:0;font-size:11px;line-height:16px;color:var(--dsw-alias-text-tertiary,inherit)}
+.dsh-prompt-manager__field{display:flex;flex-direction:column;gap:6px;min-width:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
 .dsh-prompt-manager__field--grow{flex:1 1 200px}
-.dsh-prompt-manager__field--order{flex:0 0 88px}
-.dsh-prompt-manager__field input{box-sizing:border-box;width:100%;font:inherit;padding:5px 7px;border-radius:6px;border:1px solid var(--dsw-alias-border-tertiary,currentColor);background:var(--dsw-alias-bg-primary,transparent);color:inherit}
-.dsh-prompt-manager__pane{display:flex;flex-direction:column;gap:4px;min-width:0}
-.dsh-prompt-manager__paneLabel{font-size:11px;line-height:16px;color:var(--dsw-alias-text-tertiary,inherit)}
-.dsh-prompt-manager__pane textarea{box-sizing:border-box;width:100%;min-height:320px;resize:vertical;padding:8px;border-radius:8px;border:1px solid var(--dsw-alias-border-tertiary,currentColor);background:var(--dsw-alias-bg-primary,transparent);color:inherit;font-family:var(--dsw-font-mono,ui-monospace,monospace);font-size:12px;line-height:18px}
-.dsh-prompt-manager__preview{box-sizing:border-box;width:100%;max-height:320px;overflow:auto;padding:8px;border-radius:8px;border:1px dashed var(--dsw-alias-border-tertiary,currentColor);overflow-wrap:anywhere}
+.dsh-prompt-manager__field--order{flex:0 0 96px}
+.dsh-prompt-manager__field input{box-sizing:border-box;width:100%;height:32px;padding:0 10px;border:.5px solid var(--dsw-alias-border-l3);border-radius:8px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px}
+.dsh-prompt-manager__field input:focus{outline:none;border-color:var(--dsw-alias-state-business-primary)}
+.dsh-prompt-manager__field input:disabled{color:var(--dsw-alias-label-quaternary)}
+.dsh-prompt-manager__pane{display:flex;flex-direction:column;gap:6px;min-width:0}
+.dsh-prompt-manager__paneLabel{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
+.dsh-prompt-manager__pane textarea{box-sizing:border-box;width:100%;min-height:300px;resize:vertical;padding:10px 12px;border:.5px solid var(--dsw-alias-border-l3);border-radius:12px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-family:var(--ds-font-family-code,ui-monospace,monospace);font-size:12px;line-height:18px}
+.dsh-prompt-manager__pane textarea:focus{outline:none;border-color:var(--dsw-alias-state-business-primary)}
+.dsh-prompt-manager__preview{box-sizing:border-box;width:100%;max-height:320px;overflow:auto;padding:12px;border:1px dashed var(--dsw-alias-border-l3);border-radius:12px;overflow-wrap:anywhere}
 .dsh-prompt-manager__preview pre{white-space:pre-wrap;overflow-wrap:anywhere}
 .dsh-prompt-manager__preview code{overflow-wrap:anywhere}
 .dsh-prompt-manager__preview>*{max-width:100%}
-.dsh-prompt-manager__previewRaw{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--dsw-font-mono,ui-monospace,monospace);font-size:12px;line-height:18px}
-.dsh-prompt-manager__actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.dsh-prompt-manager__empty{padding:10px;font-size:12px;color:var(--dsw-alias-text-tertiary,inherit)}
-.dsh-prompt-manager__tabs{display:flex;gap:4px;align-items:center}
-.dsh-prompt-manager__tab{border:0;background:none;color:var(--dsw-alias-text-secondary,inherit);font:inherit;font-size:12px;padding:3px 8px;border-radius:6px;cursor:pointer}
-.dsh-prompt-manager__tab--active{background:var(--dsw-alias-bg-secondary,transparent);color:inherit;font-weight:600}
-.dsh-prompt-manager__badge{flex:0 0 auto;font-size:10px;line-height:16px;padding:0 6px;border-radius:8px;border:1px solid var(--dsw-alias-border-tertiary,currentColor);color:var(--dsw-alias-text-tertiary,inherit)}
-.dsh-prompt-manager__source{display:flex;flex-direction:column;gap:6px;padding:8px;border-radius:8px;border:1px solid var(--dsw-alias-border-tertiary,currentColor);min-width:0}
-.dsh-prompt-manager__sourceHead{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
-.dsh-prompt-manager__sourceRepo{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dsh-prompt-manager__changes{display:flex;flex-direction:column;gap:4px;padding:6px;border-radius:6px;background:var(--dsw-alias-bg-secondary,transparent);min-width:0}
-.dsh-prompt-manager__change{display:flex;align-items:center;gap:8px;font-size:12px;min-width:0}
-.dsh-prompt-manager__changePath{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--dsw-font-mono,ui-monospace,monospace);font-size:11px}
-.dsh-prompt-manager__delta{flex:0 0 auto;font-size:11px;color:var(--dsw-alias-text-tertiary,inherit);font-variant-numeric:tabular-nums}
+.dsh-prompt-manager__previewRaw{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--ds-font-family-code,ui-monospace,monospace);font-size:12px;line-height:18px}
+.dsh-prompt-manager__actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.dsh-prompt-manager__empty{margin:0;padding:12px;border:1px dashed var(--dsw-alias-border-l3);border-radius:8px;text-align:center;font-size:13px;color:var(--dsw-alias-label-tertiary)}
+
+/* one card per subscription source */
+.dsh-prompt-manager__source{display:flex;flex-direction:column;gap:12px;padding:12px 14px;border:.5px solid var(--dsw-alias-border-l4);border-radius:16px;min-width:0}
+.dsh-prompt-manager__sourceHead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0}
+.dsh-prompt-manager__sourceRepo{font-size:14px;font-weight:500;line-height:22px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsh-prompt-manager__sourceActions{display:inline-flex;align-items:center;gap:4px;margin-left:auto}
+.dsh-prompt-manager__changes{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border-radius:12px;background:var(--dsw-alias-bg-module-platform);min-width:0}
+.dsh-prompt-manager__change{display:flex;align-items:center;gap:8px;font-size:12px;line-height:18px;min-width:0}
+.dsh-prompt-manager__changePath{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--ds-font-family-code,ui-monospace,monospace);font-size:11px}
+.dsh-prompt-manager__delta{flex:0 0 auto;font-size:11px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
+
+/* the shell marks keyboard focus with a 2px business-colour ring; keep that */
+.dsh-prompt-manager__tab:focus-visible,.dsh-prompt-manager__button:focus-visible,.dsh-prompt-manager__addButton:focus-visible,.dsh-prompt-manager__cardMain:focus-visible,.dsh-prompt-manager__iconButton:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
 `.trim()
 
     /**
@@ -192,21 +243,38 @@ window.__ModuleLoader__.load({
       })
     }
 
-    /** A shell button, falling back to a plain one when the primitive is absent. */
+    /**
+     * One button, drawn in the shape the shell's own settings pages use: a
+     * hairline outline by default, a filled primary, a borderless ghost, and a
+     * danger label that turns red on hover. The shell's `Button` primitive is the
+     * larger, dialog-sized control, which is why the settings pages hand-roll
+     * these instead — this section follows them so it looks like a sibling page.
+     * @param props - label, variant, disabled flag, and click handler.
+     */
     function Button(props) {
-      if (isComponent(primitives.Button)) {
-        return h(primitives.Button, {
-          size: 'sm',
-          variant: props.variant === 'primary' ? 'primary' : 'outline',
-          disabled: props.disabled,
-          onClick: props.onClick,
-        }, props.children)
-      }
+      const variant = props.variant ?? 'secondary'
       return h('button', {
         type: 'button',
+        className: `dsh-prompt-manager__button dsh-prompt-manager__button--${variant}`,
         disabled: props.disabled,
         onClick: props.onClick,
       }, props.children)
+    }
+
+    /**
+     * One dashed "add something" control, the shape the shell puts under a list.
+     * @param props - label, disabled flag, click handler, and an optional glyph.
+     */
+    function AddButton(props) {
+      return h('button', {
+        type: 'button',
+        className: 'dsh-prompt-manager__addButton',
+        disabled: props.disabled,
+        onClick: props.onClick,
+      }, [
+        icon(props.icon ?? 'IconPlusOutline16') ?? h('span', { key: 'glyph' }, '＋'),
+        h('span', { key: 'label' }, props.children),
+      ])
     }
 
     /**
@@ -600,8 +668,8 @@ window.__ModuleLoader__.load({
       if (view === 'editor' && draft !== null) {
         return h('div', { className: 'dsh-prompt-manager' }, [
           h('div', { key: 'head', className: 'dsh-prompt-manager__head' }, [
-            h(Button, { key: 'back', disabled: busy, onClick: back }, '← 返回'),
-            h('span', { key: 'title', className: 'dsh-prompt-manager__headTitle' }, `编辑「${draft.title}」`),
+            h(Button, { key: 'back', variant: 'ghost', disabled: busy, onClick: back }, '← 返回'),
+            h('h2', { key: 'title', className: 'dsh-prompt-manager__headTitle' }, `编辑「${draft.title}」`),
             h('span', { key: 'spacer', className: 'dsh-prompt-manager__headSpacer' }),
             h('span', { key: 'id', className: 'dsh-prompt-manager__note' }, [
               `id ${draft.id}`,
@@ -613,27 +681,28 @@ window.__ModuleLoader__.load({
                   : (draft.fileSha1 === null ? ' · 还没有正文文件' : ' · 已保存'),
             ].join('')),
           ]),
-          h('div', { key: 'fields', className: 'dsh-prompt-manager__fields' }, [
-            h('label', { key: 'title', className: 'dsh-prompt-manager__field dsh-prompt-manager__field--grow' }, [
-              '标题',
-              h('input', {
-                key: 'input',
-                value: draft.title,
-                disabled: !writable || busy,
-                onChange: (event) => setDraft({ ...draft, title: event.target.value }),
-              }),
+          h('div', { key: 'form', className: 'dsh-prompt-manager__surface' }, [
+            h('div', { key: 'fields', className: 'dsh-prompt-manager__fields' }, [
+              h('label', { key: 'title', className: 'dsh-prompt-manager__field dsh-prompt-manager__field--grow' }, [
+                '标题',
+                h('input', {
+                  key: 'input',
+                  value: draft.title,
+                  disabled: !writable || busy,
+                  onChange: (event) => setDraft({ ...draft, title: event.target.value }),
+                }),
+              ]),
+              h('label', { key: 'order', className: 'dsh-prompt-manager__field dsh-prompt-manager__field--order' }, [
+                '顺序',
+                h('input', {
+                  key: 'input',
+                  type: 'number',
+                  value: String(draft.order),
+                  disabled: !writable || busy,
+                  onChange: (event) => setDraft({ ...draft, order: Number(event.target.value) }),
+                }),
+              ]),
             ]),
-            h('label', { key: 'order', className: 'dsh-prompt-manager__field dsh-prompt-manager__field--order' }, [
-              '顺序',
-              h('input', {
-                key: 'input',
-                type: 'number',
-                value: String(draft.order),
-                disabled: !writable || busy,
-                onChange: (event) => setDraft({ ...draft, order: Number(event.target.value) }),
-              }),
-            ]),
-          ]),
           h('div', { key: 'body', className: 'dsh-prompt-manager__pane' }, [
             h('span', { key: 'label', className: 'dsh-prompt-manager__paneLabel' }, subscribedDraft
               ? 'Markdown 正文（来自订阅，只读）'
@@ -651,8 +720,8 @@ window.__ModuleLoader__.load({
             h('span', { key: 'label', className: 'dsh-prompt-manager__paneLabel' }, '预览'),
             h('div', { key: 'body', className: 'dsh-prompt-manager__preview' }, h(Preview, { text: draft.body })),
           ]),
-          h('div', { key: 'actions', className: 'dsh-prompt-manager__actions' }, [
-            h(Button, { key: 'save', variant: 'primary', disabled: !writable || busy || !dirty, onClick: save }, dirty ? '保存修改' : '已保存'),
+          ]),
+          h('div', { key: 'actions', className: 'dsh-prompt-manager__actions' }, [            h(Button, { key: 'save', variant: 'primary', disabled: !writable || busy || !dirty, onClick: save }, dirty ? '保存修改' : '已保存'),
             subscribedDraft
               ? h(Button, { key: 'fork', disabled: !writable || busy, onClick: () => { void forkEntry() } }, 'fork 成本地条目')
               : null,
@@ -671,20 +740,37 @@ window.__ModuleLoader__.load({
       if (view === 'sources') {
         const cards = sources.map((source) => {
           const active = report !== null && report.slug === source.id
+          const state = active && report.changes.length > 0
+            ? 'pending'
+            : active && report.warnings.length > 0 ? 'error' : 'ready'
           return h('div', { key: source.id, className: 'dsh-prompt-manager__source' }, [
             h('div', { key: 'head', className: 'dsh-prompt-manager__sourceHead' }, [
+              h('span', {
+                key: 'dot',
+                className: state === 'ready'
+                  ? 'dsh-prompt-manager__dot'
+                  : `dsh-prompt-manager__dot dsh-prompt-manager__dot--${state}`,
+                'aria-hidden': 'true',
+              }),
               h('span', { key: 'repo', className: 'dsh-prompt-manager__sourceRepo' }, `${source.repo}@${source.ref}`),
+              source.enabled === false
+                ? h('span', { key: 'off', className: 'dsh-prompt-manager__badge' }, '已关闭')
+                : null,
+              h('span', { key: 'meta', className: 'dsh-prompt-manager__meta' }, [
+                `${String(source.files)} 个文件`,
+                source.appliedAt !== undefined ? `上次应用 ${source.appliedAt}` : '还没应用过',
+              ].join(' · ')),
               h('span', { key: 'spacer', className: 'dsh-prompt-manager__headSpacer' }),
-              h(Button, { key: 'check', disabled: busy, onClick: () => { void checkSource(source.id) } }, '检查更新'),
-              h(Button, { key: 'revert', disabled: busy, onClick: () => { void revertSource(source.id) } }, '还原'),
-              h(Button, { key: 'remove', disabled: busy, onClick: () => { void removeSource(source.id) } }, '删除来源'),
+              h('div', { key: 'actions', className: 'dsh-prompt-manager__sourceActions' }, [
+                h(Button, { key: 'check', disabled: busy, onClick: () => { void checkSource(source.id) } }, '检查更新'),
+                h(Button, { key: 'revert', disabled: busy, onClick: () => { void revertSource(source.id) } }, '还原'),
+                h(Button, { key: 'remove', variant: 'danger', disabled: busy, onClick: () => { void removeSource(source.id) } }, '删除来源'),
+              ]),
             ]),
-            h('span', { key: 'meta', className: 'dsh-prompt-manager__note' }, [
-              `${String(source.files)} 个文件`,
-              source.headSha !== undefined ? ` · ${source.headSha.slice(0, 7)}` : '',
-              source.appliedAt !== undefined ? ` · 上次应用 ${source.appliedAt}` : ' · 还没应用过',
-              source.mirror.length > 0 ? ` · 经 ${source.mirror}` : ' · 直连',
-            ].join('')),
+            h('span', { key: 'note', className: 'dsh-prompt-manager__note' }, [
+              source.headSha !== undefined ? `远端 ${source.headSha.slice(0, 7)}` : '还没检查过远端',
+              source.mirror.length > 0 ? `经 ${source.mirror}` : '直连',
+            ].join(' · ')),
             active && report.changes.length > 0
               ? h('div', { key: 'changes', className: 'dsh-prompt-manager__changes' }, [
                 ...report.changes.map((change) => h('label', { key: change.path, className: 'dsh-prompt-manager__change' }, [
@@ -710,52 +796,56 @@ window.__ModuleLoader__.load({
                 ]),
               ])
               : active
-                ? h('span', { key: 'clean', className: 'dsh-prompt-manager__note' }, '没有需要更新的内容。')
+                ? h('span', { key: 'clean', className: 'dsh-prompt-manager__status dsh-prompt-manager__status--ok' }, '没有需要更新的内容。')
                 : null,
             active && report.warnings.length > 0
-              ? h('span', { key: 'warn', className: 'dsh-prompt-manager__note' }, report.warnings.join('；'))
+              ? h('span', { key: 'warn', className: 'dsh-prompt-manager__status dsh-prompt-manager__status--error' }, report.warnings.join('；'))
               : null,
           ])
         })
 
         return h('div', { className: 'dsh-prompt-manager' }, [
           h('div', { key: 'head', className: 'dsh-prompt-manager__head' }, [
-            h(Button, { key: 'back', disabled: busy, onClick: () => { setView('list'); setReport(null) } }, '← 返回'),
-            h('span', { key: 'title', className: 'dsh-prompt-manager__headTitle' }, '订阅来源'),
+            h(Button, { key: 'back', variant: 'ghost', disabled: busy, onClick: () => { setView('list'); setReport(null) } }, '← 返回'),
+            h('h2', { key: 'title', className: 'dsh-prompt-manager__headTitle' }, '订阅来源'),
           ]),
-          h('p', { key: 'lede', className: 'dsh-prompt-manager__lede' },
+          h('p', { key: 'lede', className: 'dsh-prompt-manager__intro' },
             '一个来源 = 一个 GitHub 仓库 + 一个 ref；仓库根要有 prompt-manager.json 清单。检查更新只把远端内容取到暂存区，点「应用」才覆盖本地，改动在下一个模型步骤生效。'),
-          h('div', { key: 'add', className: 'dsh-prompt-manager__fields' }, [
-            h('label', { key: 'repo', className: 'dsh-prompt-manager__field dsh-prompt-manager__field--grow' }, [
-              '仓库（owner/name）',
-              h('input', {
-                key: 'input',
-                value: newRepo,
-                placeholder: 'owner/repo',
-                disabled: busy,
-                onChange: (event) => setNewRepo(event.target.value),
-              }),
+          h('div', { key: 'add', className: 'dsh-prompt-manager__surface' }, [
+            h('div', { key: 'fields', className: 'dsh-prompt-manager__fields' }, [
+              h('label', { key: 'repo', className: 'dsh-prompt-manager__field dsh-prompt-manager__field--grow' }, [
+                '仓库（owner/name）',
+                h('input', {
+                  key: 'input',
+                  value: newRepo,
+                  placeholder: 'owner/repo',
+                  disabled: busy,
+                  onChange: (event) => setNewRepo(event.target.value),
+                }),
+              ]),
+              h('label', { key: 'ref', className: 'dsh-prompt-manager__field dsh-prompt-manager__field--order' }, [
+                'ref',
+                h('input', {
+                  key: 'input',
+                  value: newRef,
+                  disabled: busy,
+                  onChange: (event) => setNewRef(event.target.value),
+                }),
+              ]),
+              h('label', { key: 'mirror', className: 'dsh-prompt-manager__field dsh-prompt-manager__field--grow' }, [
+                '镜像（可留空）',
+                h('input', {
+                  key: 'input',
+                  value: newMirror,
+                  placeholder: 'https://gh-proxy.example',
+                  disabled: busy,
+                  onChange: (event) => setNewMirror(event.target.value),
+                }),
+              ]),
             ]),
-            h('label', { key: 'ref', className: 'dsh-prompt-manager__field dsh-prompt-manager__field--order' }, [
-              'ref',
-              h('input', {
-                key: 'input',
-                value: newRef,
-                disabled: busy,
-                onChange: (event) => setNewRef(event.target.value),
-              }),
+            h('div', { key: 'actions', className: 'dsh-prompt-manager__actions' }, [
+              h(Button, { key: 'go', variant: 'primary', disabled: !writable || busy, onClick: () => { void addSource() } }, '添加来源'),
             ]),
-            h('label', { key: 'mirror', className: 'dsh-prompt-manager__field dsh-prompt-manager__field--grow' }, [
-              '镜像（可留空）',
-              h('input', {
-                key: 'input',
-                value: newMirror,
-                placeholder: 'https://gh-proxy.example',
-                disabled: busy,
-                onChange: (event) => setNewMirror(event.target.value),
-              }),
-            ]),
-            h(Button, { key: 'go', variant: 'primary', disabled: !writable || busy, onClick: () => { void addSource() } }, '添加来源'),
           ]),
           sources.length === 0
             ? h('div', { key: 'empty', className: 'dsh-prompt-manager__empty' }, '还没有订阅来源。')
@@ -774,44 +864,51 @@ window.__ModuleLoader__.load({
 
       const rows = visible.map((entry) => h('div', {
         key: entry.id,
-        className: 'dsh-prompt-manager__row',
+        className: 'dsh-prompt-manager__card',
       }, [
         h('button', {
           key: 'open',
           type: 'button',
-          className: 'dsh-prompt-manager__rowMain',
+          className: 'dsh-prompt-manager__cardMain',
           onClick: () => select(entry),
         }, [
           h('span', { key: 'title', className: 'dsh-prompt-manager__title' }, entry.title),
           h('span', { key: 'meta', className: 'dsh-prompt-manager__meta' }, [
-            isSubscribed(entry) ? `订阅 ${entry.source}` : '',
+            isSubscribed(entry) ? `订阅 ${entry.source}` : '本地',
             entry.enabled === true ? '' : '已关闭',
           ].filter((part) => part.length > 0).join(' · ')),
         ]),
-        isSubscribed(entry) ? h('span', { key: 'badge', className: 'dsh-prompt-manager__badge' }, '订阅') : null,
-        h(Switch, {
-          key: 'switch',
-          checked: entry.enabled === true,
-          label: entry.title,
-          disabled: !writable || busy,
-          onChange: () => toggle(entry, entry.enabled !== true),
-        }),
-        h(RowMenu, {
-          key: 'menu',
-          open: menuFor === entry.id,
-          label: `更多操作：${entry.title}`,
-          items: [
-            { id: 'edit', label: '编辑', icon: icon('IconEditOutline16') },
-            { id: 'delete', label: '删除', icon: icon('IconTrashOutline16'), disabled: !writable },
-          ],
-          onToggle: () => setMenuFor(menuFor === entry.id ? null : entry.id),
-          onClose: () => setMenuFor(null),
-          onSelect: (id) => {
-            setMenuFor(null)
-            if (id === 'edit') select(entry)
-            else if (id === 'delete') remove(entry)
-          },
-        }),
+        h('div', { key: 'side', className: 'dsh-prompt-manager__cardSide' }, [
+          h('span', {
+            key: 'dot',
+            className: `dsh-prompt-manager__dot${entry.enabled === true ? '' : ' dsh-prompt-manager__dot--idle'}`,
+            'aria-hidden': 'true',
+          }),
+          isSubscribed(entry) ? h('span', { key: 'badge', className: 'dsh-prompt-manager__badge' }, '订阅') : null,
+          h(Switch, {
+            key: 'switch',
+            checked: entry.enabled === true,
+            label: entry.title,
+            disabled: !writable || busy,
+            onChange: () => toggle(entry, entry.enabled !== true),
+          }),
+          h(RowMenu, {
+            key: 'menu',
+            open: menuFor === entry.id,
+            label: `更多操作：${entry.title}`,
+            items: [
+              { id: 'edit', label: '编辑', icon: icon('IconEditOutline16') },
+              { id: 'delete', label: '删除', icon: icon('IconTrashOutline16'), disabled: !writable },
+            ],
+            onToggle: () => setMenuFor(menuFor === entry.id ? null : entry.id),
+            onClose: () => setMenuFor(null),
+            onSelect: (id) => {
+              setMenuFor(null)
+              if (id === 'edit') select(entry)
+              else if (id === 'delete') remove(entry)
+            },
+          }),
+        ]),
       ]))
 
       const enabledCount = entries.filter((entry) => entry.enabled === true).length
@@ -823,21 +920,18 @@ window.__ModuleLoader__.load({
           : null
 
       return h('div', { className: 'dsh-prompt-manager' }, [
-        h('p', { key: 'lede', className: 'dsh-prompt-manager__lede' }, [
-          '每条提示词都是一个独立的 system prompt section；开关、排序、正文改动在下一个模型步骤生效，不需要重启。',
+        h('h1', { key: 'heading', className: 'dsh-prompt-manager__heading' }, '提示词'),
+        h('p', { key: 'lede', className: 'dsh-prompt-manager__intro' },
+          '每条提示词都是一个独立的 system prompt section；开关、排序、正文改动在下一个模型步骤生效，不需要重启。'),
+        h('p', { key: 'dir', className: 'dsh-prompt-manager__note' }, [
+          `已启用 ${String(enabledCount)}/${String(entries.length)}`,
           store !== null && typeof store.dir === 'string' ? `正文目录：${store.dir}` : '',
-        ].join(' ')),
+        ].filter((part) => part.length > 0).join(' · ')),
         note === null ? null : h('p', { key: 'note', className: 'dsh-prompt-manager__note' }, note),
         store !== null && store.writable === false
           ? h('p', { key: 'unwritable', className: 'dsh-prompt-manager__status dsh-prompt-manager__status--error' }, '正文目录不可写，编辑器已禁用；开关和排序仍然可用。')
           : null,
         h('div', { key: 'list', className: 'dsh-prompt-manager__block' }, [
-          h('div', { key: 'head', className: 'dsh-prompt-manager__head' }, [
-            h('span', { key: 'title', className: 'dsh-prompt-manager__headTitle' }, `提示词（${String(enabledCount)}/${String(entries.length)} 已启用）`),
-            h('span', { key: 'spacer', className: 'dsh-prompt-manager__headSpacer' }),
-            h(Button, { key: 'add', disabled: !writable || busy, onClick: add }, '新增提示词'),
-            h(Button, { key: 'sources', disabled: busy, onClick: () => setView('sources') }, `来源（${String(sources.length)}）`),
-          ]),
           h('div', { key: 'tabs', className: 'dsh-prompt-manager__tabs' }, [
             ...[['all', '全部'], ['local', '本地'], ['subscribed', '订阅']].map(([id, label]) => h('button', {
               key: id,
@@ -849,6 +943,15 @@ window.__ModuleLoader__.load({
           visible.length === 0
             ? h('div', { key: 'empty', className: 'dsh-prompt-manager__empty' }, filter === 'subscribed' ? '还没有订阅来的提示词。' : '还没有提示词，点「新增提示词」加一条。')
             : h('div', { key: 'rows', className: 'dsh-prompt-manager__list' }, rows),
+          h('div', { key: 'addRow', className: 'dsh-prompt-manager__addRow' }, [
+            h(AddButton, { key: 'add', disabled: !writable || busy, onClick: add }, '新增提示词'),
+            h(AddButton, {
+              key: 'sources',
+              icon: 'IconRefreshOutline16',
+              disabled: busy,
+              onClick: () => setView('sources'),
+            }, `订阅来源（${String(sources.length)}）`),
+          ]),
         ]),
         ready ? null : h('div', { key: 'waiting', className: 'dsh-prompt-manager__empty' }, '设置载入后这里会显示列表。'),
         statusLine,
