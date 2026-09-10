@@ -9,8 +9,10 @@
  * anything a person writes or subscribes replaces it.
  *
  * Section text is resolved per assembly, so enabling, disabling, adding, or
- * rewriting an entry takes effect on the next model step — no restart. Only the
- * browser half of this plugin is snapshotted at profile startup.
+ * rewriting an entry takes effect on the next model step — no restart. The host
+ * module itself is loaded once at profile startup, so changing `lib/` needs a
+ * restart; the browser bundle does not, because `dsh-client-hmr` re-hashes it and
+ * pushes the new revision to open pages.
  *
  * The section text is interpolated against prompt variables at each assembly.
  * This plugin registers `{{os}}`, `{{os_release}}`, `{{platform}}`, and

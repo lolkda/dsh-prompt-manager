@@ -83,7 +83,7 @@ pnpm add github:lolkda/dsh-prompt-manager
 - **编辑器页面**：整个区域切成编辑器 —— 左上角「← 返回」，然后是标题、顺序、只读的 id 与正文状态、Markdown 正文 textarea、实时预览（用 shell 自带的 `MarkdownText` 渲染），底部「保存修改」。**订阅条目的正文只读**，另有「fork 成本地条目」把它复制成一条可编辑的本地条目。返回时会确认未保存修改；新增提示词也直接进这个页面。
 - **来源页面**：订阅源的增删、检查更新、应用、还原，见下节。
 
-生效时机：**下一个模型步骤**。`systemPrompt.assemble()` 每个 agent step 调用一次，section 文本每次现算，所以开关、排序、正文都在下一轮对话生效，**不需要重启**。唯一需要重启的是浏览器半边本身（见「注意」）。
+生效时机：**下一个模型步骤**。`systemPrompt.assemble()` 每个 agent step 调用一次，section 文本每次现算，所以开关、排序、正文都在下一轮对话生效，**不需要重启**。改代码另说，见文末「注意」。
 
 持久化：只有 `http://127.0.0.1:...` 打开页面时索引才写进 `settings.yaml`；用局域网地址打开时 DSH 的设置通道退化为内存模式，页面会显示只读。
 
@@ -134,8 +134,8 @@ prompt-manager:
   mirror: 'https://gh-proxy.example'      # 空 = 不过镜像
   proxy: { kind: socks5, url: 'socks5://127.0.0.1:1080' }
   sources:
-    - id: lolkda-prompts                   # 从 owner/repo 派生，可手改
-      repo: lolkda/prompts
+    - id: owner-repo                       # 从 owner/repo 派生，可手改
+      repo: owner/repo
       ref: main
       mirror: ''                           # 空 = 沿用全局
       enabled: true
@@ -323,7 +323,9 @@ DSH_PACKAGES="$DSH_HOME/profiles/node_modules/@deepseek-ai" npm test
 - **section 名是派生出来的**：每条固定注册为 `user:prompt-manager:<id>`，所以只要 id 不重复就不会和 `deployment:persona`、`harness:identity`、`app:web-surface` 这类已注册的 section 撞名。变量名撞上别的行时，这一项被跳过并记一条警告，挂载照常进行 —— 但正文里那个 `{{名字}}` 就会让组装失败，所以看到警告要么改名，要么把引用删掉。
 - **`package.json` 里的 `dsh.client` 和 `client/client.js` 必须同时存在**：只声明浏览器半边而没有 bundle，浏览器插件表在挂载时会直接报错。两者的包名必须都叫 `dsh-prompt-manager`。
 - **改 `cordis.patch.yml` 会热加载**：`patchReload: live` 时 HMR 会为这个 patch 文件单独起一个精确 watcher，所以增删 row 不用重启。
-- **改插件代码要重启**：DSH 不监听插件模块文件，而 loader 按 URL 缓存 ESM 模块。浏览器半边的包元数据（`dsh.client`）与 bundle 字节也在启动时快照，所以 `git pull` 或改完 `lib/`、`client/` 之后必须重启 profile 才生效。
+- **改插件代码要重启，改浏览器半边不用**：DSH 不监听插件模块文件，而 loader 按 URL 缓存 ESM 模块，所以改完 `lib/` 必须重启 profile。
+  浏览器半边不同：`dsh-client-hmr` 会轮询已注册 bundle 的文件基线，字节一变就调 `clientModules.rebuilt(id)` 并往 `/plugins/events` 推一帧 `rebuilt`，页面收到后 `invalidate(id, rev)` + `entry.refresh()` —— **原地重载，不用刷新页面**（实测：往 `client/client.js` 里加 25 字节，1 秒内就收到两帧，旧 rev → 新 rev）。
+  部署**没挂** `dsh-client-hmr` 时没有这条链路：bundle 的 rev 不变、URL 带 `cache-control: immutable`，所以刷新页面也可能继续吃到旧副本，只能重启 profile。
 - **改正文不用重启**：`sections/*.md` 每次组装现读；订阅正文在点过「应用」之后，也是下一次组装就生效。
 - **KV cache**：section 文本或顺序一变，缓存前缀从该点失效。文本稳定时开销只有一次。
 
