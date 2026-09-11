@@ -672,8 +672,18 @@ scope.state = {
 renderer.mount(component, { scope })
 await renderer.settle()
 const subscribedRow = inspect(renderer.tree).text
-assert.ok(subscribedRow.includes('订阅 src-a'), 'a subscribed row names its source')
+assert.ok(subscribedRow.includes('o/r'), 'a subscribed row shows the repository its body comes from')
 assert.equal(badges().length, 1, 'exactly the subscribed row carries the badge')
+
+// The repository is the row's one real link: it is the address a person wants
+// when they go looking at what upstream actually says.
+const sourceLinks = inspect(renderer.tree, 'a').nodes
+assert.equal(sourceLinks.length, 1, 'exactly the subscribed row links out')
+assert.equal(textOf(sourceLinks[0]), 'o/r', 'the link text is the repository itself')
+assert.equal(sourceLinks[0].props.href, 'https://github.com/o/r', 'the link points at the configured repository')
+assert.equal(sourceLinks[0].props.target, '_blank', 'and opens away from the settings panel')
+assert.ok(String(sourceLinks[0].props.title).includes('o/r@main'), 'the tooltip carries the ref in force')
+assert.ok(subscribedRow.includes('订阅 '), 'and the row still says the body is subscribed')
 
 const rowButton = inspect(renderer.tree, 'button').nodes.find((node) => textOf(node).includes('订阅来的'))
 rowButton.props.onClick()
@@ -682,6 +692,10 @@ const subscribedEditor = inspect(renderer.tree)
 assert.ok(subscribedEditor.text.includes('来自订阅，只读'), 'the editor says the body is read-only')
 assert.equal(inspect(renderer.tree, 'textarea').nodes[0].props.readOnly, true, 'a subscribed body is not editable')
 assert.ok(subscribedEditor.text.includes('订阅条目的正文来自上游'), 'the editor explains why')
+assert.ok(
+  !inspect(renderer.tree, 'a').nodes.some((node) => node.props.href === 'https://github.com/o/r'),
+  'and the link belongs to the list row, not to the editor page',
+)
 
 const forkButton = button(renderer.tree, 'fork 成本地条目')
 assert.ok(forkButton !== undefined, 'a subscribed entry offers a fork')
@@ -1110,6 +1124,6 @@ console.log('  views       row menu -> editor page -> save -> back to the list')
 console.log('  presets     list, editor, member checklist, id from the Host, delete clears the selection')
 console.log('  fence       a forked draft carries the hash the fork wrote, so the next save is accepted')
 console.log('  order       a body file is deleted before the index drops it, and a draft is not dropped silently')
-console.log('  subscribe   sources page, add/fork, read-only subscribed bodies')
+console.log('  subscribe   sources page, add/fork, read-only subscribed bodies, a row that links to its repository')
 console.log('  variables   list with provenance, new script from template, test run registers nothing')
 console.log('  scripts     save and enable, test run stays a draft, insert opens the body it changed')

@@ -81,11 +81,14 @@ window.__ModuleLoader__.load({
 /* one card per entry, matching the model page's row card */
 .dsh-prompt-manager__list{display:flex;flex-direction:column;gap:8px;margin:0;padding:0;list-style:none;min-width:0}
 .dsh-prompt-manager__card{display:flex;align-items:center;gap:10px;padding:12px 14px;border:.5px solid var(--dsw-alias-border-l4);border-radius:16px;min-width:0}
-.dsh-prompt-manager__cardMain{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px;margin:0;padding:0;background:0 0;border:0;text-align:left;color:inherit;font:inherit;cursor:pointer}
+.dsh-prompt-manager__cardBody{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px}
+.dsh-prompt-manager__cardMain{flex:1 1 auto;display:flex;flex-direction:column;gap:2px;min-width:0;margin:0;padding:0;background:0 0;border:0;text-align:left;color:inherit;font:inherit;cursor:pointer}
 .dsh-prompt-manager__cardMain:disabled{cursor:default}
 .dsh-prompt-manager__cardSide{display:inline-flex;align-items:center;gap:8px;margin-left:auto;flex:0 0 auto}
 .dsh-prompt-manager__title{font-size:14px;font-weight:500;line-height:22px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsh-prompt-manager__meta{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsh-prompt-manager__sourceLink{color:inherit;text-decoration:underline;text-decoration-color:var(--dsw-alias-border-l2);text-underline-offset:2px}
+.dsh-prompt-manager__sourceLink:hover{color:var(--dsw-alias-label-primary);text-decoration-color:currentColor}
 .dsh-prompt-manager__iconButton{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;border-radius:14px;background:0 0;color:var(--dsw-alias-label-secondary);cursor:pointer}
 .dsh-prompt-manager__iconButton:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .dsh-prompt-manager__inlineMenu{display:flex;flex-direction:column;gap:2px;padding:6px;margin:0 0 6px 28px;border:.5px solid var(--dsw-alias-border-l3);border-radius:12px}
@@ -695,6 +698,16 @@ window.__ModuleLoader__.load({
       const [runReport, setRunReport] = React.useState(null)
       const [caret, setCaret] = React.useState(null)
       const [presetDraft, setPresetDraft] = React.useState(null)
+
+      /**
+       * The configured sources by slug: a subscribed entry carries its source's
+       * slug, not its repository, so the row needs this to link where the body
+       * actually comes from.
+       */
+      const sourceById = React.useMemo(
+        () => new Map(configured.map((source) => [source.id, source])),
+        [configured],
+      )
 
       const refreshStore = React.useCallback(() => {
         return request('GET', '/status')
@@ -1941,22 +1954,46 @@ window.__ModuleLoader__.load({
         const injected = activePreset === null
           ? entry.enabled === true
           : activePreset.entries.includes(entry.id)
+        const subscribed = isSubscribed(entry)
+        const source = subscribed ? sourceById.get(entry.source) : undefined
+        // The metadata line sits outside the row's button so the repository can be
+        // a real link: an anchor nested in a button is neither valid markup nor
+        // something a click can be trusted to split correctly. Parts are grouped so
+        // the label and its link stay adjacent and only the links are underlined.
+        const meta = [
+          subscribed
+            ? source === undefined
+              // The source is gone from the settings document, so the slug is all
+              // that is left of where this body came from — a link would be dead.
+              ? [`订阅 ${entry.source}`]
+              : [
+                '订阅 ',
+                h('a', {
+                  key: 'source',
+                  className: 'dsh-prompt-manager__sourceLink',
+                  href: `https://github.com/${source.repo}`,
+                  target: '_blank',
+                  rel: 'noreferrer',
+                  title: `${source.repo}@${source.ref}（来源 ${source.id}）`,
+                }, source.repo),
+              ]
+            : ['本地'],
+          entry.enabled === true ? [] : ['已关闭'],
+          activePreset === null ? [] : [`组合：${injected ? '注入' : '不注入'}`],
+        ].filter((group) => group.length > 0)
         return h('div', {
           key: entry.id,
           className: 'dsh-prompt-manager__card',
         }, [
-          h('button', {
-            key: 'open',
-            type: 'button',
-            className: 'dsh-prompt-manager__cardMain',
-            onClick: () => select(entry),
-          }, [
-            h('span', { key: 'title', className: 'dsh-prompt-manager__title' }, entry.title),
-            h('span', { key: 'meta', className: 'dsh-prompt-manager__meta' }, [
-              isSubscribed(entry) ? `订阅 ${entry.source}` : '本地',
-              entry.enabled === true ? '' : '已关闭',
-              activePreset === null ? '' : `组合：${injected ? '注入' : '不注入'}`,
-            ].filter((part) => part.length > 0).join(' · ')),
+          h('div', { key: 'body', className: 'dsh-prompt-manager__cardBody' }, [
+            h('button', {
+              key: 'open',
+              type: 'button',
+              className: 'dsh-prompt-manager__cardMain',
+              onClick: () => select(entry),
+            }, h('span', { key: 'title', className: 'dsh-prompt-manager__title' }, entry.title)),
+            h('span', { key: 'meta', className: 'dsh-prompt-manager__meta' },
+              meta.flatMap((group, index) => (index === 0 ? group : [' · ', ...group]))),
           ]),
           h('div', { key: 'side', className: 'dsh-prompt-manager__cardSide' }, [
             h('span', {
