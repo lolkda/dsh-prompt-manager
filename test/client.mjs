@@ -948,33 +948,19 @@ assert.ok(flagged.includes('{{neverregistered}}'), 'and the warning names it, be
 assert.ok(flagged.includes('这些引用的写法不对'), 'a reference that is not a variable name at all is flagged too')
 assert.ok(flagged.includes('{{never-registered}}'), 'with the offending text quoted back')
 
-// The insert button only exists while an entry's editor is open behind this
-// page, and it names the body it would edit.
+// The variables page offers the reference and nothing else: inserting belongs to
+// the editor, the one place where the body being changed is on screen.
 button(renderer.tree, '← 返回').props.onClick()
 await renderer.settle()
 inspect(renderer.tree, 'button').nodes.find((node) => textOf(node).includes('变量（')).props.onClick()
 await renderer.settle()
-const insertLabels = inspect(renderer.tree, 'button').nodes.map((node) => textOf(node))
+const variableButtons = inspect(renderer.tree, 'button').nodes.map((node) => textOf(node))
 assert.ok(
-  insertLabels.includes('插入到「第一条」'),
-  'the insert button names the entry whose body it edits',
+  variableButtons.every((label) => !label.includes('插入')),
+  `the variables page must not offer to insert into a body it does not show, got: ${variableButtons.join(' | ')}`,
 )
-
-// Inserting must open that body: this page has no textarea and no save button,
-// so an insertion that stayed here would be edited out of sight and then lost
-// when the entry was next opened.
-const inserters = inspect(renderer.tree, 'button').nodes.filter((node) => textOf(node).includes('插入到'))
-// The stub reports os, toolchain_rust, then fresh, so the third control is the
-// one that inserts {{fresh}}.
-const bodyBeforeInsert = inspect(renderer.tree, 'textarea').nodes.length
-inserters[2].props.onClick()
-await renderer.settle()
-assert.equal(bodyBeforeInsert, 0, 'the variables page shows no body field of its own')
-assert.ok(inspect(renderer.tree).text.includes('Markdown 正文'), 'inserting must show the body it changed')
-assert.ok(
-  inspect(renderer.tree, 'textarea').nodes[0].props.value.includes('{{fresh}}'),
-  'with the reference in it, ready to save',
-)
+assert.equal(variableButtons.filter((label) => label === '复制引用').length, VARIABLES.length, 'every row still copies its reference')
+assert.equal(inspect(renderer.tree, 'textarea').nodes.length, 0, 'and the page shows no body field of its own')
 
 // ── a dirty draft is not dropped without a word ───────────────────────────────
 
@@ -1248,5 +1234,5 @@ console.log('  packs       export downloads what the Host built, import reports 
 console.log('  fence       a forked draft carries the hash the fork wrote, so the next save is accepted')
 console.log('  order       a body file is deleted before the index drops it, and a draft is not dropped silently')
 console.log('  subscribe   sources page, add/fork, read-only subscribed bodies, a row that links to its repository')
-console.log('  variables   list with provenance, new script from template, test run registers nothing')
-console.log('  scripts     save and enable, test run stays a draft, insert opens the body it changed')
+console.log('  variables   list with provenance, copy-reference, new script from template, no insert into another body')
+console.log('  scripts     save and enable, test run stays a draft, the editor inserts a reference at the caret')

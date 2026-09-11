@@ -1286,7 +1286,14 @@ window.__ModuleLoader__.load({
         setStatus({ kind: 'info', text: token })
       }, [])
 
-      /** Put one `{{name}}` into the body being edited, at the caret. */
+      /**
+       * Put one `{{name}}` into the body being edited, at the caret.
+       *
+       * Only the editor calls this: it is the one place where the body it edits
+       * is on screen, and where a reference that lands somewhere unexpected is
+       * something you can see and undo.
+       * @param name - the variable to reference.
+       */
       const insertVariable = React.useCallback((name) => {
         if (draft === null) return
         const token = `{{${name}}}`
@@ -1294,21 +1301,6 @@ window.__ModuleLoader__.load({
         setDraft({ ...draft, body: `${draft.body.slice(0, at)}${token}${draft.body.slice(at)}` })
         setCaret(at + token.length)
       }, [caret, draft])
-
-      /**
-       * Insert a reference and show the body it landed in.
-       *
-       * The variables page has no textarea and no save button, so inserting
-       * without opening the editor would edit a draft nobody can see — and the
-       * next time that entry is opened, the body is read again from the Host and
-       * the insertion is silently gone.
-       * @param name - the variable to reference.
-       */
-      const insertVariableHere = React.useCallback((name) => {
-        if (draft === null) return
-        insertVariable(name)
-        setView('editor')
-      }, [draft, insertVariable])
 
       /** Open a script in the editor: an existing one, or a fresh template. */
       const openScript = React.useCallback(async (name) => {
@@ -1813,16 +1805,6 @@ window.__ModuleLoader__.load({
               ? null
               : h('span', { key: 'detail', className: 'dsh-prompt-manager__meta' }, variable.detail),
             h(Button, { key: 'copy', disabled: busy, onClick: () => copyVariable(variable.name) }, '复制引用'),
-            // The insert target is whichever entry's editor is open behind this
-            // page, so the label names it: a button that silently edits an
-            // invisible draft is worse than no button.
-            draft === null
-              ? null
-              : h(Button, {
-                key: 'insert',
-                disabled: busy || !writable,
-                onClick: () => { insertVariableHere(variable.name) },
-              }, `插入到「${draft.title.length > 8 ? `${draft.title.slice(0, 8)}…` : draft.title}」`),
           ]),
         ]))
 
