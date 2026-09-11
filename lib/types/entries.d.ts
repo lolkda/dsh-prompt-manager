@@ -146,6 +146,19 @@ export declare function isEntryId(value: unknown): value is string;
  */
 export declare function entryIdFor(title: string, taken: Iterable<string>): string;
 /**
+ * Keep one id when it is free, or take the nearest free variant of it.
+ *
+ * For the places where the id *is* the identity rather than a handle derived
+ * from a title: a subscribed entry's body is looked up by id upstream, so an
+ * imported `env` that collides is far better off as `env-2` than as whatever a
+ * title — possibly written entirely in a non-Latin script — would slug to.
+ *
+ * @param preferred - the id that was asked for.
+ * @param taken - ids already in use.
+ * @returns `preferred`, or a `-2`-suffixed variant of its stem.
+ */
+export declare function freeId(preferred: string, taken: Iterable<string>): string;
+/**
  * Narrow one resolved settings value into an index. A hand-edited document can
  * hold anything, so unusable entries are dropped rather than thrown: the worst
  * case is a prompt with fewer sections, never a session that cannot assemble.

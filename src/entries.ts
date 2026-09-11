@@ -208,6 +208,31 @@ export function entryIdFor(title: string, taken: Iterable<string>): string {
   return `${base.slice(0, 24)}-${String(Date.now())}`
 }
 
+/**
+ * Keep one id when it is free, or take the nearest free variant of it.
+ *
+ * For the places where the id *is* the identity rather than a handle derived
+ * from a title: a subscribed entry's body is looked up by id upstream, so an
+ * imported `env` that collides is far better off as `env-2` than as whatever a
+ * title — possibly written entirely in a non-Latin script — would slug to.
+ *
+ * @param preferred - the id that was asked for.
+ * @param taken - ids already in use.
+ * @returns `preferred`, or a `-2`-suffixed variant of its stem.
+ */
+export function freeId(preferred: string, taken: Iterable<string>): string {
+  const used = new Set(taken)
+  if (isEntryId(preferred) && !used.has(preferred)) return preferred
+  const stem = (isEntryId(preferred) ? preferred : 'entry').replace(/-\d+$/, '').slice(0, 28)
+  const base = stem.length >= 2 ? stem : 'entry'
+  if (!used.has(base)) return base
+  for (let suffix = 2; suffix < 1000; suffix += 1) {
+    const candidate = `${base.slice(0, 28)}-${String(suffix)}`
+    if (!used.has(candidate)) return candidate
+  }
+  return `${base.slice(0, 24)}-${String(Date.now())}`
+}
+
 /** One usable entry, or `undefined` when the raw value is unusable. */
 function toEntry(raw: unknown): PromptEntry | undefined {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
