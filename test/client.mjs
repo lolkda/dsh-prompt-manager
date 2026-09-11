@@ -40,6 +40,28 @@ const PRESETS = [
   { id: 'plain', name: '日常', entries: [] },
 ]
 
+/** The pack the export route answers with, as text. */
+const PACK_JSON = {
+  format: 'dsh-prompt-manager-pack',
+  version: 1,
+  exportedAt: '2026-09-12T00:00:00.000Z',
+  generator: { plugin: 'dsh-prompt-manager', pluginVersion: '9.9.9' },
+  preset: { id: 'ctf', name: 'CTF 作业', entries: ['alpha'] },
+  entries: [{ id: 'alpha', title: '第一条', order: 10, enabled: true, origin: 'local', body: '# First Entry\n\nbody' }],
+  missing: [],
+}
+
+/** What the import route reports back, naming everything it could not do. */
+const IMPORT_REPORT = {
+  entries: [{ id: 'alpha', title: '第一条' }, { id: 'fresh', title: '新条目' }],
+  preset: { id: 'ctf-2', name: 'CTF 作业', entries: ['alpha', 'fresh'] },
+  renamed: [{ from: 'alpha', to: 'alpha-2' }, { from: 'beta', to: 'beta-2' }, { from: 'gamma', to: 'gamma-2' }, { from: 'delta', to: 'delta-2' }],
+  noBody: ['订阅来的'],
+  sourceDropped: ['契约'],
+  missingMembers: ['gone-entry'],
+  unregistered: ['oops'],
+}
+
 /** Minimal element factory shared by every stub. */
 function createElement(type, props, ...children) {
   return { type, props: props ?? {}, children }
@@ -74,10 +96,23 @@ const primitivesStub = {
 }
 
 /** `document` stub good enough for style injection. */
+/** Files the page asked the browser to download, in order. */
+const downloads = []
+
 const documentStub = {
   querySelector: () => null,
-  createElement: () => ({ dataset: {}, textContent: '', remove() {} }),
+  createElement: (tag) => (tag === 'a'
+    ? {
+      dataset: {},
+      textContent: '',
+      href: '',
+      download: '',
+      click() { downloads.push({ name: this.download, href: this.href }) },
+      remove() {},
+    }
+    : { dataset: {}, textContent: '', appendChild() {}, remove() {} }),
   head: { appendChild: () => {} },
+  body: { appendChild: () => {} },
 }
 
 /**
@@ -352,6 +387,16 @@ function materialize(React) {
       requests.push({ url, method, body: init?.body, seq: step++ })
       if (url.endsWith('/preset/id')) return { ok: true, status: 200, json: async () => ({ id: 'new-preset' }) }
       if (url.endsWith('/id')) return { ok: true, status: 200, json: async () => ({ id: 'new-note' }) }
+      if (url.endsWith('/pack/import') && method === 'POST') {
+        return { ok: true, status: 200, json: async () => ({ ...IMPORT_REPORT }) }
+      }
+      if (url.includes('/pack/export') && method === 'GET') {
+        // `plain` stands in for any refusal the Host may answer with.
+        if (url.includes('preset=plain')) {
+          return { ok: false, status: 404, text: async () => JSON.stringify({ error: '没有这个组合：plain', code: 'unknown-preset' }) }
+        }
+        return { ok: true, status: 200, text: async () => JSON.stringify(PACK_JSON) }
+      }
       if (url.endsWith('/status')) {
         return { ok: true, status: 200, json: async () => ({ ...STATUS }) }
       }
@@ -1129,6 +1174,60 @@ await presetRenderer.settle()
 const cleared = writes.slice(clearBefore).find((write) => write.field === 'activePreset')
 assert.ok(cleared !== undefined && cleared.value === '', '取消当前 must write the empty preset id')
 
+// ── preset packs ────────────────────────────────────────────────────────────
+
+scope.state = { ...scope.state, value: { entries: ENTRIES, presets: PRESETS, activePreset: '' } }
+presetRenderer.mount(presetSection, { scope })
+await presetRenderer.settle()
+
+// Export asks the Host for the pack and hands the browser a file: the page never
+// assembles a pack itself, because only the Host knows the bodies in force.
+downloads.length = 0
+const exportBefore = requests.length
+rowMenuFor(presetRenderer.tree, 'CTF 作业').props.onSelect('export')
+await presetRenderer.settle()
+const exportRequest = requests.slice(exportBefore).find((request) => request.url.includes('/pack/export'))
+assert.ok(exportRequest !== undefined, 'exporting must ask the Host for a pack')
+assert.ok(exportRequest.url.includes('preset=ctf'), 'naming the preset being exported')
+assert.equal(downloads.length, 1, 'and hand the browser exactly one file')
+assert.equal(downloads[0].name, 'prompt-manager-pack-ctf.json', 'named after the preset')
+assert.ok(String(downloads[0].href).startsWith('blob:'), 'as a blob the browser can save')
+assert.ok(presetText().includes('已导出组合「CTF 作业」'), 'and the page says what it did')
+
+// A refusal is shown, not swallowed: a download that silently does nothing is
+// indistinguishable from a browser that ignored it.
+downloads.length = 0
+rowMenuFor(presetRenderer.tree, '日常').props.onSelect('export')
+await presetRenderer.settle()
+assert.equal(downloads.length, 0, 'nothing is offered for download when the Host refuses')
+assert.ok(presetText().includes('没有这个组合：plain'), `the refusal must reach the page, got: ${presetText()}`)
+
+const fileInput = inspect(presetRenderer.tree, 'input').nodes
+  .find((node) => node.props.type === 'file')
+assert.ok(fileInput !== undefined, 'the presets page must offer an import control')
+assert.equal(fileInput.props.accept, '.json,application/json', 'accepting the one thing a pack is')
+
+const importBefore = requests.length
+fileInput.props.onChange({ target: { files: [{ name: 'pack.json', text: async () => JSON.stringify(PACK_JSON) }], value: 'pack.json' } })
+await presetRenderer.settle()
+const importRequest = requests.slice(importBefore).find((request) => request.url.endsWith('/pack/import'))
+assert.ok(importRequest !== undefined, 'choosing a file must post it to the Host')
+assert.equal(importRequest.method, 'POST', 'as a write')
+assert.equal(JSON.parse(importRequest.body).preset.id, 'ctf', 'carrying the pack as it was read')
+
+// The report names everything the import could not do, not just what it did.
+const reported = presetText()
+for (const expected of ['已导入 2 条', '组合「CTF 作业」', '4 条换了 id', 'alpha→alpha-2', '订阅来的', '契约', 'gone-entry', '{{oops}}', '不会自动启用']) {
+  assert.ok(reported.includes(expected), `the report must mention ${expected}, got: ${reported}`)
+}
+
+// A file that is not JSON is refused before any request is made.
+const jsonBefore = requests.length
+fileInput.props.onChange({ target: { files: [{ name: 'notes.txt', text: async () => 'not json at all' }], value: 'notes.txt' } })
+await presetRenderer.settle()
+assert.equal(requests.length, jsonBefore, 'a file that is not JSON never reaches the Host')
+assert.ok(presetText().includes('notes.txt 不是 JSON 文件'), 'and the page says which file it was')
+
 console.log('client ok')
 console.log('  bundle      factory id dsh-prompt-manager, materialized and driven against stub modules')
 console.log(`  section     settings.section id=prompt-manager order=${String(meta.order)}`)
@@ -1136,6 +1235,7 @@ console.log(`  chip        ${chipMeta.name} id=prompt-manager, switches the pres
 console.log(`  list        ${String(ENTRIES.length)} rows, switches, kebab menus, the plugin's own repo link, add control refused at the cap`)
 console.log('  views       row menu -> editor page -> save -> back to the list')
 console.log('  presets     list, editor, member checklist, id from the Host, delete clears the selection')
+console.log('  packs       export downloads what the Host built, import reports every id it had to change')
 console.log('  fence       a forked draft carries the hash the fork wrote, so the next save is accepted')
 console.log('  order       a body file is deleted before the index drops it, and a draft is not dropped silently')
 console.log('  subscribe   sources page, add/fork, read-only subscribed bodies, a row that links to its repository')

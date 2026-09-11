@@ -127,6 +127,11 @@ window.__ModuleLoader__.load({
 .dsh-prompt-manager__addButton{flex:1 1 0;min-width:180px;height:44px;display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px dashed var(--dsw-alias-border-l3);border-radius:16px;background:0 0;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;cursor:pointer}
 .dsh-prompt-manager__addButton:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
 .dsh-prompt-manager__addButton:disabled{color:var(--dsw-alias-label-quaternary);cursor:default}
+/* The import control is a real file input behind the same dashed pill, so the
+   picker opens natively and the browser keeps its own file-selection UI. */
+.dsh-prompt-manager__fileLabel{cursor:pointer}
+.dsh-prompt-manager__fileLabel[aria-disabled='true']{color:var(--dsw-alias-label-quaternary);cursor:default}
+.dsh-prompt-manager__fileInput{display:none}
 
 /* surfaces and fields */
 .dsh-prompt-manager__surface{display:flex;flex-direction:column;gap:14px;padding:14px 16px;border-radius:12px;background:var(--dsw-alias-bg-module-platform);min-width:0}
@@ -984,6 +989,104 @@ window.__ModuleLoader__.load({
           setBusy(false)
         }
       }, [scope])
+
+      // ── preset packs ─────────────────────────────────────────────────────────
+
+      /**
+       * Hand one preset to the browser as a file.
+       *
+       * The Host builds the pack, so the body it carries is the one this machine
+       * would actually inject — not whatever the page last fetched. A failure is
+       * shown rather than swallowed: a download that silently does nothing is
+       * indistinguishable from a browser that ignored it.
+       */
+      const exportPreset = React.useCallback(async (preset) => {
+        setBusy(true)
+        setStatus(null)
+        try {
+          const response = await fetch(`${ROUTE}/pack/export?preset=${encodeURIComponent(preset.id)}`)
+          const text = await response.text()
+          if (!response.ok) {
+            let detail = `导出失败（HTTP ${String(response.status)}）`
+            try {
+              const payload = JSON.parse(text)
+              if (typeof payload.error === 'string') detail = payload.error
+            } catch { /* not JSON: the status line stands */ }
+            throw new Error(detail)
+          }
+          const name = `prompt-manager-pack-${preset.id}.json`
+          saveFile(name, text)
+          setStatus({ kind: 'info', text: `已导出组合「${preset.name}」：${name}` })
+        } catch (error) {
+          setStatus({ kind: 'error', text: error.message })
+        } finally {
+          setBusy(false)
+        }
+      }, [])
+
+      /**
+       * Read one file back into this deployment.
+       *
+       * The page sends the text as it found it: validating a pack belongs where
+       * the bodies are written, so a refusal names the entry that is wrong
+       * instead of the first thing a browser-side check happened to notice.
+       */
+      const importPackFile = React.useCallback(async (file) => {
+        if (file === undefined || file === null) return
+        setBusy(true)
+        setStatus(null)
+        try {
+          const text = await file.text()
+          let payload
+          try {
+            payload = JSON.parse(text)
+          } catch {
+            throw new Error(`${file.name} 不是 JSON 文件`)
+          }
+          const report = await request('POST', '/pack/import', payload)
+          setStatus({ kind: 'info', text: describeImport(report) })
+        } catch (error) {
+          setStatus({ kind: 'error', text: error.message })
+        } finally {
+          setBusy(false)
+        }
+      }, [])
+
+      /** What an import did, in one line, including everything it could not do. */
+      function describeImport(report) {
+        const entries = Array.isArray(report && report.entries) ? report.entries : []
+        const preset = report && typeof report.preset === 'object' && report.preset !== null ? report.preset : { name: '?' }
+        const parts = [`已导入 ${String(entries.length)} 条，组合「${String(preset.name)}」`]
+        const renames = Array.isArray(report.renamed) ? report.renamed : []
+        if (renames.length > 0) {
+          const shown = renames.slice(0, 3).map((rename) => `${rename.from}→${rename.to}`).join('、')
+          parts.push(`${String(renames.length)} 条换了 id（${shown}${renames.length > 3 ? '…' : ''}）`)
+        }
+        const noBody = Array.isArray(report.noBody) ? report.noBody : []
+        if (noBody.length > 0) parts.push(`${noBody.join('、')} 的正文来自订阅源，去「来源」页配上那个仓库就会出现`)
+        const dropped = Array.isArray(report.sourceDropped) ? report.sourceDropped : []
+        if (dropped.length > 0) parts.push(`${dropped.join('、')} 的 id 在本机被占用，已作为普通条目导入（不跟随上游）`)
+        const missing = Array.isArray(report.missingMembers) ? report.missingMembers : []
+        if (missing.length > 0) parts.push(`组合里还记着 ${missing.join('、')}，本机没有这些条目`)
+        const unregistered = Array.isArray(report.unregistered) ? report.unregistered : []
+        if (unregistered.length > 0) {
+          parts.push(`${unregistered.map((name) => `{{${name}}}`).join(' ')} 还没注册，会按字面量渲染`)
+        }
+        return `${parts.join('；')}。导入不会自动启用这个组合。`
+      }
+
+      /** Give a text file to the browser's downloader. */
+      function saveFile(name, text) {
+        const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }))
+        const anchor = document.createElement('a')
+        anchor.href = url
+        anchor.download = name
+        // Firefox only follows a click on an anchor that is in the document.
+        document.body.appendChild(anchor)
+        anchor.click()
+        anchor.remove()
+        URL.revokeObjectURL(url)
+      }
 
       // ── subscriptions ────────────────────────────────────────────────────────
 
@@ -1909,6 +2012,7 @@ window.__ModuleLoader__.load({
                 label: `更多操作：${preset.name}`,
                 items: [
                   { id: 'edit', label: '编辑', icon: icon('IconEditOutline16') },
+                  { id: 'export', label: '导出组合包' },
                   { id: 'activate', label: '设为当前', disabled: !writable || current },
                   { id: 'clear', label: '取消当前', disabled: !writable || !current },
                   { id: 'delete', label: '删除', icon: icon('IconTrashOutline16'), disabled: !writable },
@@ -1918,6 +2022,7 @@ window.__ModuleLoader__.load({
                 onSelect: (id) => {
                   setMenuFor(null)
                   if (id === 'edit') openPreset(preset)
+                  else if (id === 'export') { void exportPreset(preset) }
                   else if (id === 'activate') { void activatePreset(preset.id) }
                   else if (id === 'clear') { void activatePreset(NO_PRESET) }
                   else if (id === 'delete') { void removePreset(preset) }
@@ -1943,6 +2048,29 @@ window.__ModuleLoader__.load({
               disabled: !writable || busy,
               onClick: () => openPreset(null),
             }, '新建组合'),
+            // A label wrapping the input, so the picker opens without a ref and
+            // the control is a real file input rather than a lookalike button.
+            h('label', {
+              key: 'import',
+              className: 'dsh-prompt-manager__addButton dsh-prompt-manager__fileLabel',
+              'aria-disabled': !writable || busy,
+            }, [
+              '导入组合包…',
+              h('input', {
+                key: 'file',
+                type: 'file',
+                accept: '.json,application/json',
+                className: 'dsh-prompt-manager__fileInput',
+                disabled: !writable || busy,
+                onChange: (event) => {
+                  const file = event.target.files === undefined || event.target.files === null
+                    ? undefined
+                    : event.target.files[0]
+                  event.target.value = ''
+                  void importPackFile(file)
+                },
+              }),
+            ]),
           ]),
           statusLine,
         ])
