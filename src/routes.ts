@@ -34,14 +34,18 @@ import { isRepo, isRef, isSourceId, MAX_SOURCES, normalizeMirror, sourceSlug } f
 import { CheckError } from './sync.js'
 import { FetchFailure } from './net.js'
 import { ScriptError, type PromptScripts } from './scripts.js'
+import { MAX_PACK_BYTES, parsePack, type PackApplyResult, type PromptPack } from './pack.js'
 import type { Subscriptions } from './subscriptions.js'
 import type { VariableView } from './index.js'
 
 /** The single prefix every route below lives under. */
 export const ROUTE_PREFIX = '/prompt-manager'
 
+/** Slack over a body limit, for JSON escaping and envelope overhead. */
+const JSON_SLACK = 8192
+
 /** Slack over the body limit for JSON escaping overhead. */
-const READ_LIMIT = MAX_BODY_BYTES * 2 + 8192
+const READ_LIMIT = MAX_BODY_BYTES * 2 + JSON_SLACK
 
 /** Largest accepted title on the id-allocation route. */
 const TITLE_LIMIT = 4096
@@ -84,6 +88,23 @@ export interface PromptRouteHost {
    * making a model step.
    */
   variables(): VariableView[]
+  /**
+   * The pack for one preset, or `undefined` when no preset here has that id.
+   *
+   * Built on demand rather than cached: a body can be edited between two
+   * exports, and an export that served a stale copy would be worse than one that
+   * costs a few file reads.
+   */
+  packFor(presetId: string): PromptPack | undefined
+  /**
+   * Carry out an import.
+   *
+   * Resolves to what it did, or to why it did nothing — a pack that does not fit
+   * or names an unusable body is refused without a single write. A thrown error
+   * means the machine was left part-way, and the route reports it as the failure
+   * it is.
+   */
+  importPack(pack: PromptPack): Promise<PackApplyResult>
 }
 
 /**
@@ -192,6 +213,10 @@ function createHandler(host: PromptRouteHost): (request: IncomingMessage, respon
         await handleScript(host, method, name, request, response)
         return
       }
+      if (head === 'pack' && tail.length > 0) {
+        await handlePack(host, method, tail, request, response)
+        return
+      }
       sendJson(response, 404, { error: 'unknown prompt route' })
     } catch (error) {
       handleFailure(host, error, response)
@@ -232,6 +257,69 @@ async function handlePresetId(
     return
   }
   sendJson(response, 200, { id: entryIdFor(title.slice(0, TITLE_LIMIT), taken) })
+}
+
+/**
+ * Serve the two preset-pack routes.
+ *
+ * Export answers with a file the browser saves; import reads one back. Both are
+ * deliberately narrow: export never writes anything, and import is the only
+ * route here that creates entries from a document that came from somewhere else,
+ * so it validates the whole pack before it touches a single file.
+ *
+ * @param host - consulted for packs and asked to carry out an import.
+ * @param method - HTTP method of the request.
+ * @param tail - everything after `pack/`: `export` or `import`.
+ * @param request - the request; the export reads its query, the import its body.
+ * @param response - the response to answer on.
+ */
+async function handlePack(
+  host: PromptRouteHost,
+  method: string,
+  tail: string,
+  request: IncomingMessage,
+  response: ServerResponse,
+): Promise<void> {
+  if (tail === 'export') {
+    if (method !== 'GET') {
+      sendJson(response, 405, { error: `method ${method} is not allowed on the pack export` })
+      return
+    }
+    const presetId = new URL(request.url ?? '/', 'http://127.0.0.1').searchParams.get('preset') ?? ''
+    if (presetId.trim().length === 0) {
+      sendJson(response, 400, { error: '导出要在查询串里点名一个组合：/pack/export?preset=<组合 id>', code: 'missing-preset' })
+      return
+    }
+    const pack = host.packFor(presetId.trim())
+    if (pack === undefined) {
+      sendJson(response, 404, { error: `没有这个组合：${presetId}`, code: 'unknown-preset' })
+      return
+    }
+    // A name the browser can use when the address is opened directly; a page
+    // that fetches the URL and saves the blob names the file itself.
+    response.setHeader('content-disposition', `attachment; filename="prompt-manager-pack-${presetId}.json"`)
+    sendJson(response, 200, pack)
+    return
+  }
+  if (tail === 'import') {
+    if (method !== 'POST') {
+      sendJson(response, 405, { error: `method ${method} is not allowed on the pack import` })
+      return
+    }
+    const parsed = parsePack(await readJsonBody(request, MAX_PACK_BYTES + JSON_SLACK))
+    if (!parsed.ok) {
+      sendJson(response, 400, { error: parsed.message, code: parsed.code })
+      return
+    }
+    const outcome = await host.importPack(parsed.pack)
+    if (!outcome.ok) {
+      sendJson(response, 400, { error: outcome.message, code: outcome.code })
+      return
+    }
+    sendJson(response, 200, outcome.report)
+    return
+  }
+  sendJson(response, 404, { error: `unknown pack route: ${JSON.stringify(tail)}` })
 }
 
 /**
@@ -699,17 +787,19 @@ function sameOrigin(request: IncomingMessage): boolean {
 }
 
 /**
- * Read a JSON request body under the route's own size limit.
+ * Read a JSON request body under a size limit.
  * @param request - the incoming request.
+ * @param limit - largest accepted body in bytes; the pack route raises it,
+ * because one pack may carry what the entry route carries in fifty writes.
  * @returns the parsed JSON value, or `undefined` when the body is not JSON.
  */
-async function readJsonBody(request: IncomingMessage): Promise<unknown> {
+async function readJsonBody(request: IncomingMessage, limit: number = READ_LIMIT): Promise<unknown> {
   const chunks: Buffer[] = []
   let size = 0
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
     size += buffer.length
-    if (size > READ_LIMIT) throw new PromptStoreError('too-large', `request body is ${String(size)} bytes; the limit is ${String(READ_LIMIT)}`)
+    if (size > limit) throw new PromptStoreError('too-large', `request body is ${String(size)} bytes; the limit is ${String(limit)}`)
     chunks.push(buffer)
   }
   if (size === 0) return undefined

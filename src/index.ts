@@ -57,6 +57,16 @@ import {
 } from './entries.js'
 import { installPromptRoutes } from './routes.js'
 import { sanitizeReferences } from './guard.js'
+import {
+  buildPack,
+  planImport,
+  writePackBodies,
+  type PackApplyResult,
+  type PackImportReport,
+  type PackMember,
+  type PackSourceRef,
+  type PromptPack,
+} from './pack.js'
 import { PromptStore } from './store.js'
 import { normalizeMirror, parseSources, type PromptSource } from './source.js'
 import { Subscriptions, type SubscriptionLocation } from './subscriptions.js'
@@ -322,6 +332,33 @@ function loadSchemaFactory(): SchemaFactory | undefined {
     return undefined
   }
 }
+
+/**
+ * This package's own version, read at most once.
+ *
+ * Read through `createRequire` because `package.json` sits beside `lib/` rather
+ * than inside the emitted program, and a deployment that ships only the built
+ * files must still be able to write a pack — an empty version in the header is
+ * a cosmetic loss, not a failure.
+ *
+ * @returns the version, or an empty string when it cannot be read.
+ */
+function ownVersion(): string {
+  if (ownVersionCache !== undefined) return ownVersionCache
+  let version = ''
+  try {
+    const loaded: unknown = createRequire(import.meta.url)('../package.json')
+    const candidate = (loaded as { version?: unknown }).version
+    if (typeof candidate === 'string') version = candidate
+  } catch {
+    version = ''
+  }
+  ownVersionCache = version
+  return version
+}
+
+/** Cache for {@link ownVersion}. */
+let ownVersionCache: string | undefined
 
 /**
  * Report a non-fatal problem without ever breaking the mount.
@@ -616,6 +653,17 @@ export function apply(ctx: Context, config: Config = {}): void {
   /** How the engine writes the index back; present only with a settings service. */
   let writeEntries: ((entries: PromptEntry[]) => Promise<void>) | undefined
 
+  /**
+   * How an import lands the index and the preset list, in one settings write.
+   *
+   * Separate from {@link writeEntries} because an import has to place both
+   * fields together: a preset whose members were written while its entries were
+   * not is an index somebody has to repair by hand, whereas the reverse — bodies
+   * on disk that the index does not name — is repaired by importing again, since
+   * the ids come back the same.
+   */
+  let writeIndex: ((patch: { entries: PromptEntry[]; presets: PromptPreset[] }) => Promise<void>) | undefined
+
   function field(name: string): unknown {
     return typeof resolved === 'object' && resolved !== null && !Array.isArray(resolved)
       ? (resolved as Record<string, unknown>)[name]
@@ -716,6 +764,156 @@ export function apply(ctx: Context, config: Config = {}): void {
   /** Every entry registers under the plugin's own prefix. */
   function sectionNameFor(entry: PromptEntry): string {
     return `${USER_SECTION_PREFIX}${entry.id}`
+  }
+
+  /**
+   * Build the pack for one preset: its members, each carrying either its body or
+   * the source that owns it.
+   *
+   * That split is the whole point of the format. A local or built-in body is
+   * copied into the pack, because nothing else could reproduce it. A subscribed
+   * body is *named* rather than copied, because it belongs to a source the
+   * importing machine can configure for itself — copying it would silently
+   * divorce the entry from upstream. A member the index no longer has cannot be
+   * carried at all and is reported instead of quietly left out.
+   *
+   * @param presetId - the preset to export.
+   * @returns the pack, or `undefined` when no such preset exists here.
+   */
+  function packFor(presetId: string): PromptPack | undefined {
+    const preset = presetsInForce().find((candidate) => candidate.id === presetId)
+    if (preset === undefined) return undefined
+    const sources = sourcesInForce()
+    const members: PackMember[] = []
+    const missing: string[] = []
+    const carried = new Set<string>()
+    for (const id of preset.entries) {
+      if (carried.has(id)) continue
+      const entry = byId.get(id)
+      if (entry === undefined) {
+        missing.push(id)
+        continue
+      }
+      carried.add(id)
+      const owner = entry.source !== undefined && entry.source.length > 0
+        ? entry.source
+        : locations.get(id)?.slug
+      if (owner !== undefined) {
+        const source = sources.find((candidate) => candidate.id === owner)
+        const ref: PackSourceRef = { slug: owner }
+        if (source !== undefined) {
+          ref.repo = source.repo
+          ref.ref = source.ref
+        }
+        const file = locations.get(id)?.path
+        if (file !== undefined) ref.file = file
+        members.push({ id, title: entry.title, order: entry.order, enabled: entry.enabled, source: ref })
+        continue
+      }
+      const resolved = describe(id)
+      members.push({
+        id,
+        title: entry.title,
+        order: entry.order,
+        enabled: entry.enabled,
+        body: resolved.text,
+        origin: resolved.source === 'builtin' ? 'builtin' : 'local',
+      })
+    }
+    return buildPack({ preset, members, missing, pluginVersion: ownVersion() })
+  }
+
+  /**
+   * Carry out an import: write the bodies the pack brought, then merge its
+   * entries and its preset into the index in a single settings write.
+   *
+   * Everything refusable is refused before a file is written, and a failure
+   * while writing takes back the files this import created, so a refused pack
+   * leaves the machine exactly as it was. The index lands last on purpose: a
+   * crash in between leaves body files nothing points at, which importing the
+   * same pack again repairs, while the opposite order would leave index records
+   * whose bodies never existed.
+   *
+   * @param pack - a pack that already passed {@link parsePack}.
+   * @returns what it did, or why it did nothing.
+   */
+  async function importPack(pack: PromptPack): Promise<PackApplyResult> {
+    if (writeIndex === undefined) {
+      return { ok: false, code: 'bad-format', message: '导入需要 settings 服务来写索引，当前部署没有挂载它' }
+    }
+    const planned = planImport(pack, {
+      entryIds: takenIds(),
+      presetIds: presetsInForce().map((preset) => preset.id),
+    })
+    if (!planned.ok) return planned
+    const { plan } = planned
+
+    writePackBodies(plan.entries, {
+      write: (id, body) => {
+        // `absent` rather than `any`: an id this import believes is free must not
+        // silently replace a body somebody put there a moment ago.
+        store.write(id, body, { kind: 'absent' })
+      },
+      remove: (id) => {
+        try {
+          store.remove(id)
+        } catch (error) {
+          warn(ctx, `${id} 的正文回滚失败：${messageOf(error)}`)
+        }
+      },
+    })
+
+    const added: PromptEntry[] = plan.entries.map((entry) => {
+      const record: PromptEntry = {
+        id: entry.id,
+        title: entry.title,
+        order: entry.order,
+        enabled: entry.enabled,
+      }
+      if (entry.source !== undefined) record.source = entry.source
+      return record
+    })
+    await writeIndex({ entries: [...active, ...added], presets: [...presetsInForce(), plan.preset] })
+
+    const report: PackImportReport = {
+      entries: plan.entries.map((entry) => {
+        const created: { id: string; title: string; renamedFrom?: string | undefined } = {
+          id: entry.id,
+          title: entry.title,
+        }
+        if (entry.renamedFrom !== undefined) created.renamedFrom = entry.renamedFrom
+        return created
+      }),
+      preset: plan.preset,
+      renamed: plan.renamed,
+      noBody: plan.noBody,
+      sourceDropped: plan.sourceDropped,
+      missingMembers: plan.missingMembers,
+      unregistered: unregisteredReferences(plan.entries.flatMap((entry) => entry.body ?? [])),
+    }
+    return { ok: true, report }
+  }
+
+  /**
+   * Variable names the given bodies reference that this plugin does not supply.
+   *
+   * A report, never a refusal: another row may register a name, and a name that
+   * is merely unregistered today is a variable somebody is still about to write.
+   * The reference guard is what keeps such a body from failing an assembly.
+   *
+   * @param bodies - the text that arrived in a pack.
+   * @returns the distinct names, in the order they first appear.
+   */
+  function unregisteredReferences(bodies: readonly string[]): string[] {
+    const found: string[] = []
+    for (const body of bodies) {
+      for (const match of body.matchAll(/\{\{([a-z][a-z0-9_]*)\}\}/g)) {
+        const reference = match[1]
+        if (reference === undefined || variables.has(reference)) continue
+        if (!found.includes(reference)) found.push(reference)
+      }
+    }
+    return found
   }
 
   /**
@@ -864,6 +1062,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     subscriptions,
     scripts,
     variables: () => variableViews(),
+    packFor,
+    importPack,
   })
 
   /** Whether the cap has already been reported for this mount. */
@@ -918,6 +1118,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
       writeEntries = async (next) => {
         await scope.update({ entries: next })
+      }
+      writeIndex = async (patch) => {
+        await scope.update({ entries: patch.entries, presets: patch.presets })
       }
       const sync = (): void => {
         resolved = scope.get()

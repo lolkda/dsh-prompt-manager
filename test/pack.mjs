@@ -17,6 +17,7 @@ import {
   PACK_VERSION,
   parsePack,
   planImport,
+  writePackBodies,
 } from '../lib/pack.js'
 import { MAX_BODY_BYTES, MAX_ENTRIES } from '../lib/entries.js'
 
@@ -293,8 +294,46 @@ const exact = planImport(pack, {
 })
 assert.equal(exact.ok, true, 'a pack that exactly fills the last slots is accepted')
 
+// ── writing the bodies ────────────────────────────────────────────────────────
+
+// The rollback is the reason the plan carries ids rather than a bare object: a
+// half-written import must not leave files nothing points at.
+const sinkLog = []
+const sinkFor = (failOn) => ({
+  write: (id, body) => {
+    sinkLog.push(`write ${id} (${String(body.length)} 字节)`)
+    if (id === failOn) throw new Error('磁盘满了')
+  },
+  remove: (id) => { sinkLog.push(`remove ${id}`) },
+})
+
+writePackBodies(
+  [
+    { id: 'a', title: 'a', order: 1, enabled: true, body: 'one' },
+    { id: 'b', title: 'b', order: 2, enabled: true },
+    { id: 'c', title: 'c', order: 3, enabled: true, body: 'three' },
+  ],
+  sinkFor(null),
+)
+assert.deepEqual(sinkLog, ['write a (3 字节)', 'write c (5 字节)'], 'a subscription carries no body, so nothing is written for it')
+
+sinkLog.length = 0
+assert.throws(
+  () => writePackBodies(
+    [
+      { id: 'a', title: 'a', order: 1, enabled: true, body: 'one' },
+      { id: 'b', title: 'b', order: 2, enabled: true, body: 'two' },
+    ],
+    sinkFor('b'),
+  ),
+  /磁盘满了/,
+  'a failing body write is rethrown',
+)
+assert.deepEqual(sinkLog, ['write a (3 字节)', 'write b (3 字节)', 'remove a'], 'and the files this import created are taken back')
+
 console.log('pack ok')
 console.log('  build       local bodies inline, subscriptions by reference, missing members named')
 console.log('  parse       format and version named, bad entries refused by position, unrenderable bodies refused')
 console.log('  recover     unusable ids and orders recovered instead of refused')
 console.log('  plan        free ids kept, taken ids renamed with the preset following, capacity checked first')
+console.log('  bodies      written in pack order, subscriptions skipped, everything taken back on failure')

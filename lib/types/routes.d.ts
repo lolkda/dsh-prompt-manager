@@ -20,6 +20,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { ResolvedBody } from './entries.js';
 import { PromptStore } from './store.js';
 import { type PromptScripts } from './scripts.js';
+import { type PackApplyResult, type PromptPack } from './pack.js';
 import type { Subscriptions } from './subscriptions.js';
 import type { VariableView } from './index.js';
 /** The single prefix every route below lives under. */
@@ -53,6 +54,23 @@ export interface PromptRouteHost {
      * making a model step.
      */
     variables(): VariableView[];
+    /**
+     * The pack for one preset, or `undefined` when no preset here has that id.
+     *
+     * Built on demand rather than cached: a body can be edited between two
+     * exports, and an export that served a stale copy would be worse than one that
+     * costs a few file reads.
+     */
+    packFor(presetId: string): PromptPack | undefined;
+    /**
+     * Carry out an import.
+     *
+     * Resolves to what it did, or to why it did nothing — a pack that does not fit
+     * or names an unusable body is refused without a single write. A thrown error
+     * means the machine was left part-way, and the route reports it as the failure
+     * it is.
+     */
+    importPack(pack: PromptPack): Promise<PackApplyResult>;
 }
 /**
  * Register the prompt-store route.

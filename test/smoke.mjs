@@ -81,6 +81,11 @@ function fakeSettings(initial) {
           if (options?.base !== undefined) state.value = options.base
           return {
             get: () => state.value,
+            update: async (patch) => {
+              state.value = { ...state.value, ...patch }
+              state.watcher?.()
+              return state.value
+            },
             watch: (callback) => {
               state.watcher = callback
               return () => { state.watcher = undefined }
@@ -138,9 +143,12 @@ function fakeRequest(options) {
  * @returns the response plus its captured state.
  */
 function fakeResponse() {
-  const state = { status: 0, body: '' }
+  const state = { status: 0, headers: {}, body: '' }
   return {
     state,
+    setHeader(name, value) {
+      state.headers[name.toLowerCase()] = value
+    },
     writeHead(status) {
       state.status = status
     },
@@ -728,6 +736,118 @@ try {
   assert.equal(renamed.state.status, 200, `a script may adopt a name left by a deleted script, got ${renamed.state.body}`)
   assert.equal((await mounted.read()).prompt, 'rust=2.0.0', 'so a rename does not lock its variables behind a restart')
 
+  // ── preset packs, through the route, against the real store and index ───────
+
+  // A subscription on disk: the layout `sync` leaves behind, so `refreshLocations`
+  // sees it and the export can name the source instead of copying its body.
+  mkdirSync(join(LIVE_ROUTES, 'sources', 'pack', 'current'), { recursive: true })
+  writeFileSync(join(LIVE_ROUTES, 'sources', 'pack', 'current', 'ctf.md'), '# 契约\n\n上游正文\n', 'utf8')
+  writeFileSync(
+    join(LIVE_ROUTES, 'sources', 'pack', 'state.json'),
+    JSON.stringify({
+      ref: 'main',
+      files: { 'ctf.md': { id: 'pack-ctf', title: '契约', order: 30, enabled: true, sha1: 'a'.repeat(40) } },
+      appliedAt: '2026-09-12T00:00:00.000Z',
+      manifestSha1: 'b'.repeat(40),
+      undo: {},
+      headSha: 'c'.repeat(40),
+    }),
+    'utf8',
+  )
+
+  writeBody('local-one', '本地正文 {{rust}}', LIVE_ROUTES)
+  routeSettings.state.value = {
+    entries: [
+      { id: 'local-one', title: '本地条目', order: 10, enabled: true },
+      { id: 'pack-ctf', title: '契约', order: 30, enabled: true, source: 'pack' },
+    ],
+    presets: [{ id: 'ctf', name: 'ctf', entries: ['local-one', 'pack-ctf', 'gone-entry'] }],
+    activePreset: '',
+    sources: [{ id: 'pack', repo: 'o/r', ref: 'main', mirror: '', enabled: true }],
+    mirror: '',
+    proxy: { kind: 'none', url: '' },
+  }
+  routeSettings.state.watcher()
+
+  const exported = await call({ url: '/prompt-manager/pack/export?preset=ctf' })
+  assert.equal(exported.state.status, 200, `the export must answer 200, got ${exported.state.body}`)
+  const carried = exported.json()
+  assert.equal(carried.version, 1, 'the pack names the format version it was written in')
+  assert.equal(carried.generator.pluginVersion.length > 0, true, 'and the version of the plugin that wrote it')
+  assert.deepEqual(carried.missing, ['gone-entry'], 'a member the index no longer has is reported instead of dropped')
+  assert.deepEqual(
+    carried.entries.map((entry) => entry.id),
+    ['local-one', 'pack-ctf'],
+    'the members that do exist are carried, in the preset order',
+  )
+  assert.equal(carried.entries[0].body, '本地正文 {{rust}}', 'a local body is copied into the pack')
+  assert.equal(carried.entries[0].origin, 'local', 'and labelled as this machine\'s own')
+  assert.equal(carried.entries[1].body, undefined, 'a subscribed body is not copied')
+  assert.deepEqual(
+    carried.entries[1].source,
+    { slug: 'pack', repo: 'o/r', ref: 'main', file: 'ctf.md' },
+    'the pack names the source, the ref, and the file instead',
+  )
+
+  // Import the very pack this deployment just wrote, plus one new entry.
+  const incoming = {
+    ...carried,
+    preset: { id: 'ctf', name: 'ctf', entries: ['local-one', 'pack-ctf', 'gone-entry', 'fresh-one'] },
+    entries: [...carried.entries, { id: 'fresh-one', title: '新条目', order: 50, enabled: true, origin: 'local', body: '新正文 {{rust}}' }],
+  }
+  const imported = await call({
+    method: 'POST',
+    url: '/prompt-manager/pack/import',
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify(incoming),
+  })
+  assert.equal(imported.state.status, 200, `the import must answer 200, got ${imported.state.body}`)
+  const report = imported.json()
+  assert.deepEqual(
+    report.renamed,
+    [{ from: 'local-one', to: 'local-one-2' }, { from: 'pack-ctf', to: 'pack-ctf-2' }],
+    'ids already in use here give way to suffixed variants instead of overwriting anything',
+  )
+  assert.deepEqual(report.sourceDropped, ['契约'], 'and a renamed subscription gives up a source it could no longer read')
+  assert.deepEqual(report.missingMembers, ['gone-entry'], 'a member the pack itself could not carry is reported')
+  assert.deepEqual(report.unregistered, [], 'the imported bodies reference only variables this deployment registers')
+  assert.equal(
+    readFileSync(join(LIVE_ROUTES, 'sections', 'fresh-one.md'), 'utf8'),
+    '新正文 {{rust}}',
+    'the body the pack carried is on disk',
+  )
+  assert.equal(
+    routeSettings.state.value.entries.some((entry) => entry.id === 'fresh-one'),
+    true,
+    'and the index names it',
+  )
+  assert.equal(
+    routeSettings.state.value.entries.find((entry) => entry.id === 'pack-ctf-2').source,
+    undefined,
+    'while the entry that lost its id does not claim to be a subscription',
+  )
+  assert.deepEqual(
+    routeSettings.state.value.presets.at(-1),
+    { id: 'ctf-2', name: 'ctf', entries: ['local-one-2', 'pack-ctf-2', 'gone-entry', 'fresh-one'] },
+    'the imported preset lands beside the one already here, its membership following the renames',
+  )
+  assert.equal(
+    routeSettings.state.value.presets.length,
+    2,
+    'importing the same pack twice produces two sets rather than rewriting the first',
+  )
+
+  // A pack that cannot be read changes nothing at all.
+  const entriesBefore = JSON.stringify(routeSettings.state.value.entries)
+  const refused = await call({
+    method: 'POST',
+    url: '/prompt-manager/pack/import',
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({ format: 'dsh-prompt-manager-pack', version: 1, preset: { name: 'x', entries: [] }, entries: [{ id: 'y', title: '' }] }),
+  })
+  assert.equal(refused.state.status, 400, 'a pack with an unusable entry is refused')
+  assert.equal(JSON.stringify(routeSettings.state.value.entries), entriesBefore, 'and the index is untouched')
+
   // ── config validation ───────────────────────────────────────────────────────
   const fakeCtx = {
     effect: (execute) => {
@@ -785,6 +905,7 @@ try {
   console.log('  guard       an unresolvable reference renders as prose and is reported, never fatal')
   console.log('  scripts     a cached value is in force at mount; a new one is measured behind it, and a delete keeps only what an entry references')
   console.log(`  schema      ${schemaNote}`)
+  console.log('  packs       export names a subscription instead of copying it; import lands bodies, then the index')
 } finally {
   rmSync(STORE_ROOT, { recursive: true, force: true })
   for (const root of extraRoots) rmSync(root, { recursive: true, force: true })

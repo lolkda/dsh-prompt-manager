@@ -16,6 +16,7 @@ import { join } from 'node:path'
 import { installPromptRoutes, ROUTE_PREFIX } from '../lib/routes.js'
 import { PromptStore } from '../lib/store.js'
 import { entryIdFor, MAX_ENTRIES, MAX_PRESETS } from '../lib/entries.js'
+import { MAX_PACK_BYTES } from '../lib/pack.js'
 import { MAX_SOURCES } from '../lib/source.js'
 import { CheckError } from '../lib/sync.js'
 import { ScriptError } from '../lib/scripts.js'
@@ -51,12 +52,15 @@ function fakeRequest(options) {
  * @returns the response plus its captured state.
  */
 function fakeResponse() {
-  const state = { status: 0, headers: undefined, body: '' }
+  const state = { status: 0, headers: {}, body: '' }
   return {
     state,
+    setHeader(name, value) {
+      state.headers[name.toLowerCase()] = value
+    },
     writeHead(status, headers) {
       state.status = status
-      state.headers = headers
+      Object.assign(state.headers, headers)
     },
     end(body) {
       state.body = body ?? ''
@@ -73,6 +77,27 @@ try {
   const routes = []
   /** Preset ids the fake host reports; a case below fills it to reach the cap. */
   const presetIds = { held: [] }
+
+  /** One canned pack, and what the fake host records about the pack routes. */
+  const samplePack = {
+    format: 'dsh-prompt-manager-pack',
+    version: 1,
+    exportedAt: '2026-09-12T00:00:00.000Z',
+    generator: { plugin: 'dsh-prompt-manager', pluginVersion: '9.9.9' },
+    preset: { id: 'ctf', name: 'ctf', entries: ['env'] },
+    entries: [{ id: 'env', title: '本机环境', order: 5, enabled: true, origin: 'local', body: '# Machine environment\n' }],
+    missing: [],
+  }
+  const packs = {
+    /** Preset ids the export route asked about, in order. */
+    served: [],
+    /** Packs the import route handed to the engine. */
+    imports: [],
+    /** Which preset ids have a pack to serve. */
+    available: new Map(),
+    /** When set, `importPack` refuses with it instead of creating anything. */
+    refusal: null,
+  }
   const ctx = {
     inject: (deps, callback) => callback({ webServer: { register: (route) => { routes.push(route); return () => {} } } }),
     effect: (execute) => {
@@ -192,6 +217,26 @@ try {
       { name: 'os', value: 'Windows', source: 'environment', updatedAt: '2026-09-11T00:00:00.000Z', referencedBy: ['环境'] },
       { name: 'node', value: '24.18.0', source: 'probe', updatedAt: '2026-09-11T00:00:00.000Z', referencedBy: [] },
     ],
+    packFor: (presetId) => {
+      packs.served.push(presetId)
+      return packs.available.get(presetId)
+    },
+    importPack: async (pack) => {
+      packs.imports.push(pack)
+      if (packs.refusal !== null) return { ok: false, ...packs.refusal }
+      return {
+        ok: true,
+        report: {
+          entries: [{ id: 'env', title: '本机环境' }],
+          preset: { id: 'ctf', name: 'ctf', entries: ['env'] },
+          renamed: [],
+          noBody: [],
+          sourceDropped: [],
+          missingMembers: [],
+          unregistered: [],
+        },
+      }
+    },
   })
 
   assert.equal(routes.length, 1, 'the plugin must register exactly one route')
@@ -719,6 +764,134 @@ try {
 
   assert.deepEqual(warnings, [], `no warning expected, got: ${warnings.join(' | ')}`)
 
+  // ── preset packs ────────────────────────────────────────────────────────────
+
+  const exportUrl = (preset) => `${ROUTE_PREFIX}/pack/export?preset=${encodeURIComponent(preset)}`
+
+  const missingPreset = await call({ url: `${ROUTE_PREFIX}/pack/export` })
+  assert.equal(missingPreset.state.status, 400, 'an export without a preset is refused')
+  assert.equal(missingPreset.json().code, 'missing-preset', 'and says which parameter is missing')
+
+  const unknownPreset = await call({ url: exportUrl('nope') })
+  assert.equal(unknownPreset.state.status, 404, 'an export of a preset that does not exist is a 404')
+  assert.equal(unknownPreset.json().code, 'unknown-preset', 'with a code the page can branch on')
+
+  packs.available.set('ctf', samplePack)
+  const exported = await call({ url: exportUrl('ctf') })
+  assert.equal(exported.state.status, 200, 'a preset that exists exports')
+  assert.deepEqual(packs.served, ['nope', 'ctf'], 'the host is asked about the preset that was named')
+  assert.equal(
+    exported.state.headers['content-disposition'],
+    'attachment; filename="prompt-manager-pack-ctf.json"',
+    'the download carries a file name, so the URL works from the address bar too',
+  )
+  assert.deepEqual(exported.json(), samplePack, 'and the body is the pack itself')
+
+  const wrongExportMethod = await call({ method: 'POST', url: exportUrl('ctf'), origin: 'http://127.0.0.1:3080', body: '{}' })
+  assert.equal(wrongExportMethod.state.status, 405, 'an export is a read, so only GET is allowed on it')
+
+  const foreignJson = await call({
+    method: 'POST',
+    url: `${ROUTE_PREFIX}/pack/import`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({ format: 'something-else', version: 1 }),
+  })
+  assert.equal(foreignJson.state.status, 400, 'a foreign JSON file is refused')
+  assert.equal(foreignJson.json().code, 'bad-format', 'as bad-format')
+  assert.deepEqual(packs.imports, [], 'and it never reaches the engine')
+
+  const unusableBody = await call({
+    method: 'POST',
+    url: `${ROUTE_PREFIX}/pack/import`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({
+      format: 'dsh-prompt-manager-pack',
+      version: 1,
+      preset: { id: 'x', name: 'x', entries: ['a'] },
+      entries: [{ id: 'a', title: '写法不对', body: 'bad {{不是变量名}} reference' }],
+    }),
+  })
+  assert.equal(unusableBody.state.status, 400, 'a body that could never assemble is refused')
+  assert.equal(unusableBody.json().code, 'bad-reference', 'as bad-reference')
+  assert.deepEqual(packs.imports, [], 'and nothing is written for it either')
+
+  // The reason the import route raises its own read limit: a pack may carry what
+  // the entry route carries in fifty separate writes. Each body stays under the
+  // store's own limit, while the pack as a whole is past the ordinary one.
+  const chunk = 'x'.repeat(200_000)
+  const wideIds = ['a', 'b', 'c', 'd']
+  const wide = await call({
+    method: 'POST',
+    url: `${ROUTE_PREFIX}/pack/import`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({
+      format: 'dsh-prompt-manager-pack',
+      version: 1,
+      preset: { id: 'wide', name: 'wide', entries: wideIds },
+      entries: wideIds.map((id, index) => ({ id, title: `大条目 ${String(index)}`, order: index, body: chunk })),
+    }),
+  })
+  assert.equal(wide.state.status, 200, 'a pack larger than a single body is still read')
+  assert.equal(packs.imports.at(-1).entries.length, 4, 'and arrives whole')
+
+  const tooBig = await call({
+    method: 'POST',
+    url: `${ROUTE_PREFIX}/pack/import`,
+    origin: 'http://127.0.0.1:3080',
+    body: 'x'.repeat(MAX_PACK_BYTES + 8192 + 1),
+  })
+  assert.equal(tooBig.state.status, 400, 'a pack past the ceiling is refused while being read')
+  assert.equal(tooBig.json().code, 'too-large', 'as too-large')
+
+  // A refusal the engine reaches after validation is reported as a 400 with its
+  // own code, not as a server error: nothing was written.
+  packs.refusal = { code: 'too-many-entries', message: '这台机器还能再放 0 条，这个包有 2 条' }
+  const packed = await call({
+    method: 'POST',
+    url: `${ROUTE_PREFIX}/pack/import`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify(samplePack),
+  })
+  assert.equal(packed.state.status, 400, 'a pack that does not fit is refused')
+  assert.equal(packed.json().code, 'too-many-entries', 'with the code the planner chose')
+  assert.ok(packed.json().error.includes('还能再放'), 'and the message it wrote for the page')
+
+  packs.refusal = null
+  const imported = await call({
+    method: 'POST',
+    url: `${ROUTE_PREFIX}/pack/import`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify(samplePack),
+  })
+  assert.equal(imported.state.status, 200, 'a usable pack imports')
+  assert.deepEqual(imported.json().entries, [{ id: 'env', title: '本机环境' }], 'and its report reaches the page')
+  assert.equal(packs.imports.at(-1).preset.id, 'ctf', 'the engine was handed the pack the route parsed')
+
+  const wrongImportMethod = await call({ url: `${ROUTE_PREFIX}/pack/import` })
+  assert.equal(wrongImportMethod.state.status, 405, 'an import is a write, so only POST is allowed on it')
+
+  const unknownPackAction = await call({ url: `${ROUTE_PREFIX}/pack/nonsense` })
+  assert.equal(unknownPackAction.state.status, 404, 'an unknown pack action is a 404')
+
+  // Import writes bodies and settings, so it sits behind the same two gates as
+  // every other write.
+  const crossOriginImport = await call({
+    method: 'POST',
+    url: `${ROUTE_PREFIX}/pack/import`,
+    origin: 'http://evil.example',
+    body: JSON.stringify(samplePack),
+  })
+  assert.equal(crossOriginImport.state.status, 403, 'a cross-origin import is refused')
+
+  const remoteExport = await call({
+    url: exportUrl('ctf'),
+    remoteAddress: '10.0.0.5',
+    host: '10.0.0.5:3080',
+  })
+  assert.equal(remoteExport.state.status, 403, 'and even an export stays on loopback')
+
+  assert.deepEqual(warnings, [], `no warning expected, got: ${warnings.join(' | ')}`)
+
   console.log('routes ok')
   console.log('  gates       loopback peer + loopback host + same-origin writes only, unusable ids refused')
   console.log('  fencing     409 on absent-or-changed override, 200 on a matching hash')
@@ -728,6 +901,7 @@ try {
   console.log('  sources     add / list / check / apply / revert / forget, subscribed bodies read-only')
   console.log('  variables   list with provenance and references, draft run, saved run, refresh')
   console.log('  scripts     read / save with fence / delete, 422 on an unusable run, host-only writes')
+  console.log('  packs       export by preset with a download name, import validated before it is applied')
 } finally {
   rmSync(ROOT, { recursive: true, force: true })
 }

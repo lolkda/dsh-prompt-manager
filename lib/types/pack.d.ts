@@ -180,6 +180,39 @@ export type PackImportResult = {
     ok: true;
     plan: PackImportPlan;
 } | PackRefusal;
+/** What an import did, in the words the page reports it with. */
+export interface PackImportReport {
+    /** Entries created, in pack order. */
+    entries: Array<{
+        id: string;
+        title: string;
+        renamedFrom?: string | undefined;
+    }>;
+    /** The preset created, with membership already pointing at the ids above. */
+    preset: PromptPreset;
+    /** Every id that changed, so the page can say which entry is which. */
+    renamed: Array<{
+        from: string;
+        to: string;
+    }>;
+    /** Titles whose body the pack does not carry, because a source supplies it. */
+    noBody: string[];
+    /** Titles that arrived as subscriptions but could not keep their id. */
+    sourceDropped: string[];
+    /** Preset members the pack itself could not carry. */
+    missingMembers: string[];
+    /**
+     * Variable names the imported bodies reference that *this* plugin does not
+     * supply. Not proof of a broken prompt: another row may register them, and the
+     * reference guard renders whatever is left as prose and says so in the log.
+     */
+    unregistered: string[];
+}
+/** The result of carrying out an import. */
+export type PackApplyResult = {
+    ok: true;
+    report: PackImportReport;
+} | PackRefusal;
 /** The result of reading a pack. */
 export type PackParseResult = {
     ok: true;
@@ -195,6 +228,38 @@ export type PackParseResult = {
  * @returns the pack, ready to be serialized.
  */
 export declare function buildPack(input: PackExportInput): PromptPack;
+/** Where an import's body files go. */
+export interface PackBodySink {
+    /**
+     * Create one body file.
+     *
+     * Must refuse to replace a file that already exists: an id the planner
+     * believes is free may have been taken by somebody else in the meantime, and
+     * silently overwriting their body is the one outcome worse than failing.
+     */
+    write(id: string, body: string): void;
+    /**
+     * Remove one body file this call created.
+     *
+     * Expected to swallow its own failures — there is nothing useful to do about
+     * one at this point, and the original error is the one worth reporting.
+     */
+    remove(id: string): void;
+}
+/**
+ * Write the bodies an import carries, and take back whatever was written if one
+ * of them fails.
+ *
+ * An import that gets half-way leaves an index nobody has updated yet and a pile
+ * of files nothing points at, which is why the files go down first and the index
+ * last: a failure here removes exactly what this call created, so the machine
+ * ends up as it was, and importing the same pack again starts clean.
+ *
+ * @param entries - the planned entries, in pack order.
+ * @param sink - where the bodies go.
+ * @throws the sink's own error, after the rollback.
+ */
+export declare function writePackBodies(entries: readonly PackImportEntry[], sink: PackBodySink): void;
 /**
  * Read a pack from an untrusted value.
  *
