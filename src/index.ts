@@ -305,6 +305,23 @@ export function apply(ctx: Context, config: Config = {}): void {
   }>()
 
   /**
+   * How to unregister each variable's provider.
+   *
+   * Kept so a variable can be dropped when nothing references it any more — the
+   * disposer Cordis handed back when the provider was registered.
+   */
+  const variableDisposers = new Map<string, () => void>()
+
+  /**
+   * Whether any entry currently references one variable.
+   *
+   * Filled in once the index exists; the engine asks during mount, before the
+   * per-entry bodies have been read, so the default answers "no reference" —
+   * which at that point is true, because nothing has been declared yet.
+   */
+  let isReferenced: (variable: string) => boolean = () => false
+
+  /**
    * Scripts currently on disk.
    *
    * A variable keeps its name and value after the script that supplied it is
@@ -352,16 +369,38 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
     variables.set(variable, { value, source, detail, updatedAt: new Date().toISOString() })
     try {
-      ctx.effect(
+      const dispose = ctx.effect(
         () => ctx.systemPrompt.variable(variable, () => variables.get(variable)?.value ?? texts.missing),
         `prompt-manager.variable(${variable})`,
       )
+      variableDisposers.set(variable, dispose)
     } catch (error) {
       variables.delete(variable)
       warn(ctx, `cannot register the prompt variable ${variable}, so entries referencing it will not assemble: ${messageOf(error)}`)
       return 'conflict'
     }
     return 'declared'
+  }
+
+  /**
+   * Let go of one variable this plugin registered.
+   *
+   * Unregistering the provider as well as dropping the record, because a
+   * registered name with no value is worse than no name at all: the reference
+   * would resolve to the placeholder text instead of being reported as the
+   * unresolvable one it has become.
+   *
+   * @param variable - the `{{name}}` to drop.
+   * @param detail - the script that declared it; another owner's name is kept.
+   */
+  function forgetVariable(variable: string, detail: string): void {
+    const record = variables.get(variable)
+    if (record === undefined) return
+    if (record.source !== 'script' || record.detail !== detail) return
+    variables.delete(variable)
+    const dispose = variableDisposers.get(variable)
+    variableDisposers.delete(variable)
+    if (dispose !== undefined) dispose()
   }
 
   /**
@@ -454,6 +493,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       // A name left behind by a script that no longer exists is free again.
       return onDiskScripts().includes(detail) ? detail : undefined
     },
+    referenced: (variable) => isReferenced(variable),
+    forget: (variable, detail) => { forgetVariable(variable, detail) },
     warn: (message) => warn(ctx, message),
   })
   onDiskScripts = () => scripts.names()
@@ -670,6 +711,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
     return found
   }
+
+  // From here on the index exists, so the script engine can ask whether a
+  // variable is still referenced before it lets one go.
+  isReferenced = (variable) => referencesIn().has(variable)
 
   /**
    * The variables in force, each with what references it.

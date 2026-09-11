@@ -765,6 +765,19 @@ const template = inspect(renderer.tree, 'textarea').nodes[0]
 assert.ok(template.props.value.includes('JSON.stringify'), 'the template prints a JSON object')
 assert.ok(template.props.onChange !== undefined, 'and is editable')
 
+// The template's keys must be names the plugin does not already provide: one
+// that claims `node` or `git` is refused on save as a conflict, and one that
+// claims an arbitrary tool leaves a `(not installed)` variable behind on every
+// machine that lacks that tool — which is a variable nobody asked for and, once
+// the script is deleted, one that used to outlive it.
+const templateKeys = [...template.props.value.matchAll(/^ {2}([a-z][a-z0-9_]*):/gm)].map((match) => match[1])
+const claimed = new Set(['pwsh', 'bash', 'git', 'node', 'python', 'os', 'os_release', 'platform', 'arch'])
+assert.equal(templateKeys.length, 1, `the template must register exactly one variable, got ${templateKeys.join(', ')}`)
+for (const key of templateKeys) {
+  assert.equal(claimed.has(key), false, `the template must not claim ${key}, which the plugin already provides`)
+}
+assert.equal(/rust/.test(template.props.value), false, 'and it must not probe a tool the machine is unlikely to have')
+
 // `--grow` fills the width of a `__fields` row; put straight into the column
 // surface it fills the height instead, which leaves a blank gap above the body.
 const scriptFieldRows = inspect(renderer.tree, 'div').nodes

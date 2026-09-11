@@ -574,6 +574,31 @@ try {
   assert.equal(removed.json().removed, true, 'deleting removes the file')
   assert.equal((await mounted.read()).prompt, 'rust=1.0.0', 'and the prompt keeps rendering what it last measured')
 
+  // A value nothing references goes with its script. Keeping it would leave the
+  // variables page showing a value for a script that no longer exists, which is
+  // exactly what makes a deleted script look impossible to get rid of.
+  const orphan = await call({
+    method: 'PUT',
+    url: '/prompt-manager/script/orphan',
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({ source: 'console.log(JSON.stringify({ go: "1.22.0" }))', fileSha1: null }),
+  })
+  assert.equal(orphan.state.status, 200, `a second script must save, got ${orphan.state.body}`)
+  const withOrphan = (await call({ url: '/prompt-manager/variables' })).json().variables
+  assert.equal(withOrphan.some((variable) => variable.name === 'go'), true, 'and its variable is listed')
+  await call({ method: 'DELETE', url: '/prompt-manager/script/orphan', origin: 'http://127.0.0.1:3080' })
+  const withoutOrphan = (await call({ url: '/prompt-manager/variables' })).json().variables
+  assert.equal(
+    withoutOrphan.some((variable) => variable.name === 'go'),
+    false,
+    'deleting a script whose variable nothing references takes the variable with it',
+  )
+  assert.equal(
+    withoutOrphan.some((variable) => variable.name === 'rust'),
+    true,
+    'while one an entry still references stays frozen',
+  )
+
   // ...and a name whose script is gone is adoptable, which is what makes a
   // rename work: delete the old script, save the new one under its own name.
   const renamed = await saveScript('toolchain2', '2.0.0')
@@ -633,7 +658,7 @@ try {
   console.log(`  variables   os=${facts.os} platform=${facts.platform} arch=${facts.arch} release=${facts.os_release}`)
   console.log(`  probes      measured at mount (node ${process.version}), absent tool -> 无, contested name reported`)
   console.log('  guard       an unresolvable reference renders as prose and is reported, never fatal')
-  console.log('  scripts     a cached value is in force at mount; a new one is measured behind it and frozen when deleted')
+  console.log('  scripts     a cached value is in force at mount; a new one is measured behind it, and a delete keeps only what an entry references')
   console.log(`  schema      ${schemaNote}`)
 } finally {
   rmSync(STORE_ROOT, { recursive: true, force: true })

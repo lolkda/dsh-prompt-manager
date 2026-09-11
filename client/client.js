@@ -177,8 +177,17 @@ window.__ModuleLoader__.load({
      * names — so the first thing a person sees is a working example rather than
      * an empty box and a paragraph explaining what to type.
      */
+    /**
+     * The source a new script starts from.
+     *
+     * It runs as it stands, and its one key is deliberately not a name the
+     * plugin already provides (`pwsh` / `bash` / `git` / `node` / `python` and
+     * the four environment facts): a template that claims one of those would be
+     * refused on save, and one that claims an arbitrary tool would leave a
+     * `(not installed)` variable behind on every machine that lacks it.
+     */
     const SCRIPT_TEMPLATE = [
-      '// 打印一个 JSON 对象：键就是提示词里能用的变量名。',
+      '// 打印一个 JSON 对象：键就是提示词里能用的变量名 {{名字}}。',
       '// 这个脚本跑在一个独立子进程里，超时、报错都不会影响 DSH 本身。',
       'const { execSync } = require("node:child_process")',
       '',
@@ -191,7 +200,9 @@ window.__ModuleLoader__.load({
       '}',
       '',
       'console.log(JSON.stringify({',
-      '  rust: firstLine("rustc --version"),',
+      '  // 换成你要探测的东西，一行一个变量，例如：',
+      '  //   toolchain_java: firstLine("java -version"),',
+      '  node_version: process.version.replace(/^v/, ""),',
       '}))',
       '',
     ].join('\n')

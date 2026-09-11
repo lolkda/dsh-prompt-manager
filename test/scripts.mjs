@@ -10,8 +10,8 @@
  *
  * Coverage: output parsing and its refusals, override resolution and its shape
  * checks, syntax checking, save-then-run ordering, the write fence, the cache
- * mountDeclare reads, freezing on delete, path confinement, and the draft run
- * that must leave nothing behind.
+ * mountDeclare reads, dropping the values of a deleted script that nothing
+ * references, path confinement, and the draft run that must leave nothing behind.
  */
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -121,9 +121,14 @@ function numbered() {
 function fakeHost(overrides = {}, dir = SCRIPTS) {
   const declared = new Map()
   const warnings = []
+  const forgotten = []
+  const referenced = new Set()
   return {
     declared,
     warnings,
+    forgotten,
+    /** Mark one variable as referenced by an entry body. */
+    reference: (name) => { referenced.add(name) },
     dir: () => dir,
     overrides: () => overrides,
     texts: () => DEFAULT_PROBE_TEXTS,
@@ -138,6 +143,13 @@ function fakeHost(overrides = {}, dir = SCRIPTS) {
       return 'assigned'
     },
     owner: (name) => declared.get(name)?.detail,
+    referenced: (name) => referenced.has(name),
+    forget: (name, detail) => {
+      const existing = declared.get(name)
+      if (existing === undefined || existing.detail !== detail) return
+      declared.delete(name)
+      forgotten.push(name)
+    },
     warn: (message) => warnings.push(message),
   }
 }
@@ -348,17 +360,38 @@ try {
   writeFileSync(join(CACHE, SCRIPT_STATE_FILE), '{ not json', 'utf8')
   assert.deepEqual(readScriptState(CACHE), {}, 'a damaged cache reads as empty rather than breaking the mount')
 
-  // ── deleting a script freezes its variables ────────────────────────────────
+  // ── deleting a script drops what nothing references ────────────────────────
 
   const frozenHost = fakeHost()
   const frozenEngine = new PromptScripts(frozenHost, { run: canned(answer('{"rust":"1.80.0"}')).run })
   await frozenEngine.save('frozen', GOOD, { kind: 'absent' })
   assert.equal(frozenHost.declared.get('rust').value, '1.80.0', 'the script supplies its values')
+  frozenHost.reference('rust')
   assert.equal(frozenEngine.remove('frozen'), true, 'deleting it removes the file')
   assert.equal(existsSync(join(SCRIPTS, `frozen${SCRIPT_EXTENSION}`)), false, 'from the disk')
   assert.equal(readScriptState(SCRIPTS).frozen, undefined, 'and from the cache')
-  assert.equal(frozenHost.declared.get('rust').value, '1.80.0', 'but the value stays in force, because a missing one would fail assembly')
+  assert.equal(frozenHost.declared.get('rust').value, '1.80.0', 'an entry still references the name, so the value stays in force: a missing one would fail assembly')
   assert.equal(frozenEngine.list().some((script) => script.name === 'frozen'), false, 'while the page no longer lists the script')
+
+  // Nothing references this one, so keeping it would leave the variables page
+  // showing a value for a script that is gone — the shape of a script that looks
+  // impossible to delete.
+  const droppedHost = fakeHost()
+  const droppedEngine = new PromptScripts(droppedHost, { run: canned(answer('{"gone":"1"}')).run })
+  await droppedEngine.save('dropped', 'console.log(JSON.stringify({ gone: "1" }))', { kind: 'absent' })
+  droppedEngine.remove('dropped')
+  assert.deepEqual(droppedHost.forgotten, ['gone'], 'a variable nothing references is let go of, provider and all')
+  assert.equal(droppedHost.declared.has('gone'), false, 'so the page stops offering it')
+
+  // A script deleted by hand never went through `remove`, so the pass that
+  // notices is a refresh (or the next mount).
+  const vanishedHost = fakeHost({}, join(ROOT, 'vanished'))
+  const vanishedEngine = new PromptScripts(vanishedHost, { run: canned(answer('{"handdeleted":"1"}')).run })
+  await vanishedEngine.save('manual', 'console.log(JSON.stringify({ handdeleted: "1" }))', { kind: 'absent' })
+  rmSync(join(vanishedEngine.dir, `manual${SCRIPT_EXTENSION}`))
+  await vanishedEngine.refresh()
+  assert.deepEqual(vanishedHost.forgotten, ['handdeleted'], 'a script deleted behind the engine is reconciled on the next refresh')
+  assert.equal(readScriptState(vanishedEngine.dir).manual, undefined, 'and its cache entry goes with it')
 
   const disposed = new PromptScripts(fakeHost(), { run: canned(answer('{"late":"1"}')).run })
   disposed.dispose()
@@ -419,7 +452,7 @@ try {
   console.log('  fences      absent / sha1, and a conflict is refused before anything is written')
   console.log('  failures    timeout, missing interpreter, non-zero exit with and without usable output')
   console.log('  cache       mountDeclare serves the last good run, changes are re-run behind the mount')
-  console.log('  delete      the file and the cache entry go, the variables stay frozen')
+  console.log('  delete      the file and the cache entry go: a referenced value is frozen, an unreferenced one is dropped')
   console.log('  real        the default runner measures a real interpreter and kills a real hang')
 } finally {
   rmSync(ROOT, { recursive: true, force: true })

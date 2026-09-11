@@ -172,6 +172,29 @@ export interface ScriptHost {
      * @returns the owning script name, or `undefined` when the name is free.
      */
     owner(name: string): string | undefined;
+    /**
+     * Whether any active entry still writes one reference.
+     *
+     * Letting go of a script means keeping its variables — a value that is not
+     * there makes every section referencing it fail to assemble — but only a
+     * reference justifies that, and this is how the engine knows whether there is
+     * one.
+     *
+     * @param name - the `{{name}}` reference.
+     * @returns `true` when some entry still writes that reference.
+     */
+    referenced(name: string): boolean;
+    /**
+     * Drop a variable this engine declared.
+     *
+     * Called for a variable nothing references any more, so the prompt stops
+     * carrying a value whose script is gone. A name that has since moved to
+     * another owner is left alone: only `<detail>`'s own declaration is dropped.
+     *
+     * @param name - the `{{name}}` reference.
+     * @param detail - the script that declared it.
+     */
+    forget(name: string, detail: string): void;
     /** Report a non-fatal problem. */
     warn(message: string): void;
 }
@@ -369,15 +392,27 @@ export declare class PromptScripts {
     /**
      * Forget one script: its file and its cache entry.
      *
-     * The variables it declared stay declared, frozen at the values they last
-     * held. A missing value would make every section that references it fail to
-     * assemble, so keeping the last one is the only safe way to let go of a
-     * script — and the page says the script is gone.
+     * A variable an entry still references stays declared, frozen at the value it
+     * last held: a missing value would make every section that references it fail
+     * to assemble. One that nothing references is dropped outright — keeping it
+     * would leave the variables page showing a value for a script that is gone,
+     * which is what made a deleted script look undeletable.
      *
      * @param name - script name.
      * @returns `true` when a file was removed.
      */
     remove(name: string): boolean;
+    /**
+     * Drop the cache entries and variables of scripts that are no longer on disk.
+     * @param onDisk - script names currently on disk.
+     */
+    private reconcile;
+    /**
+     * Let go of what one script supplied, keeping whatever is still referenced.
+     * @param name - the script that is gone.
+     * @param record - its cache entry, when it had one.
+     */
+    private release;
     /**
      * Record a successful run: its values reach the registry, its summary reaches
      * the cache.
