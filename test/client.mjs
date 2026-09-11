@@ -541,6 +541,10 @@ const repoLink = inspect(tree, 'a').nodes.find(
 assert.ok(repoLink !== undefined, 'the section must link to its own repository')
 assert.equal(textOf(repoLink), 'lolkda/dsh-prompt-manager', 'the link text is the repository path')
 assert.equal(repoLink.props.target, '_blank', 'and opens away from the settings panel')
+assert.ok(
+  inspect(tree).text.includes('拜托动个小手点颗星星吧'),
+  'the ask for a star sits beside the link, not inside it',
+)
 
 const controls = inspect(tree, 'button').nodes.map((node) => textOf(node))
 assert.ok(controls.some((label) => label.includes('来源（')), 'the list must link to the sources page')

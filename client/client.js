@@ -2060,6 +2060,10 @@ window.__ModuleLoader__.load({
             rel: 'noreferrer',
             title: `${REPO_SLUG}（这个插件的仓库）`,
           }, REPO_SLUG),
+          // The ask sits outside the link on purpose: it is advice, not part of
+          // the address, and a click meant for the repository should not land on
+          // a sentence.
+          ' 拜托动个小手点颗星星吧。',
         ]),
         h('p', { key: 'dir', className: 'dsh-prompt-manager__note' }, [
           `已启用 ${String(enabledCount)}/${String(entries.length)}`,
