@@ -8,6 +8,9 @@
  * the index in the settings document means the browser gets reads, writes,
  * revision fencing, and the "user overrode this" flag from the shared settings
  * transport, while the bodies stay plain `.md` files a person can edit directly.
+ * The same namespace carries the presets: named selections that decide injection
+ * on their own while one of them is active, so a single `activePreset` write
+ * swaps the whole set without touching any entry.
  *
  * Entry bodies live either as plain `.md` files a person can edit directly, or
  * as one markdown file shipped with this package: a fresh install starts with
@@ -25,6 +28,12 @@ export const USER_ORDER_START = 30
 
 /** At most this many entries may be active at once. */
 export const MAX_ENTRIES = 50
+
+/** At most this many presets may be configured. */
+export const MAX_PRESETS = 20
+
+/** At most this many entries one preset may select. */
+export const MAX_PRESET_ENTRIES = MAX_ENTRIES
 
 /** Ref a source starts on when the settings page names none. */
 export const DEFAULT_SOURCE_REF = 'main'
@@ -60,6 +69,24 @@ export interface PromptEntry {
    * somebody wrote here.
    */
   source?: string
+}
+
+/**
+ * One named selection of entries, applied to the whole deployment.
+ *
+ * A preset is a complete answer to "which entries reach the prompt right now":
+ * while one is active it decides injection by itself, and every entry's own
+ * `enabled` flag is left untouched for the times when none is. Placement is not
+ * part of it — sections still stand in each entry's own `order` — so switching a
+ * preset costs one settings write and no re-registration.
+ */
+export interface PromptPreset {
+  /** Stable identity, same grammar as an entry id. */
+  id: string
+  /** Label shown in the composer chip and on the settings page. */
+  name: string
+  /** Ids of the entries this preset injects. */
+  entries: string[]
 }
 
 /** One entry resolved against the store, a subscription, or the package. */
@@ -225,6 +252,61 @@ export function parseEntries(raw: unknown): PromptEntry[] {
   return entries
 }
 
+/** One usable preset, or `undefined` when the raw value is unusable. */
+function toPreset(raw: unknown): PromptPreset | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const record = raw as Record<string, unknown>
+  const { id, name, entries } = record
+  if (!isEntryId(id)) return undefined
+  const label = typeof name === 'string' ? name.trim() : ''
+  const chosen: string[] = []
+  const seen = new Set<string>()
+  if (Array.isArray(entries)) {
+    for (const candidate of entries) {
+      // An id the index does not carry right now is kept: it may belong to a
+      // subscription that has not come back yet, and dropping it here would
+      // silently rewrite what the person selected.
+      if (typeof candidate !== 'string' || !isEntryId(candidate) || seen.has(candidate)) continue
+      seen.add(candidate)
+      chosen.push(candidate)
+      if (chosen.length >= MAX_PRESET_ENTRIES) break
+    }
+  }
+  return { id, name: label.length === 0 ? id : label.slice(0, MAX_TITLE_LENGTH), entries: chosen }
+}
+
+/**
+ * Narrow a resolved settings value into the preset list. Like {@link parseEntries},
+ * a hand-edited document can hold anything, so unusable presets are dropped
+ * rather than thrown: the worst case is a smaller list, never an assembly that
+ * cannot be built.
+ *
+ * @param raw - the resolved `presets` field.
+ * @returns the usable presets, deduplicated by id and capped at {@link MAX_PRESETS}.
+ */
+export function parsePresets(raw: unknown): PromptPreset[] {
+  if (!Array.isArray(raw)) return []
+  const presets: PromptPreset[] = []
+  const seen = new Set<string>()
+  for (const candidate of raw) {
+    const preset = toPreset(candidate)
+    if (preset === undefined || seen.has(preset.id)) continue
+    seen.add(preset.id)
+    presets.push(preset)
+    if (presets.length >= MAX_PRESETS) break
+  }
+  return presets
+}
+
+/**
+ * The id of the preset in force.
+ * @param raw - the resolved `activePreset` field.
+ * @returns the configured id, or `''` when the deployment runs without a preset.
+ */
+export function activePresetOf(raw: unknown): string {
+  return typeof raw === 'string' ? raw.trim() : ''
+}
+
 /**
  * Build the `prompt-manager` namespace schema.
  *
@@ -251,12 +333,21 @@ export function buildIndexSchema(factory: SchemaFactory): unknown {
     mirror: factory.string().default(''),
     enabled: factory.boolean().default(true),
   })
+  const preset = factory.object({
+    id: factory.string().required(),
+    name: factory.string().default(''),
+    entries: factory.array(factory.string()).default([]),
+  })
   const proxy = factory.object({
     kind: factory.string().default('none'),
     url: factory.string().default(''),
   }).default({ kind: 'none', url: '' })
   return factory.object({
     entries: factory.array(entry).default([]),
+    presets: factory.array(preset).default([]),
+    // No default beyond the empty string: an unset preset means the entries'
+    // own switches decide, which is what a deployment that never made one gets.
+    activePreset: factory.string().default(''),
     sources: factory.array(source).default([]),
     mirror: factory.string().default(''),
     proxy,

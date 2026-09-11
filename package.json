@@ -1,7 +1,7 @@
 {
   "name": "dsh-prompt-manager",
-  "version": "2.1.0",
-  "description": "Manage DeepSeek Harness system-prompt sections from the Web GUI: enable, add, edit, and delete markdown prompt entries.",
+  "version": "2.2.0",
+  "description": "Manage DeepSeek Harness system-prompt sections from the Web GUI: enable, add, edit, and delete markdown prompt entries, group them into presets, and switch the active preset from the composer.",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -49,7 +49,8 @@
     "client": {
       "platform": "web",
       "inject": [
-        "@deepseek-ai/dsh-client-ui-settings"
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-conversation"
       ]
     }
   },

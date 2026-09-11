@@ -22,6 +22,12 @@
  * process. Any other row may register variables as well; a name this plugin
  * cannot take is reported and skipped rather than failing the mount.
  *
+ * Which entries reach the prompt is decided per assembly: the preset named by
+ * `activePreset` answers it whole while one is in force, and each entry's own
+ * `enabled` flag answers it otherwise. Both are settings fields, so the composer
+ * chip in the browser switches the set with one write and the next model step
+ * sees it.
+ *
  * @module dsh-prompt-manager
  */
 import type { Context } from '@deepseek-ai/cordis'
@@ -34,14 +40,17 @@ import { createRequire } from 'node:module'
 import { homedir, release } from 'node:os'
 import { join } from 'node:path'
 import {
+  activePresetOf,
   BUILTIN_PROMPTS,
   buildIndexSchema,
   builtinEntries,
   entryIdFor,
   MAX_ENTRIES,
   parseEntries,
+  parsePresets,
   readBuiltinBody,
   type PromptEntry,
+  type PromptPreset,
   type ResolvedBody,
   type SchemaFactory,
 } from './entries.js'
@@ -68,7 +77,7 @@ import {
   type ScriptOverride,
 } from './scripts.js'
 
-export { MAX_BODY_BYTES, MAX_ENTRIES } from './entries.js'
+export { MAX_BODY_BYTES, MAX_ENTRIES, MAX_PRESETS } from './entries.js'
 export { PromptStore } from './store.js'
 export { ROUTE_PREFIX } from './routes.js'
 export { MAX_PROBES } from './probe.js'
@@ -524,10 +533,25 @@ export function apply(ctx: Context, config: Config = {}): void {
   /** The resolved settings document, as the engine reads it. */
   let resolved: unknown = {
     entries: builtinEntries(),
+    presets: [],
+    activePreset: '',
     sources: [],
     mirror: '',
     proxy: { kind: 'none', url: '' },
   }
+
+  /**
+   * The preset in force, or `undefined` when the entries' own switches decide.
+   *
+   * Read per assembly like everything else here: activation is a settings write,
+   * so both the switch itself and a later edit of the preset land on the next
+   * model step with no re-registration — section text is a callback, and neither
+   * a preset's name nor its membership is part of a section's identity.
+   */
+  let activePreset: PromptPreset | undefined
+
+  /** Whether the "no such preset" report has already been made for this mount. */
+  let presetReported = false
   /** Where each subscribed entry's body lives; refreshed when settings commit. */
   let locations = new Map<string, SubscriptionLocation>()
   /** How the engine writes the index back; present only with a settings service. */
@@ -555,6 +579,34 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   function mirrorInForce(): string {
     return normalizeMirror(field('mirror')) ?? ''
+  }
+
+  /** The configured presets, narrowed from the settings document. */
+  function presetsInForce(): PromptPreset[] {
+    return parsePresets(field('presets'))
+  }
+
+  /**
+   * Adopt the preset `activePreset` names.
+   *
+   * A name that resolves to nothing — the preset was deleted, or a hand-edited
+   * document misspells it — falls back to the entries' own switches rather than
+   * freezing the prompt on whatever was active. That is a state somebody has to
+   * be able to see, so it is reported once instead of failing anything.
+   *
+   * @param document - the resolved settings document.
+   */
+  function setActivePreset(document: unknown): void {
+    const wanted = activePresetOf(
+      typeof document === 'object' && document !== null && !Array.isArray(document)
+        ? (document as Record<string, unknown>)['activePreset']
+        : undefined,
+    )
+    const presets = presetsInForce()
+    activePreset = wanted.length === 0 ? undefined : presets.find((preset) => preset.id === wanted)
+    if (wanted.length === 0 || activePreset !== undefined || presetReported) return
+    presetReported = true
+    warn(ctx, `组合 ${wanted} 不存在（可能已被删除）：本次挂载回到每条自己的开关`)
   }
 
   /** The next free placement for an entry the engine adds. */
@@ -607,11 +659,21 @@ export function apply(ctx: Context, config: Config = {}): void {
     return `${USER_SECTION_PREFIX}${entry.id}`
   }
 
-  /** The text one entry contributes right now, or `''` when it contributes none. */
+  /**
+   * The text one entry contributes right now, or `''` when it contributes none.
+   *
+   * An active preset answers "is this entry on" by itself, so switching one is a
+   * single settings write with no bookkeeping: every entry keeps the `enabled`
+   * value a person gave it, for the times when no preset is in force.
+   *
+   * @param id - entry id.
+   * @returns the interpolatable body, or the empty string.
+   */
   function render(id: string): string {
     const entry = byId.get(id)
-    if (entry === undefined || !entry.enabled) return ''
-    return describe(id).text
+    if (entry === undefined) return ''
+    const on = activePreset === undefined ? entry.enabled : activePreset.entries.includes(entry.id)
+    return on ? describe(id).text : ''
   }
 
   /** References already reported, so one bad body cannot flood the log. */
@@ -738,6 +800,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     store,
     describe,
     idFor: (title) => entryIdFor(title, takenIds()),
+    presetIds: () => presetsInForce().map((preset) => preset.id),
     warn: (message) => warn(ctx, message),
     subscriptions,
     scripts,
@@ -783,6 +846,8 @@ export function apply(ctx: Context, config: Config = {}): void {
         scope = settings.register(SETTINGS_NAMESPACE, buildIndexSchema(factory), {
           base: {
             entries: builtinEntries(),
+            presets: [],
+            activePreset: '',
             sources: [],
             mirror: '',
             proxy: { kind: 'none', url: '' },
@@ -797,6 +862,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
       const sync = (): void => {
         resolved = scope.get()
+        setActivePreset(resolved)
         const entries = parseEntries(resolved)
         reportTruncation(resolved, entries.length)
         active.length = 0
@@ -809,6 +875,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     })
   }
 
+  setActivePreset(resolved)
   locations = subscriptions.refreshLocations()
   reconcile(active)
 }

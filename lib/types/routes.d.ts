@@ -9,6 +9,11 @@
  * through the hash the page read, so two open drafts cannot silently overwrite
  * each other.
  *
+ * Everything else the page edits — the entry index, the presets, the
+ * subscriptions, the outbound settings — is a settings field, and this route
+ * only fills the gaps that transport leaves: an id nobody holds, a body file, a
+ * script on disk, a source's upstream check.
+ *
  * @module dsh-prompt-manager/routes
  */
 import type { Context } from '@deepseek-ai/cordis';
@@ -27,6 +32,14 @@ export interface PromptRouteHost {
     describe(id: string): ResolvedBody;
     /** Allocate an unused entry id for a new title. */
     idFor(title: string): string;
+    /**
+     * Ids the configured presets already hold.
+     *
+     * The page writes the preset list over the settings transport like it writes
+     * the entry index, so the only thing it cannot work out by itself is which id
+     * is still free for a new one.
+     */
+    presetIds(): string[];
     /** Report a non-fatal problem. */
     warn(message: string): void;
     /** The subscription engine, for the source routes. */

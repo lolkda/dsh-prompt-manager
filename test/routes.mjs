@@ -15,7 +15,7 @@ import { join } from 'node:path'
 
 import { installPromptRoutes, ROUTE_PREFIX } from '../lib/routes.js'
 import { PromptStore } from '../lib/store.js'
-import { entryIdFor, MAX_ENTRIES } from '../lib/entries.js'
+import { entryIdFor, MAX_ENTRIES, MAX_PRESETS } from '../lib/entries.js'
 import { MAX_SOURCES } from '../lib/source.js'
 import { CheckError } from '../lib/sync.js'
 import { ScriptError } from '../lib/scripts.js'
@@ -71,6 +71,8 @@ try {
   const store = new PromptStore(SECTIONS)
   const warnings = []
   const routes = []
+  /** Preset ids the fake host reports; a case below fills it to reach the cap. */
+  const presetIds = { held: [] }
   const ctx = {
     inject: (deps, callback) => callback({ webServer: { register: (route) => { routes.push(route); return () => {} } } }),
     effect: (execute) => {
@@ -181,6 +183,8 @@ try {
       }
     },
     idFor: (title) => entryIdFor(title, store.ids()),
+    /** Preset ids in force; the preset-id route allocates against these. */
+    presetIds: () => presetIds.held,
     warn: (message) => warnings.push(message),
     subscriptions: engine,
     scripts,
@@ -368,6 +372,55 @@ try {
     body: JSON.stringify({ title: 'My Note' }),
   })
   assert.equal(again.json().id, 'my-note-2', 'the id route must avoid stored ids')
+
+  // ── preset id allocation ────────────────────────────────────────────────────
+
+  // A preset rides the settings namespace like the entry index, so this route is
+  // only ever asked for the one thing the page cannot know: which id is free.
+  const allocatedPreset = await call({
+    method: 'POST',
+    url: `${ROUTE_PREFIX}/preset/id`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({ title: 'CTF 作业' }),
+  })
+  assert.equal(allocatedPreset.state.status, 200, 'the preset id route must answer')
+  assert.equal(allocatedPreset.json().id, 'ctf', 'the preset id route must slug the title')
+
+  presetIds.held = ['ctf']
+  const secondPreset = await call({
+    method: 'POST',
+    url: `${ROUTE_PREFIX}/preset/id`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({ title: 'CTF 作业' }),
+  })
+  assert.equal(secondPreset.json().id, 'ctf-2', 'the route must avoid the preset ids already in force')
+
+  const unromanizable = await call({
+    method: 'POST',
+    url: `${ROUTE_PREFIX}/preset/id`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({ title: '作业' }),
+  })
+  assert.equal(unromanizable.json().id, 'entry', 'a title with no ASCII at all must still get a usable id')
+
+  const untitled = await call({
+    method: 'POST',
+    url: `${ROUTE_PREFIX}/preset/id`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({ title: '   ' }),
+  })
+  assert.equal(untitled.state.status, 400, 'a blank title must be refused')
+
+  presetIds.held = Array.from({ length: MAX_PRESETS }, (unused, index) => `p${String(index)}`)
+  const cappedPresets = await call({
+    method: 'POST',
+    url: `${ROUTE_PREFIX}/preset/id`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({ title: 'Overflow' }),
+  })
+  assert.equal(cappedPresets.state.status, 409, 'the preset cap must refuse an allocation')
+  assert.equal(cappedPresets.json().code, 'too-many-presets', 'and the cap reports its own reason')
+  presetIds.held = []
 
   // ── subscription sources ────────────────────────────────────────────────────
 
@@ -670,6 +723,7 @@ try {
   console.log('  gates       loopback peer + loopback host + same-origin writes only, unusable ids refused')
   console.log('  fencing     409 on absent-or-changed override, 200 on a matching hash')
   console.log('  statuses    400 malformed/oversized, 404 unknown path, 405 wrong method, 422 bad reference')
+  console.log(`  presets     preset id allocation, ${String(MAX_PRESETS)} preset cap, blank title refused`)
   console.log('  gates       403 for a rebound host, a foreign origin, and a non-loopback peer')
   console.log('  sources     add / list / check / apply / revert / forget, subscribed bodies read-only')
   console.log('  variables   list with provenance and references, draft run, saved run, refresh')

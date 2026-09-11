@@ -8,6 +8,9 @@
  * the index in the settings document means the browser gets reads, writes,
  * revision fencing, and the "user overrode this" flag from the shared settings
  * transport, while the bodies stay plain `.md` files a person can edit directly.
+ * The same namespace carries the presets: named selections that decide injection
+ * on their own while one of them is active, so a single `activePreset` write
+ * swaps the whole set without touching any entry.
  *
  * Entry bodies live either as plain `.md` files a person can edit directly, or
  * as one markdown file shipped with this package: a fresh install starts with
@@ -20,6 +23,10 @@
 export declare const USER_ORDER_START = 30;
 /** At most this many entries may be active at once. */
 export declare const MAX_ENTRIES = 50;
+/** At most this many presets may be configured. */
+export declare const MAX_PRESETS = 20;
+/** At most this many entries one preset may select. */
+export declare const MAX_PRESET_ENTRIES = 50;
 /** Ref a source starts on when the settings page names none. */
 export declare const DEFAULT_SOURCE_REF = "main";
 /** Largest accepted body, in bytes. */
@@ -49,6 +56,23 @@ export interface PromptEntry {
      * somebody wrote here.
      */
     source?: string;
+}
+/**
+ * One named selection of entries, applied to the whole deployment.
+ *
+ * A preset is a complete answer to "which entries reach the prompt right now":
+ * while one is active it decides injection by itself, and every entry's own
+ * `enabled` flag is left untouched for the times when none is. Placement is not
+ * part of it — sections still stand in each entry's own `order` — so switching a
+ * preset costs one settings write and no re-registration.
+ */
+export interface PromptPreset {
+    /** Stable identity, same grammar as an entry id. */
+    id: string;
+    /** Label shown in the composer chip and on the settings page. */
+    name: string;
+    /** Ids of the entries this preset injects. */
+    entries: string[];
 }
 /** One entry resolved against the store, a subscription, or the package. */
 export interface ResolvedBody {
@@ -130,6 +154,22 @@ export declare function entryIdFor(title: string, taken: Iterable<string>): stri
  * @returns the usable entries, deduplicated by id and capped at {@link MAX_ENTRIES}.
  */
 export declare function parseEntries(raw: unknown): PromptEntry[];
+/**
+ * Narrow a resolved settings value into the preset list. Like {@link parseEntries},
+ * a hand-edited document can hold anything, so unusable presets are dropped
+ * rather than thrown: the worst case is a smaller list, never an assembly that
+ * cannot be built.
+ *
+ * @param raw - the resolved `presets` field.
+ * @returns the usable presets, deduplicated by id and capped at {@link MAX_PRESETS}.
+ */
+export declare function parsePresets(raw: unknown): PromptPreset[];
+/**
+ * The id of the preset in force.
+ * @param raw - the resolved `activePreset` field.
+ * @returns the configured id, or `''` when the deployment runs without a preset.
+ */
+export declare function activePresetOf(raw: unknown): string;
 /**
  * Build the `prompt-manager` namespace schema.
  *

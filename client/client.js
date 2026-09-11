@@ -35,6 +35,19 @@ window.__ModuleLoader__.load({
     /** Placement the section claims in the settings navigation. */
     const SECTION_ORDER = 60
 
+    /**
+     * The composer slot the preset chip claims: the tool row's trailing group,
+     * in front of the model selector, which is where a person looks when they
+     * want to change what this conversation is working with.
+     */
+    const PRESET_SLOT = 'conversation.input.right'
+
+    /**
+     * `activePreset` value meaning "no preset": each entry's own switch decides.
+     * Mirrors the Host, which reads an empty or unknown id the same way.
+     */
+    const NO_PRESET = ''
+
     /** Style tag identity, so unload removes exactly this bundle's styles. */
     const STYLE_ID = 'dsh-prompt-manager/Section.css'
 
@@ -133,8 +146,20 @@ window.__ModuleLoader__.load({
 .dsh-prompt-manager__changePath{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--ds-font-family-code,ui-monospace,monospace);font-size:11px}
 .dsh-prompt-manager__delta{flex:0 0 auto;font-size:11px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
 
+/* one combo's member checklist */
+.dsh-prompt-manager__members{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border-radius:12px;background:var(--dsw-alias-bg-module-platform);min-width:0;max-height:320px;overflow:auto}
+.dsh-prompt-manager__member{display:flex;align-items:center;gap:8px;font-size:12px;line-height:18px;min-width:0}
+.dsh-prompt-manager__memberLabel{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsh-prompt-manager__memberId{flex:0 0 auto;font-family:var(--ds-font-family-code,ui-monospace,monospace);font-size:11px;color:var(--dsw-alias-label-tertiary)}
+
+/* the composer chip: one compact control in the tool row below the input box */
+.dsh-prompt-manager__presetChip{box-sizing:border-box;max-width:240px;height:28px;padding:0 10px;display:inline-flex;align-items:center;gap:6px;border:0;border-radius:14px;background:0 0;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;line-height:1;white-space:nowrap;overflow:hidden;cursor:pointer}
+.dsh-prompt-manager__presetChip:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.dsh-prompt-manager__presetChip--on{color:var(--dsw-alias-label-primary)}
+.dsh-prompt-manager__presetChipLabel{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
 /* the shell marks keyboard focus with a 2px business-colour ring; keep that */
-.dsh-prompt-manager__tab:focus-visible,.dsh-prompt-manager__button:focus-visible,.dsh-prompt-manager__addButton:focus-visible,.dsh-prompt-manager__cardMain:focus-visible,.dsh-prompt-manager__iconButton:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
+.dsh-prompt-manager__tab:focus-visible,.dsh-prompt-manager__button:focus-visible,.dsh-prompt-manager__addButton:focus-visible,.dsh-prompt-manager__cardMain:focus-visible,.dsh-prompt-manager__iconButton:focus-visible,.dsh-prompt-manager__presetChip:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
 `.trim()
 
     /**
@@ -275,6 +300,60 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Read the configured presets out of a settings snapshot.
+     *
+     * Normalized the same way {@link sourcesOf} is, because this feeds a control
+     * that renders on the composer: a hand-edited document must not be able to
+     * make the chip throw where the input box lives.
+     * @param snapshot - the settings snapshot.
+     * @returns one record per preset, with a display name and a member list.
+     */
+    function presetsOf(snapshot) {
+      const value = snapshot && snapshot.value
+      const list = value && Array.isArray(value.presets) ? value.presets : []
+      return list
+        .filter((preset) => preset !== null && typeof preset === 'object' && typeof preset.id === 'string')
+        .map((preset) => ({
+          id: preset.id,
+          name: typeof preset.name === 'string' && preset.name.length > 0 ? preset.name : preset.id,
+          entries: Array.isArray(preset.entries)
+            ? preset.entries.filter((id) => typeof id === 'string')
+            : [],
+        }))
+    }
+
+    /**
+     * The preset in force, or `null` when each entry's own switch decides.
+     *
+     * An id that names nothing reads as no preset at all — exactly what the Host
+     * does with it, so the chip can never claim a preset the prompt is not using.
+     * @param snapshot - the settings snapshot.
+     * @param presets - the presets already read out of it.
+     * @returns the active preset, or `null`.
+     */
+    function activePresetOf(snapshot, presets) {
+      const value = snapshot && snapshot.value
+      const wanted = value && typeof value.activePreset === 'string' ? value.activePreset : NO_PRESET
+      if (wanted.length === 0) return null
+      return presets.find((preset) => preset.id === wanted) ?? null
+    }
+
+    /** Whether two preset lists differ in anything the Host stores. */
+    function presetsDiffer(before, after) {
+      if (before.length !== after.length) return true
+      for (let index = 0; index < before.length; index += 1) {
+        const left = before[index]
+        const right = after[index]
+        if (left.id !== right.id || left.name !== right.name) return true
+        if (left.entries.length !== right.entries.length) return true
+        for (let member = 0; member < left.entries.length; member += 1) {
+          if (left.entries[member] !== right.entries[member]) return true
+        }
+      }
+      return false
+    }
+
+    /**
      * The paths a check staged, whatever shape the answer arrived in.
      *
      * A proxy that answers with something that is not the Host's JSON would
@@ -393,8 +472,39 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * A kebab menu over the shell's `Menu`, with an inline list as the fallback
-     * for a host that predates that primitive.
+     * A menu over the shell's `Menu`, anchored to a control of the caller's
+     * choosing, with an inline list as the fallback for a host that predates that
+     * primitive.
+     * @param props - open state, items, selection handler, label, and anchor node.
+     */
+    function SlotMenu(props) {
+      if (isComponent(primitives.Menu)) {
+        return h(primitives.Menu, {
+          open: props.open,
+          onClose: props.onClose,
+          items: props.items,
+          onSelect: props.onSelect,
+          // Portal: the settings panel scrolls, and a menu rendered inside it
+          // would be clipped by the panel's own overflow — and the composer's own
+          // stacking is no more forgiving.
+          portal: true,
+          closeOnPointerLeave: true,
+          anchor: props.anchor,
+        })
+      }
+      if (!props.open) return props.anchor
+      return h(React.Fragment, null, props.anchor, h('div', { className: 'dsh-prompt-manager__inlineMenu' },
+        props.items.map((item) => h('button', {
+          key: item.id,
+          type: 'button',
+          disabled: item.disabled === true,
+          onClick: () => props.onSelect(item.id),
+        }, item.label))))
+    }
+
+    /**
+     * A kebab menu over {@link SlotMenu}: the row action control the list pages
+     * use.
      * @param props - open state, items, selection handler, and accessibility label.
      */
     function RowMenu(props) {
@@ -410,27 +520,7 @@ window.__ModuleLoader__.load({
         },
       }, icon('IconEllipsisOutline16') ?? '⋯')
 
-      if (isComponent(primitives.Menu)) {
-        return h(primitives.Menu, {
-          open: props.open,
-          onClose: props.onClose,
-          items: props.items,
-          onSelect: props.onSelect,
-          // Portal: the settings panel scrolls, and a menu rendered inside it
-          // would be clipped by the panel's own overflow.
-          portal: true,
-          closeOnPointerLeave: true,
-          anchor,
-        })
-      }
-      if (!props.open) return anchor
-      return h(React.Fragment, null, anchor, h('div', { className: 'dsh-prompt-manager__inlineMenu' },
-        props.items.map((item) => h('button', {
-          key: item.id,
-          type: 'button',
-          disabled: item.disabled === true,
-          onClick: () => props.onSelect(item.id),
-        }, item.label))))
+      return h(SlotMenu, { ...props, anchor })
     }
 
     /** Markdown preview over the shell's own renderer. */
@@ -491,6 +581,83 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The composer chip: which prompt preset is in force, and the control that
+     * switches it.
+     *
+     * It rides the composer tool row so the set can be swapped from beside the
+     * input box instead of through Settings. Everything it shows comes from the
+     * settings namespace itself — the presets, and which one is active — so a
+     * change made on the settings page shows up here with no wiring of its own,
+     * and a switch here is one settings write that the next model step already
+     * honours.
+     * @param props - composed slot props carrying the bound settings scope.
+     * @returns the chip element tree.
+     */
+    function PresetChip(props) {
+      const scope = props.scope
+      const subscribe = React.useCallback((listener) => scope.subscribe(listener), [scope])
+      const getSnapshot = React.useCallback(() => scope.getSnapshot(), [scope])
+      const snapshot = React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+      const presets = React.useMemo(() => presetsOf(snapshot), [snapshot])
+      const active = React.useMemo(() => activePresetOf(snapshot, presets), [snapshot, presets])
+      const [open, setOpen] = React.useState(false)
+      const [failed, setFailed] = React.useState(null)
+
+      // Nothing to say until the namespace has answered, and nothing to offer on
+      // a host that does not serve it at all.
+      if (snapshot.status !== 'ready') return null
+
+      const writable = snapshot.writable !== false && snapshot.mode !== 'memory'
+      const current = active === null ? NO_PRESET : active.id
+      const items = presets.length === 0
+        ? [{ id: 'no-presets', label: '还没有组合：设置 → 提示词 → 组合 里新建', disabled: true }]
+        : [
+          { id: NO_PRESET, label: `不用组合（按每条开关）${current === NO_PRESET ? '（当前）' : ''}` },
+          ...presets.map((preset) => ({
+            id: preset.id,
+            label: `${preset.name}（${String(preset.entries.length)} 条）${current === preset.id ? '（当前）' : ''}`,
+            disabled: !writable,
+          })),
+        ]
+
+      const choose = (id) => {
+        setOpen(false)
+        if (id === current || id === 'no-presets') return
+        // The chip keeps showing the namespace's own answer, so a refused write
+        // leaves the old preset in place rather than a selection that never
+        // reached the Host.
+        Promise.resolve(scope.set('activePreset', id))
+          .then(() => { setFailed(null) })
+          .catch((error) => {
+            setFailed(error && error.message ? error.message : String(error))
+          })
+      }
+
+      return h(SlotMenu, {
+        open,
+        items,
+        onClose: () => setOpen(false),
+        onSelect: choose,
+        anchor: h('button', {
+          type: 'button',
+          className: active === null
+            ? 'dsh-prompt-manager__presetChip'
+            : 'dsh-prompt-manager__presetChip dsh-prompt-manager__presetChip--on',
+          'aria-label': '切换提示词组合',
+          'aria-haspopup': 'menu',
+          'aria-expanded': open,
+          title: failed !== null
+            ? `切换失败：${failed}`
+            : writable
+              ? '切换提示词组合（下一个模型步骤生效）'
+              : '这个页面是只读的：局域网地址打开时设置通道退化为内存模式',
+          onClick: () => setOpen((wasOpen) => !wasOpen),
+        }, h('span', { className: 'dsh-prompt-manager__presetChipLabel' },
+          failed !== null ? '提示词 · 切换失败' : `提示词 · ${active === null ? '按开关' : active.name}`)),
+      })
+    }
+
+    /**
      * Render the settings section: the entry list, the editor page, or the
      * subscription sources.
      * @param props - composed slot props carrying the bound settings scope.
@@ -505,6 +672,8 @@ window.__ModuleLoader__.load({
       const snapshot = React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
       const entries = React.useMemo(() => entriesOf(snapshot), [snapshot])
       const configured = React.useMemo(() => sourcesOf(snapshot), [snapshot])
+      const presets = React.useMemo(() => presetsOf(snapshot), [snapshot])
+      const activePreset = React.useMemo(() => activePresetOf(snapshot, presets), [snapshot, presets])
       const [view, setView] = React.useState('list')
       const [filter, setFilter] = React.useState('all')
       const [selectedId, setSelectedId] = React.useState(null)
@@ -525,6 +694,7 @@ window.__ModuleLoader__.load({
       const [scriptSaved, setScriptSaved] = React.useState(null)
       const [runReport, setRunReport] = React.useState(null)
       const [caret, setCaret] = React.useState(null)
+      const [presetDraft, setPresetDraft] = React.useState(null)
 
       const refreshStore = React.useCallback(() => {
         return request('GET', '/status')
@@ -698,6 +868,99 @@ window.__ModuleLoader__.load({
           setBusy(false)
         }
       }, [draft, entries, refreshStore, scope])
+
+      // ── presets ──────────────────────────────────────────────────────────────
+
+      /**
+       * Enter the preset editor: an existing one, or an empty draft.
+       *
+       * A new preset has no id yet, because the id has to be one no other preset
+       * holds and only the Host knows that — so it is allocated on save, by the
+       * same route the entry editor uses.
+       * @param preset - the preset to edit, or `null` for a new one.
+       */
+      const openPreset = React.useCallback((preset) => {
+        setPresetDraft(preset === null
+          ? { id: null, name: '', members: [] }
+          : { id: preset.id, name: preset.name, members: [...preset.entries] })
+        setStatus(null)
+        setView('preset')
+      }, [])
+
+      /** Leave the preset editor, keeping nothing unsaved. */
+      const closePreset = React.useCallback(() => {
+        setPresetDraft(null)
+        setStatus(null)
+        setView('presets')
+      }, [])
+
+      /**
+       * Write the draft over the preset list.
+       *
+       * The list is one settings field and the Host replaces it whole, so this
+       * is the complete next list rather than a patch — the same shape the entry
+       * index is written in.
+       */
+      const savePreset = React.useCallback(async () => {
+        if (presetDraft === null) return
+        const label = presetDraft.name.trim()
+        if (label.length === 0) {
+          setStatus({ kind: 'error', text: '先给组合起个名字。' })
+          return
+        }
+        if (presetDraft.members.length === 0
+          && !window.confirm('这个组合一条提示词都没选：启用它就是一条都不注入。仍然保存？')) return
+        setBusy(true)
+        try {
+          const held = presetDraft.id
+          const id = held !== null ? held : (await request('POST', '/preset/id', { title: label })).id
+          const next = held !== null
+            ? presets.map((preset) => (preset.id === held ? { id, name: label, entries: presetDraft.members } : preset))
+            : [...presets, { id, name: label, entries: presetDraft.members }]
+          if (presetsDiffer(presets, next)) await scope.set('presets', next)
+          setPresetDraft({ id, name: label, members: presetDraft.members })
+          setStatus({ kind: 'info', text: `组合「${label}」已保存。` })
+          setView('presets')
+        } catch (error) {
+          setStatus({ kind: 'error', text: error.message })
+        } finally {
+          setBusy(false)
+        }
+      }, [presetDraft, presets, scope])
+
+      const removePreset = React.useCallback(async (preset) => {
+        if (!window.confirm(`删除组合「${preset.name}」？`)) return
+        setBusy(true)
+        try {
+          await scope.set('presets', presets.filter((candidate) => candidate.id !== preset.id))
+          // Deleting the preset in force has to clear the selection too: the Host
+          // falls back to the entry switches either way, but leaving the id behind
+          // would make every page report a preset that is not there.
+          if (activePreset !== null && activePreset.id === preset.id) await scope.set('activePreset', NO_PRESET)
+          setStatus({ kind: 'info', text: `已删除组合「${preset.name}」。` })
+        } catch (error) {
+          setStatus({ kind: 'error', text: error.message })
+        } finally {
+          setBusy(false)
+        }
+      }, [activePreset, presets, scope])
+
+      const activatePreset = React.useCallback(async (id) => {
+        setBusy(true)
+        try {
+          await scope.set('activePreset', id)
+          setStatus({
+            kind: 'info',
+            text: id === NO_PRESET
+              ? '已取消组合：回到每条提示词自己的开关。'
+              : '已切换组合，下一个模型步骤生效。',
+          })
+        } catch (error) {
+          setStatus({ kind: 'error', text: error.message })
+        } finally {
+          setBusy(false)
+        }
+      }, [scope])
 
       // ── subscriptions ────────────────────────────────────────────────────────
 
@@ -1495,6 +1758,173 @@ window.__ModuleLoader__.load({
         ])
       }
 
+      // ── the presets page ────────────────────────────────────────────────────
+
+      /**
+       * The title one entry id stands for.
+       *
+       * A preset may name an entry the index does not carry — a subscription that
+       * has not come back, or a body somebody removed by hand — and saying so is
+       * better than showing a bare id nobody can act on.
+       * @param id - the entry id a preset selected.
+       * @returns the entry's title, or a marker naming the missing id.
+       */
+      const titleOfEntry = (id) => {
+        const known = entries.find((entry) => entry.id === id)
+        return known !== undefined ? known.title : `（条目不存在：${id}）`
+      }
+
+      /**
+       * The preset editor: a name, and the entries this preset selects.
+       *
+       * The checklist is the whole entry index rather than only the ones switched
+       * on, because a preset is what decides injection — an entry a person left
+       * off is exactly the kind of thing a preset exists to turn on.
+       */
+      if (view === 'preset' && presetDraft !== null) {
+        const members = presetDraft.members
+        const missing = members.filter((id) => !entries.some((entry) => entry.id === id))
+        const rows = entries.map((entry) => {
+          const checked = members.includes(entry.id)
+          return h('label', { key: entry.id, className: 'dsh-prompt-manager__member' }, [
+            h('input', {
+              key: 'pick',
+              type: 'checkbox',
+              checked,
+              disabled: busy,
+              onChange: () => setPresetDraft({
+                ...presetDraft,
+                members: checked
+                  ? members.filter((id) => id !== entry.id)
+                  : [...members, entry.id],
+              }),
+            }),
+            h('span', { key: 'title', className: 'dsh-prompt-manager__memberLabel' }, entry.title),
+            h('span', { key: 'id', className: 'dsh-prompt-manager__memberId' }, entry.id),
+            h('span', { key: 'state', className: 'dsh-prompt-manager__note' },
+              entry.enabled === true ? '开关：开' : '开关：关'),
+          ])
+        })
+
+        return h('div', { className: 'dsh-prompt-manager' }, [
+          h('div', { key: 'head', className: 'dsh-prompt-manager__head' }, [
+            h(Button, { key: 'back', variant: 'ghost', disabled: busy, onClick: closePreset }, '← 返回'),
+            h('h2', { key: 'title', className: 'dsh-prompt-manager__headTitle' },
+              presetDraft.id === null ? '新建组合' : `组合：${presetDraft.name}`),
+            presetDraft.id === null
+              ? null
+              : h('span', { key: 'id', className: 'dsh-prompt-manager__badge' }, presetDraft.id),
+          ]),
+          h('p', { key: 'lede', className: 'dsh-prompt-manager__intro' },
+            '勾选这个组合要注入的提示词。启用组合后由它决定注入哪些条目，每条自己的开关会暂时不生效；取消组合就回到那些开关。'),
+          h('div', { key: 'name', className: 'dsh-prompt-manager__surface' }, [
+            h('div', { key: 'fields', className: 'dsh-prompt-manager__fields' }, [
+              h('label', { key: 'name', className: 'dsh-prompt-manager__field dsh-prompt-manager__field--grow' }, [
+                '名字（显示在输入栏的切换器上）',
+                h('input', {
+                  key: 'input',
+                  value: presetDraft.name,
+                  placeholder: '例如：CTF 作业',
+                  disabled: busy,
+                  onChange: (event) => setPresetDraft({ ...presetDraft, name: event.target.value }),
+                }),
+              ]),
+            ]),
+            h('div', { key: 'actions', className: 'dsh-prompt-manager__actions' }, [
+              h(Button, {
+                key: 'all',
+                disabled: busy,
+                onClick: () => setPresetDraft({ ...presetDraft, members: entries.map((entry) => entry.id) }),
+              }, `全选（${String(entries.length)}）`),
+              h(Button, {
+                key: 'none',
+                disabled: busy || members.length === 0,
+                onClick: () => setPresetDraft({ ...presetDraft, members: [] }),
+              }, '清空'),
+              h(Button, {
+                key: 'save',
+                variant: 'primary',
+                disabled: !writable || busy,
+                onClick: () => { void savePreset() },
+              }, '保存组合'),
+            ]),
+          ]),
+          entries.length === 0
+            ? h('div', { key: 'empty', className: 'dsh-prompt-manager__empty' }, '还没有提示词可以选：先在列表页新增一条。')
+            : h('div', { key: 'members', className: 'dsh-prompt-manager__members' }, rows),
+          missing.length === 0
+            ? null
+            : h('p', { key: 'missing', className: 'dsh-prompt-manager__note' },
+              `这个组合还记着索引里没有的条目：${missing.join('、')}。它们不会注入；订阅回来的话会自动生效。`),
+          statusLine,
+        ])
+      }
+
+      // ── the preset list ─────────────────────────────────────────────────────
+
+      if (view === 'presets') {
+        const cards = presets.map((preset) => {
+          const current = activePreset !== null && activePreset.id === preset.id
+          return h('div', { key: preset.id, className: 'dsh-prompt-manager__card' }, [
+            h('button', {
+              key: 'open',
+              type: 'button',
+              className: 'dsh-prompt-manager__cardMain',
+              onClick: () => openPreset(preset),
+            }, [
+              h('span', { key: 'title', className: 'dsh-prompt-manager__title' }, preset.name),
+              h('span', { key: 'meta', className: 'dsh-prompt-manager__meta' },
+                preset.entries.length === 0
+                  ? '没有选中任何条目（启用它等于一条都不注入）'
+                  : `${String(preset.entries.length)} 条 · ${preset.entries.slice(0, 4).map(titleOfEntry).join('、')}${preset.entries.length > 4 ? '…' : ''}`),
+            ]),
+            h('div', { key: 'side', className: 'dsh-prompt-manager__cardSide' }, [
+              current ? h('span', { key: 'badge', className: 'dsh-prompt-manager__badge' }, '当前') : null,
+              h(RowMenu, {
+                key: 'menu',
+                open: menuFor === preset.id,
+                label: `更多操作：${preset.name}`,
+                items: [
+                  { id: 'edit', label: '编辑', icon: icon('IconEditOutline16') },
+                  { id: 'activate', label: '设为当前', disabled: !writable || current },
+                  { id: 'clear', label: '取消当前', disabled: !writable || !current },
+                  { id: 'delete', label: '删除', icon: icon('IconTrashOutline16'), disabled: !writable },
+                ],
+                onToggle: () => setMenuFor(menuFor === preset.id ? null : preset.id),
+                onClose: () => setMenuFor(null),
+                onSelect: (id) => {
+                  setMenuFor(null)
+                  if (id === 'edit') openPreset(preset)
+                  else if (id === 'activate') { void activatePreset(preset.id) }
+                  else if (id === 'clear') { void activatePreset(NO_PRESET) }
+                  else if (id === 'delete') { void removePreset(preset) }
+                },
+              }),
+            ]),
+          ])
+        })
+
+        return h('div', { className: 'dsh-prompt-manager' }, [
+          h('div', { key: 'head', className: 'dsh-prompt-manager__head' }, [
+            h(Button, { key: 'back', variant: 'ghost', disabled: busy, onClick: () => { setView('list'); setStatus(null) } }, '← 返回'),
+            h('h2', { key: 'title', className: 'dsh-prompt-manager__headTitle' }, '组合'),
+          ]),
+          h('p', { key: 'lede', className: 'dsh-prompt-manager__intro' },
+            '一个组合 = 挑一组提示词。当前组合在下一个模型步骤生效，决定注入哪些条目；它管选哪些，不管顺序（顺序仍是每条自己的）。切换在聊天页输入栏右侧的「提示词」上。'),
+          presets.length === 0
+            ? h('div', { key: 'empty', className: 'dsh-prompt-manager__empty' }, '还没有组合。点「新建组合」挑几条提示词试试。')
+            : h('div', { key: 'cards', className: 'dsh-prompt-manager__list' }, cards),
+          h('div', { key: 'addRow', className: 'dsh-prompt-manager__addRow' }, [
+            h(AddButton, {
+              key: 'add',
+              disabled: !writable || busy,
+              onClick: () => openPreset(null),
+            }, '新建组合'),
+          ]),
+          statusLine,
+        ])
+      }
+
       // ── the list page ───────────────────────────────────────────────────────
 
       const visible = entries.filter((entry) => {
@@ -1503,54 +1933,64 @@ window.__ModuleLoader__.load({
         return true
       })
 
-      const rows = visible.map((entry) => h('div', {
-        key: entry.id,
-        className: 'dsh-prompt-manager__card',
-      }, [
-        h('button', {
-          key: 'open',
-          type: 'button',
-          className: 'dsh-prompt-manager__cardMain',
-          onClick: () => select(entry),
+      const rows = visible.map((entry) => {
+        // What this entry contributes right now. An active preset answers it by
+        // itself, so the row's state dot has to follow the preset rather than the
+        // switch — otherwise the page would show a prompt as on while the prompt
+        // it describes is not being injected.
+        const injected = activePreset === null
+          ? entry.enabled === true
+          : activePreset.entries.includes(entry.id)
+        return h('div', {
+          key: entry.id,
+          className: 'dsh-prompt-manager__card',
         }, [
-          h('span', { key: 'title', className: 'dsh-prompt-manager__title' }, entry.title),
-          h('span', { key: 'meta', className: 'dsh-prompt-manager__meta' }, [
-            isSubscribed(entry) ? `订阅 ${entry.source}` : '本地',
-            entry.enabled === true ? '' : '已关闭',
-          ].filter((part) => part.length > 0).join(' · ')),
-        ]),
-        h('div', { key: 'side', className: 'dsh-prompt-manager__cardSide' }, [
-          h('span', {
-            key: 'dot',
-            className: `dsh-prompt-manager__dot${entry.enabled === true ? '' : ' dsh-prompt-manager__dot--idle'}`,
-            'aria-hidden': 'true',
-          }),
-          isSubscribed(entry) ? h('span', { key: 'badge', className: 'dsh-prompt-manager__badge' }, '订阅') : null,
-          h(Switch, {
-            key: 'switch',
-            checked: entry.enabled === true,
-            label: entry.title,
-            disabled: !writable || busy,
-            onChange: () => toggle(entry, entry.enabled !== true),
-          }),
-          h(RowMenu, {
-            key: 'menu',
-            open: menuFor === entry.id,
-            label: `更多操作：${entry.title}`,
-            items: [
-              { id: 'edit', label: '编辑', icon: icon('IconEditOutline16') },
-              { id: 'delete', label: '删除', icon: icon('IconTrashOutline16'), disabled: !writable },
-            ],
-            onToggle: () => setMenuFor(menuFor === entry.id ? null : entry.id),
-            onClose: () => setMenuFor(null),
-            onSelect: (id) => {
-              setMenuFor(null)
-              if (id === 'edit') select(entry)
-              else if (id === 'delete') remove(entry)
-            },
-          }),
-        ]),
-      ]))
+          h('button', {
+            key: 'open',
+            type: 'button',
+            className: 'dsh-prompt-manager__cardMain',
+            onClick: () => select(entry),
+          }, [
+            h('span', { key: 'title', className: 'dsh-prompt-manager__title' }, entry.title),
+            h('span', { key: 'meta', className: 'dsh-prompt-manager__meta' }, [
+              isSubscribed(entry) ? `订阅 ${entry.source}` : '本地',
+              entry.enabled === true ? '' : '已关闭',
+              activePreset === null ? '' : `组合：${injected ? '注入' : '不注入'}`,
+            ].filter((part) => part.length > 0).join(' · ')),
+          ]),
+          h('div', { key: 'side', className: 'dsh-prompt-manager__cardSide' }, [
+            h('span', {
+              key: 'dot',
+              className: `dsh-prompt-manager__dot${injected ? '' : ' dsh-prompt-manager__dot--idle'}`,
+              'aria-hidden': 'true',
+            }),
+            isSubscribed(entry) ? h('span', { key: 'badge', className: 'dsh-prompt-manager__badge' }, '订阅') : null,
+            h(Switch, {
+              key: 'switch',
+              checked: entry.enabled === true,
+              label: entry.title,
+              disabled: !writable || busy,
+              onChange: () => toggle(entry, entry.enabled !== true),
+            }),
+            h(RowMenu, {
+              key: 'menu',
+              open: menuFor === entry.id,
+              label: `更多操作：${entry.title}`,
+              items: [
+                { id: 'edit', label: '编辑', icon: icon('IconEditOutline16') },
+                { id: 'delete', label: '删除', icon: icon('IconTrashOutline16'), disabled: !writable },
+              ],
+              onToggle: () => setMenuFor(menuFor === entry.id ? null : entry.id),
+              onClose: () => setMenuFor(null),
+              onSelect: (id) => {
+                setMenuFor(null)
+                if (id === 'edit') select(entry)
+                else if (id === 'delete') remove(entry)
+              },
+            }),
+          ]),
+        ])
+      })
 
       const enabledCount = entries.filter((entry) => entry.enabled === true).length
       const ready = snapshot.status === 'ready'
@@ -1569,6 +2009,11 @@ window.__ModuleLoader__.load({
           store !== null && typeof store.dir === 'string' ? `正文目录：${store.dir}` : '',
         ].filter((part) => part.length > 0).join(' · ')),
         note === null ? null : h('p', { key: 'note', className: 'dsh-prompt-manager__note' }, note),
+        activePreset === null
+          ? null
+          : h('p', { key: 'preset', className: 'dsh-prompt-manager__note' }, [
+            `当前组合「${activePreset.name}」生效中（${String(activePreset.entries.length)} 条）—— 单条开关只在「不用组合」时生效。`,
+          ]),
         store !== null && store.writable === false
           ? h('p', { key: 'unwritable', className: 'dsh-prompt-manager__status dsh-prompt-manager__status--error' }, '正文目录不可写，编辑器已禁用；开关和排序仍然可用。')
           : null,
@@ -1598,6 +2043,12 @@ window.__ModuleLoader__.load({
               disabled: busy,
               onClick: () => { setView('variables'); setRunReport(null) },
             }, `变量（${String(knownVariables.length)}）`),
+            h(AddButton, {
+              key: 'presets',
+              icon: 'IconEditOutline16',
+              disabled: busy,
+              onClick: () => { setView('presets'); setStatus(null); setMenuFor(null) },
+            }, `组合（${String(presets.length)}）`),
           ]),
         ]),
         ready ? null : h('div', { key: 'waiting', className: 'dsh-prompt-manager__empty' }, '设置载入后这里会显示列表。'),
@@ -1610,7 +2061,14 @@ window.__ModuleLoader__.load({
       ])
     }
 
-    /** Keep one section failure from blanking the whole settings dialog. */
+    /**
+     * Keep one surface's failure from taking down the page it sits on.
+     *
+     * The settings section is one thing, but the preset chip lives in the
+     * composer, where an exception would cost the input box itself — so the
+     * label says which surface broke and the boundary stays as small as the
+     * thing it wraps.
+     */
     class Boundary extends React.Component {
       constructor(props) {
         super(props)
@@ -1623,8 +2081,9 @@ window.__ModuleLoader__.load({
 
       render() {
         if (this.state.error !== null) {
+          const label = typeof this.props.label === 'string' ? this.props.label : '提示词页面'
           return h('div', { className: 'dsh-prompt-manager__status dsh-prompt-manager__status--error', role: 'alert' },
-            `提示词页面出错：${String(this.state.error && this.state.error.message ? this.state.error.message : this.state.error)}`)
+            `${label}出错：${String(this.state.error && this.state.error.message ? this.state.error.message : this.state.error)}`)
         }
         return this.props.children
       }
@@ -1650,7 +2109,11 @@ window.__ModuleLoader__.load({
     const inject = ['slots', 'settingsScope']
 
     /**
-     * Register the settings section.
+     * Register the settings section and the composer chip.
+     *
+     * One bundle, one settings scope, two surfaces: the page where presets are
+     * authored, and the control beside the input box that switches between them.
+     * Both read the same namespace, so neither has to tell the other anything.
      * @param ctx - the browser plugin context.
      */
     function apply(ctx) {
@@ -1666,6 +2129,11 @@ window.__ModuleLoader__.load({
         label: () => '提示词',
         inject: () => ({ scope }),
       }, (props) => h(Boundary, null, h(PromptSection, props))))
+      ctx.slots.inject(PRESET_SLOT, () => ctx.slots.register({
+        name: PRESET_SLOT,
+        id: NAMESPACE,
+        order: 10,
+      }, (props) => h(Boundary, { label: '提示词组合' }, h(PresetChip, { ...props, scope }))))
     }
 
     return { name, inject, apply }

@@ -34,6 +34,12 @@ const SUBSCRIPTIONS = [
   { id: 'o-r', repo: 'o/r', ref: 'main', mirror: 'https://gh-proxy.example', enabled: true, files: 2, pending: 0 },
 ]
 
+/** Presets the Host reports for the presets page and the composer chip. */
+const PRESETS = [
+  { id: 'ctf', name: 'CTF 作业', entries: ['alpha', 'beta'] },
+  { id: 'plain', name: '日常', entries: [] },
+]
+
 /** Minimal element factory shared by every stub. */
 function createElement(type, props, ...children) {
   return { type, props: props ?? {}, children }
@@ -133,7 +139,7 @@ const scope = {
     writable: true,
     mode: 'host',
     revision: 3,
-    value: { entries: ENTRIES },
+    value: { entries: ENTRIES, presets: [], activePreset: '' },
     // The composition base layer, empty because the plugin ships no entries.
     base: { entries: [] },
     user: {},
@@ -344,6 +350,7 @@ function materialize(React) {
     async (url, init) => {
       const method = init?.method ?? 'GET'
       requests.push({ url, method, body: init?.body, seq: step++ })
+      if (url.endsWith('/preset/id')) return { ok: true, status: 200, json: async () => ({ id: 'new-preset' }) }
       if (url.endsWith('/id')) return { ok: true, status: 200, json: async () => ({ id: 'new-note' }) }
       if (url.endsWith('/status')) {
         return { ok: true, status: 200, json: async () => ({ ...STATUS }) }
@@ -499,13 +506,20 @@ const { registrations, injections } = materialize(renderer.React)
 
 // ── registration ──────────────────────────────────────────────────────────────
 
-assert.deepEqual(injections, ['settings.section'], 'the section must be contributed to settings.section')
-assert.equal(registrations.length, 1, 'exactly one settings section must be registered')
+assert.deepEqual(
+  injections,
+  ['settings.section', 'conversation.input.right'],
+  'the bundle must contribute the settings section and the composer chip',
+)
+assert.equal(registrations.length, 2, 'exactly one settings section and one composer chip must be registered')
 const { meta, component } = registrations[0]
 assert.equal(meta.name, 'settings.section', 'the registration must name its slot')
 assert.equal(meta.id, 'prompt-manager', 'the section id must be the namespace')
 assert.equal(meta.order, 60, 'the section must sit after the shipped settings sections')
 assert.equal(meta.label(), '提示词', 'the navigation label must be the Chinese one')
+const { meta: chipMeta } = registrations[1]
+assert.equal(chipMeta.name, 'conversation.input.right', 'the chip must sit in the composer tool row')
+assert.equal(chipMeta.id, 'prompt-manager', 'the chip id must be the namespace')
 
 // ── the list page ─────────────────────────────────────────────────────────────
 
@@ -939,11 +953,161 @@ assert.ok(
 )
 assert.equal(droppedEntry.value.some((entry) => entry.id === 'alpha'), false, 'and the dropped id is the one that was deleted')
 
+// ── the composer chip ─────────────────────────────────────────────────────────
+
+// The chip is a second surface of the same bundle and the same namespace, driven
+// through a renderer of its own because it is a component of its own: two
+// components cannot share one hook-slot table.
+const chipRenderer = createRenderer()
+const chipRegistration = materialize(chipRenderer.React).registrations
+  .find((registration) => registration.meta.name === 'conversation.input.right')
+assert.ok(chipRegistration !== undefined, 'the bundle must offer the preset chip to the composer tool row')
+
+/** The chip's own label — which rides the anchor the menu is attached to. */
+const chipMenuNode = () => inspect(chipRenderer.tree, MENU).nodes[0]
+const chipText = () => textOf(chipMenuNode().props.anchor)
+const chipMenu = () => chipMenuNode()
+
+scope.state = { ...scope.state, value: { ...scope.state.value, presets: PRESETS, activePreset: '' } }
+chipRenderer.mount(chipRegistration.component, { scope })
+await chipRenderer.settle()
+assert.ok(chipText().includes('提示词 · 按开关'), 'with no preset the chip must say the switches decide')
+assert.deepEqual(
+  chipMenu().props.items.map((entry) => entry.id),
+  ['', 'ctf', 'plain'],
+  'the menu must offer no-preset plus every preset',
+)
+assert.ok(item(chipMenu(), '').label.includes('（当前）'), 'the no-preset entry must be marked as the one in force')
+assert.ok(item(chipMenu(), 'ctf').label.includes('CTF 作业'), 'a preset entry must carry its name')
+assert.ok(item(chipMenu(), 'ctf').label.includes('2 条'), 'and how many entries it selects')
+
+// A switch is one settings write, and nothing else: the Host reads the field on
+// the next assembly, so the chip must not have to coordinate anything.
+const chipWritesBefore = writes.length
+chipMenu().props.onSelect('ctf')
+await chipRenderer.settle()
+const activated = writes.slice(chipWritesBefore).find((write) => write.field === 'activePreset')
+assert.ok(activated !== undefined, 'choosing a preset must write activePreset')
+assert.equal(activated.value, 'ctf', 'and write the id that was chosen')
+assert.equal(writes.slice(chipWritesBefore).length, 1, 'a switch must not touch any other settings field')
+
+// The chip reads the namespace it writes, so it follows the change by itself.
+chipRenderer.mount(chipRegistration.component, { scope })
+await chipRenderer.settle()
+assert.ok(chipText().includes('CTF 作业'), 'the chip must show the preset now in force')
+assert.ok(item(chipMenu(), 'ctf').label.includes('（当前）'), 'and mark it in the menu')
+
+// A page whose settings channel is process-local can show the choice but not make one.
+scope.state = { ...scope.state, mode: 'memory', writable: false }
+chipRenderer.mount(chipRegistration.component, { scope })
+await chipRenderer.settle()
+assert.equal(item(chipMenu(), 'ctf').disabled, true, 'a memory-mode page must refuse to switch a preset')
+scope.state = { ...scope.state, mode: 'host', writable: true }
+
+// A deployment with no presets still renders: the chip says where to make one.
+scope.state = { ...scope.state, value: { ...scope.state.value, presets: [], activePreset: '' } }
+chipRenderer.mount(chipRegistration.component, { scope })
+await chipRenderer.settle()
+assert.ok(
+  chipMenu().props.items[0].label.includes('还没有组合'),
+  'with no presets the chip must point at the settings page',
+)
+assert.equal(chipMenu().props.items[0].disabled, true, 'and that hint must not be selectable')
+
+// ── the presets page ─────────────────────────────────────────────────────────
+
+// The page is driven from a document this case states outright: earlier cases in
+// this file wrote the entry index themselves (a fork added one, a delete dropped
+// one), and a preset case should not inherit their arithmetic.
+scope.state = {
+  ...scope.state,
+  value: { ...scope.state.value, entries: ENTRIES, presets: PRESETS, activePreset: 'ctf' },
+}
+const presetRenderer = createRenderer()
+const presetSection = materialize(presetRenderer.React).registrations[0].component
+const presetText = () => inspect(presetRenderer.tree).text
+
+/** The kebab menu of one row, found by the action label its anchor carries. */
+const rowMenuFor = (tree, label) => inspect(tree, MENU).nodes
+  .find((node) => String(node.props.anchor?.props?.['aria-label'] ?? '').includes(label))
+
+presetRenderer.mount(presetSection, { scope })
+await presetRenderer.settle()
+
+// A preset in force changes what the switches mean, and the page has to say so —
+// otherwise a row's switch looks broken rather than out of the loop.
+assert.ok(presetText().includes('当前组合「CTF 作业」生效中'), 'the list must say a preset is in force')
+assert.ok(presetText().includes('单条开关只在「不用组合」时生效'), 'and what that does to the switches')
+assert.ok(presetText().includes('组合：注入'), 'a row the preset carries must say it is injected')
+assert.ok(presetText().includes('组合：不注入'), 'and a row it does not must say it is not')
+
+const presetsLink = button(presetRenderer.tree, '组合（2）')
+assert.ok(presetsLink !== undefined, 'the list must link to the presets page')
+presetsLink.props.onClick()
+await presetRenderer.settle()
+assert.ok(presetText().includes('CTF 作业') && presetText().includes('日常'), 'the page must list every preset')
+assert.ok(presetText().includes('当前'), 'and badge the one in force')
+assert.ok(presetText().includes('没有选中任何条目'), 'an empty preset must be described as selecting nothing')
+
+// A new preset gets its id from the Host — only the Host knows which one is free —
+// and the list is written whole, the way the entry index is.
+button(presetRenderer.tree, '新建组合').props.onClick()
+await presetRenderer.settle()
+const presetNameField = inspect(presetRenderer.tree, 'input').nodes
+  .find((node) => String(node.props.placeholder ?? '').includes('CTF 作业'))
+assert.ok(presetNameField !== undefined, 'the editor must offer a name field')
+presetNameField.props.onChange({ target: { value: '交付检查' } })
+await presetRenderer.settle()
+
+const memberBoxes = inspect(presetRenderer.tree, 'input').nodes.filter((node) => node.props.type === 'checkbox')
+assert.equal(memberBoxes.length, ENTRIES.length, 'every entry must be offered as a member of the combo')
+memberBoxes[0].props.onChange()
+await presetRenderer.settle()
+
+const saveBefore = writes.length
+button(presetRenderer.tree, '保存组合').props.onClick()
+await presetRenderer.settle()
+const allocation = requests.filter((request) => request.url.endsWith('/preset/id')).at(-1)
+assert.ok(allocation !== undefined, 'saving a new preset must ask the Host for an id')
+const stored = writes.slice(saveBefore).find((write) => write.field === 'presets')
+assert.ok(stored !== undefined, 'and write the preset list')
+assert.equal(stored.value.length, PRESETS.length + 1, 'the new preset must be appended to the list')
+assert.equal(stored.value.at(-1).id, 'new-preset', 'under the id the Host allocated')
+assert.equal(stored.value.at(-1).name, '交付检查', 'and the name that was typed')
+assert.deepEqual(stored.value.at(-1).entries, [ENTRIES[0].id], 'with exactly the members that were ticked')
+assert.ok(allocation.seq < stored.seq, 'the id has to exist before the list carrying it is written')
+
+// Deleting the preset in force has to clear the selection with it, or every page
+// would go on reporting a preset that is not there.
+const deleteBefore = writes.length
+rowMenuFor(presetRenderer.tree, 'CTF 作业').props.onSelect('delete')
+await presetRenderer.settle()
+const afterDelete = writes.slice(deleteBefore)
+assert.ok(afterDelete.some((write) => write.field === 'presets'), 'deleting must rewrite the preset list')
+const droppedSelection = afterDelete.find((write) => write.field === 'activePreset')
+assert.ok(droppedSelection !== undefined, 'and drop the selection when the deleted preset was in force')
+assert.equal(droppedSelection.value, '', 'by writing the empty preset id')
+
+const activateBefore = writes.length
+rowMenuFor(presetRenderer.tree, '日常').props.onSelect('activate')
+await presetRenderer.settle()
+const reactivated = writes.slice(activateBefore).find((write) => write.field === 'activePreset')
+assert.ok(reactivated !== undefined && reactivated.value === 'plain', '设为当前 must write that preset id')
+
+// 取消当前 is the same single write the composer chip makes.
+const clearBefore = writes.length
+rowMenuFor(presetRenderer.tree, '日常').props.onSelect('clear')
+await presetRenderer.settle()
+const cleared = writes.slice(clearBefore).find((write) => write.field === 'activePreset')
+assert.ok(cleared !== undefined && cleared.value === '', '取消当前 must write the empty preset id')
+
 console.log('client ok')
 console.log('  bundle      factory id dsh-prompt-manager, materialized and driven against stub modules')
 console.log(`  section     settings.section id=prompt-manager order=${String(meta.order)}`)
+console.log(`  chip        ${chipMeta.name} id=prompt-manager, switches the preset with one settings write`)
 console.log(`  list        ${String(ENTRIES.length)} rows, switches, kebab menus, add control refused at the cap`)
 console.log('  views       row menu -> editor page -> save -> back to the list')
+console.log('  presets     list, editor, member checklist, id from the Host, delete clears the selection')
 console.log('  fence       a forked draft carries the hash the fork wrote, so the next save is accepted')
 console.log('  order       a body file is deleted before the index drops it, and a draft is not dropped silently')
 console.log('  subscribe   sources page, add/fork, read-only subscribed bodies')

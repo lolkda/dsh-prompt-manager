@@ -23,7 +23,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { MAX_PROBES, SETTINGS_NAMESPACE, apply, environmentFacts, inject, name } from '../lib/index.js'
-import { buildIndexSchema } from '../lib/entries.js'
+import { activePresetOf, buildIndexSchema, parsePresets } from '../lib/entries.js'
 import { ESCAPE_MARK } from '../lib/guard.js'
 import { bodyHash } from '../lib/store.js'
 
@@ -312,6 +312,72 @@ try {
     'a subscribed entry must register a section like any other entry',
   )
 
+  // ── a preset decides injection whole ────────────────────────────────────────
+
+  // This is what the composer chip writes: one field naming a set. While a preset
+  // is in force it — not the entries' own switches — answers "does this reach the
+  // prompt", which is what lets a switch be one settings write with no bookkeeping.
+  settings.state.value = {
+    entries: [
+      { id: 'early', title: '先说的', order: 5, enabled: true },
+      { id: 'note', title: '补充说明', order: 40, enabled: false },
+    ],
+    presets: [{ id: 'full', name: '全都要', entries: ['early', 'note'] }],
+    activePreset: 'full',
+  }
+  settings.state.watcher()
+  const presetOn = await driven.read()
+  assert.ok(presetOn.prompt.includes('EARLY-BODY'), 'a preset must inject the entries it names')
+  assert.ok(presetOn.prompt.includes('NOTE-BODY'), 'including one whose own switch is off')
+
+  settings.state.value = {
+    ...settings.state.value,
+    presets: [{ id: 'full', name: '全都要', entries: ['note'] }],
+  }
+  settings.state.watcher()
+  const presetNarrow = await driven.read()
+  assert.ok(
+    !presetNarrow.prompt.includes('EARLY-BODY'),
+    'an entry the preset leaves out must stay out, however its own switch reads',
+  )
+  assert.ok(presetNarrow.prompt.includes('NOTE-BODY'), 'and the members it does name stay in')
+
+  // Switching is one settings write and nothing else: the sections keep the names
+  // and placements they registered with, because text is resolved per assembly.
+  settings.state.value = {
+    ...settings.state.value,
+    presets: [{ id: 'full', name: '全都要', entries: ['early', 'note'] }],
+  }
+  settings.state.watcher()
+  const switched = await driven.read()
+  const switchedNames = switched.assembly.sections
+    .map((section) => section.name)
+    .filter((name_) => name_.startsWith('user:prompt-manager:'))
+  assert.deepEqual(
+    switchedNames,
+    [sectionName('early'), sectionName('note')],
+    'switching a preset must not re-register the sections',
+  )
+
+  // No preset hands the decision back to the switches.
+  settings.state.value = { ...settings.state.value, activePreset: '' }
+  settings.state.watcher()
+  const noPreset = await driven.read()
+  assert.ok(noPreset.prompt.includes('EARLY-BODY'), 'without a preset the entry switches decide again')
+  assert.ok(!noPreset.prompt.includes('NOTE-BODY'), 'and a switch left off stays off')
+
+  // An id that names nothing must not freeze the prompt on whatever it was: the
+  // switches take over, and the problem is reported once.
+  const warningsBefore = driven.warnings.length
+  settings.state.value = { ...settings.state.value, activePreset: 'gone' }
+  settings.state.watcher()
+  const missingPreset = await driven.read()
+  assert.ok(missingPreset.prompt.includes('EARLY-BODY'), 'a preset that no longer exists must fall back to the switches')
+  assert.ok(
+    driven.warnings.slice(warningsBefore).some((warning) => warning.includes('gone')),
+    'and the plugin must report the id it could not resolve',
+  )
+
   // ── prompt variables ────────────────────────────────────────────────────────
 
   const facts = environmentFacts()
@@ -420,6 +486,39 @@ try {
     'an unusable index must register no section',
   )
 
+  // A hand-edited preset list is narrowed the same way, and a preset naming an
+  // entry that is not there is kept rather than rewritten: it may be a
+  // subscription that has not come back yet.
+  writeBody('kept', 'KEPT-BODY')
+  settings.state.value = {
+    entries: [{ id: 'kept', title: '留下的', order: 10, enabled: false }],
+    presets: [
+      { id: 'ok', name: '好的', entries: ['kept', '../escape', 'kept', 7] },
+      { id: '../escape', name: '坏的', entries: ['kept'] },
+      { id: 'ok', name: '重名', entries: ['kept'] },
+      'nonsense',
+    ],
+    activePreset: 'ok',
+  }
+  settings.state.watcher()
+  const narrowedPresets = await driven.read()
+  assert.ok(narrowedPresets.prompt.includes('KEPT-BODY'), 'the usable preset must still decide injection')
+
+  const withPresets = parsePresets([
+    { id: 'ok', name: '好的', entries: ['kept', '../escape', 'kept', 7] },
+    { id: '../escape', name: '坏的', entries: ['kept'] },
+    { id: 'ok', name: '重名', entries: ['kept'] },
+    { id: 'unnamed', entries: ['kept'] },
+    'nonsense',
+  ])
+  assert.equal(withPresets.length, 2, 'unusable presets and duplicate ids must be dropped')
+  assert.deepEqual(withPresets[0].entries, ['kept'], 'an unusable member must be dropped and a repeat collapsed')
+  assert.equal(withPresets[0].name, '好的', 'the first preset with an id wins')
+  assert.equal(withPresets[1].name, 'unnamed', 'a preset with no name must fall back to its id')
+  assert.equal(parsePresets('nonsense').length, 0, 'a preset list that is not a list must read as empty')
+  assert.equal(activePresetOf('  full  '), 'full', 'the active id must be trimmed')
+  assert.equal(activePresetOf(7), '', 'a non-string active id must read as no preset')
+
   // ── the real namespace schema, when schemastery is resolvable ───────────────
 
   let schemaNote = 'skipped (schemastery not resolvable from here)'
@@ -439,7 +538,15 @@ try {
     const subscribedEntry = schema({ entries: [{ id: 'note', order: 40, enabled: true, source: 'src-a' }] })
     assert.equal(subscribedEntry.entries[0].source, 'src-a', 'a subscribed entry keeps its source')
     assert.equal(resolved.sources.length, 0, 'an absent source list resolves to empty')
-    schemaNote = 'real schemastery resolves the index and serializes for the wire'
+    assert.deepEqual(schema({}).presets, [], 'an empty document must resolve to no presets')
+    assert.equal(schema({}).activePreset, '', 'and to no preset in force')
+    const stored = schema({ presets: [{ id: 'ctf', name: 'CTF 作业', entries: ['note'] }], activePreset: 'ctf' })
+    assert.equal(stored.presets.length, 1, 'the real schema must resolve a stored preset')
+    assert.equal(stored.presets[0].id, 'ctf', 'the preset id survives the round trip')
+    assert.equal(stored.presets[0].name, 'CTF 作业', 'with its display name')
+    assert.deepEqual(stored.presets[0].entries, ['note'], 'and the entries it selects')
+    assert.equal(stored.activePreset, 'ctf', 'the preset in force is part of the document the page reads')
+    schemaNote = 'real schemastery resolves the index, the presets, and serializes for the wire'
   } catch (error) {
     schemaNote = `skipped (${error.message})`
   }
@@ -654,6 +761,7 @@ try {
   console.log('  empty       a fresh install registers no section and injects nothing')
   console.log(`  sections    ${addedNames.join(' -> ')}`)
   console.log('  index       settings-driven add / enable / disable / order / sanitize')
+  console.log('  presets     one activePreset write swaps the set, unknown id falls back to the switches')
   console.log('  bodies      store file, subscribed snapshot, and a bodyless entry')
   console.log(`  variables   os=${facts.os} platform=${facts.platform} arch=${facts.arch} release=${facts.os_release}`)
   console.log(`  probes      measured at mount (node ${process.version}), absent tool -> 无, contested name reported`)

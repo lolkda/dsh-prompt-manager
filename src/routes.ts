@@ -9,13 +9,25 @@
  * through the hash the page read, so two open drafts cannot silently overwrite
  * each other.
  *
+ * Everything else the page edits — the entry index, the presets, the
+ * subscriptions, the outbound settings — is a settings field, and this route
+ * only fills the gaps that transport leaves: an id nobody holds, a body file, a
+ * script on disk, a source's upstream check.
+ *
  * @module dsh-prompt-manager/routes
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { ResolvedBody } from './entries.js'
-import { DEFAULT_SOURCE_REF, isEntryId, MAX_BODY_BYTES, MAX_ENTRIES } from './entries.js'
+import {
+  DEFAULT_SOURCE_REF,
+  entryIdFor,
+  isEntryId,
+  MAX_BODY_BYTES,
+  MAX_ENTRIES,
+  MAX_PRESETS,
+} from './entries.js'
 import { bodyHash, PromptStore, PromptStoreError } from './store.js'
 import { malformedReferences } from './guard.js'
 import { isRepo, isRef, isSourceId, MAX_SOURCES, normalizeMirror, sourceSlug } from './source.js'
@@ -51,6 +63,14 @@ export interface PromptRouteHost {
   describe(id: string): ResolvedBody
   /** Allocate an unused entry id for a new title. */
   idFor(title: string): string
+  /**
+   * Ids the configured presets already hold.
+   *
+   * The page writes the preset list over the settings transport like it writes
+   * the entry index, so the only thing it cannot work out by itself is which id
+   * is still free for a new one.
+   */
+  presetIds(): string[]
   /** Report a non-fatal problem. */
   warn(message: string): void
   /** The subscription engine, for the source routes. */
@@ -140,6 +160,10 @@ function createHandler(host: PromptRouteHost): (request: IncomingMessage, respon
         sendJson(response, 200, { id: host.idFor(title.slice(0, TITLE_LIMIT)) })
         return
       }
+      if (head === 'preset' && tail === 'id' && method === 'POST') {
+        await handlePresetId(host, request, response)
+        return
+      }
       if (head === 'body' && tail.length > 0) {
         // The id grammar is checked here, so every method answers the same way
         // for an id that could never address a body file.
@@ -173,6 +197,41 @@ function createHandler(host: PromptRouteHost): (request: IncomingMessage, respon
       handleFailure(host, error, response)
     }
   }
+}
+
+/**
+ * Allocate an id for a preset the settings page is about to write.
+ *
+ * The preset list itself rides the settings namespace, like the entry index, so
+ * this route contributes the one thing the page cannot derive: an id nobody
+ * holds. The cap is checked here for the same reason the source route checks
+ * its own — a page that has run out of room should be told before it writes a
+ * list the host would only narrow away.
+ *
+ * @param host - consulted for the preset ids in force.
+ * @param request - the request, read for its JSON body.
+ * @param response - the response to answer on.
+ */
+async function handlePresetId(
+  host: PromptRouteHost,
+  request: IncomingMessage,
+  response: ServerResponse,
+): Promise<void> {
+  const payload = asRecord(await readJsonBody(request))
+  const title = typeof payload?.['title'] === 'string' ? payload['title'] : ''
+  if (title.trim().length === 0) {
+    sendJson(response, 400, { error: 'title must be a non-empty string' })
+    return
+  }
+  const taken = host.presetIds()
+  if (taken.length >= MAX_PRESETS) {
+    sendJson(response, 409, {
+      error: `最多 ${String(MAX_PRESETS)} 个组合，先删掉一个`,
+      code: 'too-many-presets',
+    })
+    return
+  }
+  sendJson(response, 200, { id: entryIdFor(title.slice(0, TITLE_LIMIT), taken) })
 }
 
 /**
