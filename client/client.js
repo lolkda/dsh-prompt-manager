@@ -2051,7 +2051,7 @@ window.__ModuleLoader__.load({
         h('h1', { key: 'heading', className: 'dsh-prompt-manager__heading' }, '提示词'),
         h('p', { key: 'lede', className: 'dsh-prompt-manager__intro' }, [
           '每条提示词都是一个独立的 system prompt section；开关、排序、正文改动在下一个模型步骤生效，不需要重启。',
-          '插件源码：',
+          '插件仓库地址：',
           h('a', {
             key: 'repo',
             className: 'dsh-prompt-manager__sourceLink',
