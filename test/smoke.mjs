@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import { MAX_PROBES, SETTINGS_NAMESPACE, apply, environmentFacts, inject, name } from '../lib/index.js'
+import { MAX_PROBES, SETTINGS_NAMESPACE, apply, environmentFacts, inject, name, resolveHarnessHome } from '../lib/index.js'
 import { activePresetOf, buildIndexSchema, parsePresets } from '../lib/entries.js'
 import { ESCAPE_MARK } from '../lib/guard.js'
 import { bodyHash } from '../lib/store.js'
@@ -383,6 +383,11 @@ try {
   const facts = environmentFacts()
   assert.equal(facts.platform, process.platform, 'platform fact must mirror process.platform')
   assert.equal(facts.arch, process.arch, 'arch fact must mirror process.arch')
+  assert.equal(facts.dsh_home, resolveHarnessHome(), 'dsh_home must be the home the store itself resolves')
+  assert.ok(facts.dsh_home.length > 0, 'dsh_home must never be empty')
+  for (const name of ['home', 'user', 'host']) {
+    assert.ok(typeof facts[name] === 'string' && facts[name].length > 0, `${name} must resolve to a non-empty string`)
+  }
 
   writeBody('vars', 'os={{os}} platform={{platform}} arch={{arch}} release={{os_release}}')
   settings.state.value = { entries: [{ id: 'vars', title: '变量', order: 10, enabled: true }] }
@@ -392,6 +397,17 @@ try {
   assert.ok(environment.prompt.includes(`platform=${process.platform}`), 'platform variable must resolve')
   assert.ok(environment.prompt.includes(`arch=${process.arch}`), 'arch variable must resolve')
   assert.ok(environment.prompt.includes(`release=${facts.os_release}`), 'os_release variable must resolve')
+
+  // The machine facts a body actually reaches for: paths, the account, the box.
+  writeBody('paths', 'home={{home}} dsh={{dsh_home}} user={{user}} host={{host}}')
+  settings.state.value = { entries: [{ id: 'paths', title: '路径', order: 10, enabled: true }] }
+  settings.state.watcher()
+  const machine = await driven.read()
+  assert.equal(
+    machine.prompt,
+    `home=${facts.home} dsh=${facts.dsh_home} user=${facts.user} host=${facts.host}`,
+    'every machine fact must resolve to the value the process reported',
+  )
 
   writeBody('shell', 'shell={{shell}}')
   const vars = fakeSettings([])
@@ -764,6 +780,7 @@ try {
   console.log('  presets     one activePreset write swaps the set, unknown id falls back to the switches')
   console.log('  bodies      store file, subscribed snapshot, and a bodyless entry')
   console.log(`  variables   os=${facts.os} platform=${facts.platform} arch=${facts.arch} release=${facts.os_release}`)
+  console.log(`              home=${facts.home} dsh_home=${facts.dsh_home} user=${facts.user} host=${facts.host}`)
   console.log(`  probes      measured at mount (node ${process.version}), absent tool -> 无, contested name reported`)
   console.log('  guard       an unresolvable reference renders as prose and is reported, never fatal')
   console.log('  scripts     a cached value is in force at mount; a new one is measured behind it, and a delete keeps only what an entry references')

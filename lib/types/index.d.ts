@@ -15,12 +15,13 @@
  * pushes the new revision to open pages.
  *
  * The section text is interpolated against prompt variables at each assembly.
- * This plugin registers `{{os}}`, `{{os_release}}`, `{{platform}}`, and
- * `{{arch}}`, plus any fixed `variables` given in config, plus one variable per
- * `probes` entry — a command whose output is measured once at mount, because a
- * provider is evaluated synchronously on every assembly and must not spawn a
- * process. Any other row may register variables as well; a name this plugin
- * cannot take is reported and skipped rather than failing the mount.
+ * This plugin registers `{{os}}`, `{{os_release}}`, `{{platform}}`, `{{arch}}`,
+ * `{{home}}`, `{{dsh_home}}`, `{{user}}`, and `{{host}}`, plus any fixed
+ * `variables` given in config, plus one variable per `probes` entry — a command
+ * whose output is measured once at mount, because a provider is evaluated
+ * synchronously on every assembly and must not spawn a process. Any other row
+ * may register variables as well; a name this plugin cannot take is reported and
+ * skipped rather than failing the mount.
  *
  * Which entries reach the prompt is decided per assembly: the preset named by
  * `activePreset` answers it whole while one is in force, and each entry's own
@@ -59,6 +60,14 @@ export interface EnvironmentFacts {
     platform: string;
     /** Raw `process.arch`, e.g. `x64`. */
     arch: string;
+    /** `os.homedir()`: the user's home directory. */
+    home: string;
+    /** The resolved harness home: `$DSH_HOME`, or `~/.dsh` when it is unset. */
+    dsh_home: string;
+    /** `os.userInfo().username`: the account the harness runs as. */
+    user: string;
+    /** `os.hostname()`: the machine's name. */
+    host: string;
 }
 /** Plugin config: the prompt variables it registers and where bodies are stored. */
 export interface Config {
@@ -130,9 +139,26 @@ export interface VariableView {
 }
 /**
  * Facts about the running process, as prompt-variable values.
+ *
+ * Every one of these is a process-level fact, fixed for as long as the profile
+ * runs. Deliberately absent: the *session's* working directory and the model in
+ * use. The registry's `AssembleContext` carries only a scope key and a signal,
+ * so those are not reachable from a variable provider — and publishing the host
+ * process's `process.cwd()` under the name `cwd` would invite exactly the wrong
+ * reading, since a session's workspace can be a different directory.
+ *
  * @returns one value per environment variable this plugin registers.
  */
 export declare function environmentFacts(): EnvironmentFacts;
+/**
+ * The harness home directory: `$DSH_HOME` when it names one, `~/.dsh` otherwise.
+ *
+ * The one place this is decided, so the `{{dsh_home}}` variable and the store
+ * directory can never disagree about where the harness keeps its files.
+ *
+ * @returns an absolute path.
+ */
+export declare function resolveHarnessHome(): string;
 /**
  * Resolve the directory holding the entry bodies and the settings files.
  * @param config - plugin config; `storeDir` wins when it names a directory.

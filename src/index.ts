@@ -15,12 +15,13 @@
  * pushes the new revision to open pages.
  *
  * The section text is interpolated against prompt variables at each assembly.
- * This plugin registers `{{os}}`, `{{os_release}}`, `{{platform}}`, and
- * `{{arch}}`, plus any fixed `variables` given in config, plus one variable per
- * `probes` entry — a command whose output is measured once at mount, because a
- * provider is evaluated synchronously on every assembly and must not spawn a
- * process. Any other row may register variables as well; a name this plugin
- * cannot take is reported and skipped rather than failing the mount.
+ * This plugin registers `{{os}}`, `{{os_release}}`, `{{platform}}`, `{{arch}}`,
+ * `{{home}}`, `{{dsh_home}}`, `{{user}}`, and `{{host}}`, plus any fixed
+ * `variables` given in config, plus one variable per `probes` entry — a command
+ * whose output is measured once at mount, because a provider is evaluated
+ * synchronously on every assembly and must not spawn a process. Any other row
+ * may register variables as well; a name this plugin cannot take is reported and
+ * skipped rather than failing the mount.
  *
  * Which entries reach the prompt is decided per assembly: the preset named by
  * `activePreset` answers it whole while one is in force, and each entry's own
@@ -37,7 +38,7 @@ import type { Context } from '@deepseek-ai/cordis'
 // runtime import.
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { createRequire } from 'node:module'
-import { homedir, release } from 'node:os'
+import { homedir, hostname, release, userInfo } from 'node:os'
 import { join } from 'node:path'
 import {
   activePresetOf,
@@ -124,6 +125,14 @@ export interface EnvironmentFacts {
   platform: string
   /** Raw `process.arch`, e.g. `x64`. */
   arch: string
+  /** `os.homedir()`: the user's home directory. */
+  home: string
+  /** The resolved harness home: `$DSH_HOME`, or `~/.dsh` when it is unset. */
+  dsh_home: string
+  /** `os.userInfo().username`: the account the harness runs as. */
+  user: string
+  /** `os.hostname()`: the machine's name. */
+  host: string
 }
 
 /** Plugin config: the prompt variables it registers and where bodies are stored. */
@@ -215,7 +224,25 @@ function platformName(): string {
 }
 
 /**
+ * What a machine fact falls back to when the process cannot report it.
+ *
+ * A registered variable must never resolve to the empty string — the registry
+ * throws on an undefined value, and one throwing section fails the assembly, so
+ * every model step of the profile would fail. The wording matches the probe
+ * placeholders a missing tool gets.
+ */
+const UNKNOWN_FACT = '(unknown)'
+
+/**
  * Facts about the running process, as prompt-variable values.
+ *
+ * Every one of these is a process-level fact, fixed for as long as the profile
+ * runs. Deliberately absent: the *session's* working directory and the model in
+ * use. The registry's `AssembleContext` carries only a scope key and a signal,
+ * so those are not reachable from a variable provider — and publishing the host
+ * process's `process.cwd()` under the name `cwd` would invite exactly the wrong
+ * reading, since a session's workspace can be a different directory.
+ *
  * @returns one value per environment variable this plugin registers.
  */
 export function environmentFacts(): EnvironmentFacts {
@@ -224,7 +251,41 @@ export function environmentFacts(): EnvironmentFacts {
     os_release: release(),
     platform: process.platform,
     arch: process.arch,
+    home: factOrUnknown(() => homedir()),
+    dsh_home: resolveHarnessHome(),
+    user: factOrUnknown(() => userInfo().username),
+    host: factOrUnknown(() => hostname()),
   }
+}
+
+/**
+ * Read one machine fact, substituting {@link UNKNOWN_FACT} for anything the
+ * platform declines to answer — `os.userInfo()` throws on a system with no
+ * account, and an empty return value is just as unusable.
+ *
+ * @param read - the fact to read.
+ * @returns the value, or the placeholder.
+ */
+function factOrUnknown(read: () => string): string {
+  try {
+    const value = read().trim()
+    return value.length > 0 ? value : UNKNOWN_FACT
+  } catch {
+    return UNKNOWN_FACT
+  }
+}
+
+/**
+ * The harness home directory: `$DSH_HOME` when it names one, `~/.dsh` otherwise.
+ *
+ * The one place this is decided, so the `{{dsh_home}}` variable and the store
+ * directory can never disagree about where the harness keeps its files.
+ *
+ * @returns an absolute path.
+ */
+export function resolveHarnessHome(): string {
+  const home = process.env['DSH_HOME']?.trim()
+  return home !== undefined && home.length > 0 ? home : join(homedir(), '.dsh')
 }
 
 /**
@@ -235,9 +296,7 @@ export function environmentFacts(): EnvironmentFacts {
 export function resolveStoreDir(config: Config = {}): string {
   const configured = config.storeDir?.trim()
   if (configured !== undefined && configured.length > 0) return configured
-  const home = process.env['DSH_HOME']?.trim()
-  const root = home !== undefined && home.length > 0 ? home : join(homedir(), '.dsh')
-  return join(root, STORE_DIR_NAME)
+  return join(resolveHarnessHome(), STORE_DIR_NAME)
 }
 
 /**
