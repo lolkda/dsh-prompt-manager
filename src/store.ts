@@ -83,16 +83,39 @@ export function bodyHash(body: string): string {
   return createHash('sha1').update(body, 'utf8').digest('hex')
 }
 
-/** Body files for prompt entries, confined to one directory. */
+/** What one store holds: the file shape and the size a body may reach. */
+export interface PromptStoreOptions {
+  /** File extension, leading dot included. Defaults to `.md`. */
+  extension?: string | undefined
+  /** Largest accepted body, in bytes. Defaults to {@link MAX_BODY_BYTES}. */
+  maxBytes?: number | undefined
+}
+
+/**
+ * Body files for prompt entries, confined to one directory.
+ *
+ * The same guards back the user-script directory, where `id` is a script name
+ * and the file is `<name>.js`: one id grammar, one fence, one atomic write.
+ */
 export class PromptStore {
   /** Absolute directory holding the body files. */
   readonly dir: string
 
+  /** File extension the store owns, leading dot included. */
+  private readonly extension: string
+
+  /** Largest body this store accepts, in bytes. */
+  private readonly maxBytes: number
+
   /**
-   * @param dir - directory holding `<id>.md`; created on first write.
+   * @param dir - directory holding `<id><extension>`; created on first write.
+   * @param options - file extension and size cap; the prompt-body defaults are
+   * `.md` at 256 KiB, so the script store reuses every guard below unchanged.
    */
-  constructor(dir: string) {
+  constructor(dir: string, options: PromptStoreOptions = {}) {
     this.dir = resolve(dir)
+    this.extension = options.extension ?? '.md'
+    this.maxBytes = options.maxBytes ?? MAX_BODY_BYTES
   }
 
   /**
@@ -103,7 +126,7 @@ export class PromptStore {
    */
   bodyPath(id: string): string {
     if (!isEntryId(id)) throw new PromptStoreError('invalid-id', `invalid prompt entry id ${JSON.stringify(id)}`)
-    const file = resolve(this.dir, `${id}.md`)
+    const file = resolve(this.dir, `${id}${this.extension}`)
     if (dirname(file) !== this.dir) throw new PromptStoreError('invalid-id', `prompt entry id ${JSON.stringify(id)} escapes the store directory`)
     return file
   }
@@ -153,21 +176,21 @@ export class PromptStore {
   write(id: string, body: string, fence: WriteFence = { kind: 'any' }): StoredBody {
     const file = this.bodyPath(id)
     const size = Buffer.byteLength(body, 'utf8')
-    if (size > MAX_BODY_BYTES) {
-      throw new PromptStoreError('too-large', `prompt body is ${String(size)} bytes; the limit is ${String(MAX_BODY_BYTES)}`)
+    if (size > this.maxBytes) {
+      throw new PromptStoreError('too-large', `prompt body is ${String(size)} bytes; the limit is ${String(this.maxBytes)}`)
     }
     if (fence.kind !== 'any') {
       const current = this.read(id)
       if (fence.kind === 'absent' && current !== undefined) {
-        throw new PromptStoreError('conflict', `${id}.md appeared while this draft was open`)
+        throw new PromptStoreError('conflict', `${id}${this.extension} appeared while this draft was open`)
       }
       if (fence.kind === 'sha1' && current?.sha1 !== fence.sha1) {
-        throw new PromptStoreError('conflict', `${id}.md changed on disk while this draft was open`)
+        throw new PromptStoreError('conflict', `${id}${this.extension} changed on disk while this draft was open`)
       }
     }
     this.ensureDirectory()
     temporaryCounter += 1
-    const temporary = join(this.dir, `.${id}.md.${String(process.pid)}.${String(temporaryCounter)}.tmp`)
+    const temporary = join(this.dir, `.${id}${this.extension}.${String(process.pid)}.${String(temporaryCounter)}.tmp`)
     try {
       writeFileSync(temporary, body, 'utf8')
       renameSync(temporary, file)
@@ -223,8 +246,8 @@ export class PromptStore {
     if (!existsSync(this.dir)) return []
     try {
       return readdirSync(this.dir)
-        .filter((name) => name.endsWith('.md'))
-        .map((name) => name.slice(0, -'.md'.length))
+        .filter((name) => name.endsWith(this.extension))
+        .map((name) => name.slice(0, -this.extension.length))
         .filter((id) => isEntryId(id))
         .sort()
     } catch {

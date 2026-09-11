@@ -24,6 +24,8 @@ import { pathToFileURL } from 'node:url'
 
 import { MAX_PROBES, SETTINGS_NAMESPACE, apply, environmentFacts, inject, name } from '../lib/index.js'
 import { buildIndexSchema } from '../lib/entries.js'
+import { ESCAPE_MARK } from '../lib/guard.js'
+import { bodyHash } from '../lib/store.js'
 
 /** Throwaway home for the body files, so the test never touches a real one. */
 const STORE_ROOT = mkdtempSync(join(tmpdir(), 'prompt-manager-smoke-'))
@@ -92,6 +94,66 @@ function fakeSettings(initial) {
 }
 
 /**
+ * A stand-in `webServer` service: it records the routes a row registers, so the
+ * real handler can be driven without a socket.
+ * @param routes - the array registered routes are pushed into.
+ * @returns the plugin to mount.
+ */
+function fakeWebServer(routes) {
+  return {
+    name: 'fake-web-server',
+    apply: (ctx) => {
+      ctx.provide('webServer', {
+        register: (route) => {
+          routes.push(route)
+          return () => {}
+        },
+      })
+    },
+  }
+}
+
+/**
+ * A fake request good enough for the route handler.
+ * @param options - method, url, origin, and raw body.
+ * @returns an object the handler can read.
+ */
+function fakeRequest(options) {
+  const chunks = options.body === undefined ? [] : [Buffer.from(options.body, 'utf8')]
+  const headers = { host: '127.0.0.1:3080' }
+  if (options.origin !== undefined) headers.origin = options.origin
+  return {
+    method: options.method ?? 'GET',
+    url: options.url,
+    headers,
+    socket: { remoteAddress: '127.0.0.1' },
+    async *[Symbol.asyncIterator]() {
+      for (const chunk of chunks) yield chunk
+    },
+  }
+}
+
+/**
+ * A fake response that captures what the handler wrote.
+ * @returns the response plus its captured state.
+ */
+function fakeResponse() {
+  const state = { status: 0, body: '' }
+  return {
+    state,
+    writeHead(status) {
+      state.status = status
+    },
+    end(body) {
+      state.body = body ?? ''
+    },
+    json() {
+      return JSON.parse(state.body)
+    },
+  }
+}
+
+/**
  * Mount the plugin into a fresh SystemPrompt registry.
  * @param config - plugin config.
  * @param promptConfig - SystemPrompt service config.
@@ -102,6 +164,10 @@ async function assembleWith(config, promptConfig, plugins = []) {
   const { Context } = await load('@deepseek-ai/cordis')
   const { default: SystemPrompt, renderPrompt } = await load('@deepseek-ai/dsh-system-prompt')
   const ctx = new Context()
+  // The plugin reports through `ctx.logger`, so the test collects what it says
+  // rather than trusting that a warning happened.
+  const warnings = []
+  ctx.logger.warn = (...args) => { warnings.push(args.map(String).join(' ')) }
   await ctx.plugin(SystemPrompt, promptConfig)
   for (const plugin of plugins) await ctx.plugin(plugin)
   await ctx.plugin({ name, inject, apply }, { storeDir: STORE_ROOT, ...config })
@@ -111,24 +177,36 @@ async function assembleWith(config, promptConfig, plugins = []) {
     return { assembly, prompt: renderPrompt(assembly) }
   }
   const first = await read()
-  return { ...first, read }
+  return { ...first, read, warnings }
 }
 
 /** SystemPrompt config that isolates the sections under test. */
 const BARE = { includeHarnessIdentity: false, includeRuntimeContext: false }
 
+/**
+ * A rendered prompt as a model reads it: the guard's escape marks are invisible.
+ * @param text - rendered prompt text.
+ * @returns the same text without escape marks.
+ */
+const readable = (text) => text.split(ESCAPE_MARK).join('')
+
 /** Section name a person-added entry must register under. */
 const sectionName = (id) => `user:prompt-manager:${id}`
 
 /**
- * Write one entry body under the store directory.
+ * Write one entry body under a store directory.
  * @param id - entry id, which is also the file name.
  * @param text - exact body contents.
+ * @param root - storage root to write under.
  */
-function writeBody(id, text) {
-  mkdirSync(SECTIONS, { recursive: true })
-  writeFileSync(join(SECTIONS, `${id}.md`), text, 'utf8')
+function writeBody(id, text, root = STORE_ROOT) {
+  const sections = join(root, 'sections')
+  mkdirSync(sections, { recursive: true })
+  writeFileSync(join(sections, `${id}.md`), text, 'utf8')
 }
+
+/** Throwaway roots the script cases create, removed with the rest. */
+const extraRoots = []
 
 try {
   // ── a fresh install carries the built-in environment prompt ─────────────────
@@ -256,15 +334,24 @@ try {
   vars.state.watcher()
   assert.equal((await withVars.read()).prompt, 'shell=powershell', 'config variables must register and resolve')
 
-  writeBody('missing', '{{nope}}')
+  writeBody('missing', 'before {{nope}} after')
   const noEnv = fakeSettings([])
-  const strict = await assembleWith({ environment: false }, BARE, [noEnv.plugin])
+  const guardedAssembly = await assembleWith({ environment: false }, BARE, [noEnv.plugin])
   noEnv.state.value = { entries: [{ id: 'missing', title: '未知变量', order: 10, enabled: true }] }
   noEnv.state.watcher()
-  await assert.rejects(
-    strict.read(),
-    /unknown prompt variable/,
-    'environment:false must leave the built-in variables unregistered, so a reference fails loudly',
+  const unregistered = await guardedAssembly.read()
+  assert.equal(
+    readable(unregistered.prompt),
+    'before {{nope}} after',
+    'environment:false leaves the built-in variables unregistered, so the reference renders as the prose it is',
+  )
+  assert.ok(
+    guardedAssembly.warnings.some((warning) => warning.includes('{{nope}}')),
+    'and the plugin says which reference it defused, rather than failing every model step',
+  )
+  assert.ok(
+    guardedAssembly.warnings.some((warning) => warning.includes('字面量')),
+    'the report explains that the text was rendered literally',
   )
 
   // ── probes register as variables, and their failures stay values ────────────
@@ -298,6 +385,28 @@ try {
     (await guarded.read()).prompt,
     `os=${facts.os}`,
     'a probe whose name is already registered must be skipped, leaving the original variable intact',
+  )
+  assert.ok(
+    guarded.warnings.some((warning) => warning.includes('os') && warning.includes('环境变量')),
+    'the skipped layer is reported, so a person can see why their own value never took effect',
+  )
+
+  // Configuring a probe replaces the default of that name outright — it is not
+  // merged field by field. This default carries a pattern that would narrow
+  // `v24.18.0` to `24.18.0`, so the leading `v` in the value is what proves the
+  // pattern did not survive the replacement.
+  writeBody('restated', 'git={{git}}')
+  const restated = fakeSettings([])
+  const asNode = await assembleWith({
+    probes: { git: { command: process.execPath, args: ['--version'] } },
+  }, BARE, [restated.plugin])
+  restated.state.value = { entries: [{ id: 'restated', title: '覆盖', order: 10, enabled: true }] }
+  restated.state.watcher()
+  const restatedPrompt = (await asNode.read()).prompt
+  assert.equal(
+    restatedPrompt,
+    `git=v${process.version.replace(/^v/, '')}`,
+    `a configured probe must replace the default spec outright, its pattern included: ${restatedPrompt}`,
   )
 
   // ── unusable index entries are dropped, never thrown ────────────────────────
@@ -335,8 +444,143 @@ try {
     schemaNote = `skipped (${error.message})`
   }
 
-  // ── config validation ───────────────────────────────────────────────────────
+  // ── user scripts supply variables, cached or measured ───────────────────────
 
+  // A profile start reads the cache, so the values a script produced last time
+  // are in force without executing anything.
+  mkdirSync(join(STORE_ROOT, 'scripts'), { recursive: true })
+  const cachedSource = 'console.log(JSON.stringify({ greet: "measured" }))'
+  writeFileSync(join(STORE_ROOT, 'scripts', 'factory.js'), cachedSource, 'utf8')
+  writeFileSync(join(STORE_ROOT, 'scripts', '.state.json'), `${JSON.stringify({
+    factory: {
+      sha1: bodyHash(cachedSource),
+      ranAt: '2026-09-11T00:00:00.000Z',
+      ms: 30,
+      exitCode: 0,
+      variables: { greet: 'cached' },
+    },
+  }, null, 2)}\n`, 'utf8')
+
+  const scriptSettings = fakeSettings([])
+  const scripted = await assembleWith({}, BARE, [scriptSettings.plugin])
+  writeBody('scripted', 'greet={{greet}}')
+  scriptSettings.state.value = { entries: [{ id: 'scripted', title: '脚本变量', order: 10, enabled: true }] }
+  scriptSettings.state.watcher()
+  assert.equal(
+    (await scripted.read()).prompt,
+    'greet=cached',
+    'a script value cached from the last run is in force at mount, without executing anything',
+  )
+
+  // A script that has never run is picked up behind the mount, by a real
+  // interpreter, and a prompt referencing it starts working without a restart.
+  const LIVE = mkdtempSync(join(tmpdir(), 'prompt-manager-scripts-live-'))
+  extraRoots.push(LIVE)
+  mkdirSync(join(LIVE, 'scripts'), { recursive: true })
+  writeFileSync(join(LIVE, 'scripts', 'runtime.js'), 'console.log(JSON.stringify({ stamp: "live" }))', 'utf8')
+  const liveSettings = fakeSettings([])
+  const live = await assembleWith({ storeDir: LIVE }, BARE, [liveSettings.plugin])
+  writeBody('live', 'stamp={{stamp}}', LIVE)
+  liveSettings.state.value = { entries: [{ id: 'live', title: '运行时脚本', order: 10, enabled: true }] }
+  liveSettings.state.watcher()
+  let livePrompt = ''
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    try {
+      livePrompt = (await live.read()).prompt
+    } catch (error) {
+      livePrompt = `threw: ${error.message}`
+    }
+    if (livePrompt === 'stamp=live') break
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+  assert.equal(
+    livePrompt,
+    'stamp=live',
+    'a script with no cached run is measured behind the mount, so a brand-new variable works without a restart',
+  )
+
+  // Letting go of the script must not let go of the value: a reference with no
+  // value fails assembly, so the last good one stays in force.
+  rmSync(join(LIVE, 'scripts', 'runtime.js'), { force: true })
+  assert.equal((await live.read()).prompt, 'stamp=live', 'deleting a script freezes its variables rather than breaking the prompt')
+
+  // A script that fails is its own problem: the mount, and every other prompt,
+  // carry on.
+  const BROKEN = mkdtempSync(join(tmpdir(), 'prompt-manager-scripts-broken-'))
+  extraRoots.push(BROKEN)
+  mkdirSync(join(BROKEN, 'scripts'), { recursive: true })
+  writeFileSync(join(BROKEN, 'scripts', 'broken.js'), 'process.exit(3)', 'utf8')
+  const brokenSettings = fakeSettings([])
+  const broken = await assembleWith({ storeDir: BROKEN }, BARE, [brokenSettings.plugin])
+  writeBody('plain', 'no variables here', BROKEN)
+  brokenSettings.state.value = { entries: [{ id: 'plain', title: '普通', order: 10, enabled: true }] }
+  brokenSettings.state.watcher()
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  assert.equal((await broken.read()).prompt, 'no variables here', 'a script that fails costs nothing but its own values')
+
+  // ── the routes reach the real engine, which is the seam the other two test
+  //    files stub on either side ──────────────────────────────────────────────
+
+  const LIVE_ROUTES = mkdtempSync(join(tmpdir(), 'prompt-manager-routes-live-'))
+  extraRoots.push(LIVE_ROUTES)
+  const routes = []
+  const routeSettings = fakeSettings([])
+  const mounted = await assembleWith({ storeDir: LIVE_ROUTES }, BARE, [routeSettings.plugin, fakeWebServer(routes)])
+  writeBody('from-script', 'rust={{rust}}', LIVE_ROUTES)
+  routeSettings.state.value = { entries: [{ id: 'from-script', title: '脚本变量', order: 10, enabled: true }] }
+  routeSettings.state.watcher()
+  assert.equal(routes.length, 1, 'the plugin registers exactly one route through the web server service')
+
+  const handler = routes[0].handler
+  const call = async (options) => {
+    const response = fakeResponse()
+    await handler(fakeRequest(options), response)
+    return response
+  }
+  const saveScript = (name, rust, fence = null) => call({
+    method: 'PUT',
+    url: `/prompt-manager/script/${name}`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({ source: `console.log(JSON.stringify({ rust: "${rust}" }))`, fileSha1: fence }),
+  })
+
+  const saved = await saveScript('toolchain', '1.0.0')
+  assert.equal(saved.state.status, 200, `a save through the route must answer 200, got ${saved.state.body}`)
+  assert.equal(
+    (await mounted.read()).prompt,
+    'rust=1.0.0',
+    'and the values it registered reach the prompt without a restart',
+  )
+
+  const listed = await call({ url: '/prompt-manager/variables' })
+  const rust = listed.json().variables.find((variable) => variable.name === 'rust')
+  assert.equal(rust.source, 'script', 'the variable list says which layer supplied a value')
+  assert.equal(rust.detail, 'toolchain', 'and which script owns it')
+  assert.deepEqual(rust.referencedBy, ['脚本变量'], 'and which entries reference it')
+  assert.equal(
+    listed.json().variables.some((variable) => variable.name === 'git'),
+    true,
+    'with the probe variables listed beside the script ones',
+  )
+
+  // A live script keeps its names: this is what stops two scripts from quietly
+  // overwriting each other.
+  const clash = await saveScript('clash', '3.0.0')
+  assert.equal(clash.state.status, 409, 'a name a script still on disk owns is refused')
+  assert.equal(clash.json().code, 'conflict', 'and the refusal says it was a conflict')
+
+  // Deleting freezes the values...
+  const removed = await call({ method: 'DELETE', url: '/prompt-manager/script/toolchain', origin: 'http://127.0.0.1:3080' })
+  assert.equal(removed.json().removed, true, 'deleting removes the file')
+  assert.equal((await mounted.read()).prompt, 'rust=1.0.0', 'and the prompt keeps rendering what it last measured')
+
+  // ...and a name whose script is gone is adoptable, which is what makes a
+  // rename work: delete the old script, save the new one under its own name.
+  const renamed = await saveScript('toolchain2', '2.0.0')
+  assert.equal(renamed.state.status, 200, `a script may adopt a name left by a deleted script, got ${renamed.state.body}`)
+  assert.equal((await mounted.read()).prompt, 'rust=2.0.0', 'so a rename does not lock its variables behind a restart')
+
+  // ── config validation ───────────────────────────────────────────────────────
   const fakeCtx = {
     effect: (execute) => {
       execute()
@@ -370,6 +614,16 @@ try {
     /at most 64 probes/,
     'the probe cap must fail the mount rather than probe silently in part',
   )
+  assert.throws(
+    () => apply(fakeCtx, { storeDir: STORE_ROOT, scripts: { 'Bad Name': {} } }),
+    /not a usable script name/,
+    'a script override under an unusable name must fail the mount',
+  )
+  assert.throws(
+    () => apply(fakeCtx, { storeDir: STORE_ROOT, scripts: { toolchain: { timeoutMs: -1 } } }),
+    /timeoutMs that is not a positive number/,
+    'a script timeout that cannot be used must fail the mount',
+  )
 
   console.log('smoke ok')
   console.log('  empty       a fresh install registers no section and injects nothing')
@@ -377,8 +631,11 @@ try {
   console.log('  index       settings-driven add / enable / disable / order / sanitize')
   console.log('  bodies      store file, subscribed snapshot, and a bodyless entry')
   console.log(`  variables   os=${facts.os} platform=${facts.platform} arch=${facts.arch} release=${facts.os_release}`)
-  console.log(`  probes      measured at mount (node ${process.version}), absent tool -> 无, contested name skipped`)
+  console.log(`  probes      measured at mount (node ${process.version}), absent tool -> 无, contested name reported`)
+  console.log('  guard       an unresolvable reference renders as prose and is reported, never fatal')
+  console.log('  scripts     a cached value is in force at mount; a new one is measured behind it and frozen when deleted')
   console.log(`  schema      ${schemaNote}`)
 } finally {
   rmSync(STORE_ROOT, { recursive: true, force: true })
+  for (const root of extraRoots) rmSync(root, { recursive: true, force: true })
 }

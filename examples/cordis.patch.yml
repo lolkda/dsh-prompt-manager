@@ -48,9 +48,17 @@
 # probeTexts:    replace those placeholders (missing / empty / timeout / skipped)
 # probeBudgetMs: ceiling on the whole pass (default 8000); the rest are skipped
 # storeDir:      directory holding one markdown file per entry, under its
-#                `sections/` leaf (default $DSH_HOME/prompt-manager). The index
+#                `sections/` leaf, and one script per file under its `scripts/`
+#                leaf (default $DSH_HOME/prompt-manager). The index
 #                (title / order / enabled) lives in $DSH_HOME/settings.yaml under
 #                the `prompt-manager:` key, written by Settings → 提示词.
+# scripts:       per-script execution overrides for the user scripts under
+#                `scripts/`. A script prints a JSON object, and its keys become
+#                prompt variables, so one script can supply many. Defaults to
+#                `node <script>` with a 3s timeout; `{script}` in `args` becomes
+#                the script's absolute path. Every successful run is cached, so a
+#                profile start serves the last measured values without executing
+#                anything. Scripts run as the host user, with no sandbox.
 #
 # Example with every value set:
 # - insert:
@@ -66,5 +74,8 @@
 #           node:   { command: node, args: ['--version'], pattern: 'v?([0-9.]+)' }
 #           python: { command: python, args: ['--version'], pattern: '([0-9.]+)' }
 #           rust:   { command: rustc, args: ['--version'] }
+#         scripts:
+#           toolchain: { timeoutMs: 5000 }
+#           inventory: { command: 'python', args: ['{script}'] }
 #         probeTexts: { missing: '无' }
 #         storeDir: 'C:/Users/me/.dsh/prompt-manager'

@@ -24,7 +24,7 @@ export interface SourceSummary {
     ref: string;
     /** Effective mirror, with the global default already folded in. */
     mirror: string;
-    /** Whether the source takes part in a check. */
+    /** Whether the source takes part in a check, an apply, or a revert. */
     enabled: boolean;
     /** When its files were last applied. */
     appliedAt?: string;
@@ -73,10 +73,24 @@ export interface ApplyOutcome {
 /** The subscription engine. */
 export declare class Subscriptions {
     private readonly host;
+    /** How one source's workspace is built; replaced in tests. */
+    private readonly workspaceOf;
+    /**
+     * Where the subscribed bodies were last found.
+     *
+     * Section text is resolved on every assembly, so `readBody` runs once per
+     * subscribed entry per model step. Rebuilding this map each time would re-read
+     * and re-parse every source's `state.json` in that hot path, so it is computed
+     * once and dropped whenever the files or the source list can have changed.
+     */
+    private cachedLocations;
     /**
      * @param host - the plugin side of the engine.
+     * @param options - workspace factory, for tests that count what the engine reads.
      */
-    constructor(host: SubscriptionHost);
+    constructor(host: SubscriptionHost, options?: {
+        workspace?: (slug: string) => SourceWorkspace;
+    });
     /**
      * The workspace of one source.
      * @param slug - source id.
@@ -89,11 +103,22 @@ export declare class Subscriptions {
      */
     locate(): Map<string, SubscriptionLocation>;
     /**
+     * Forget the cached map and read the sources again.
+     *
+     * Called when the source list changed, or after this engine moved files, so
+     * the map never describes a snapshot that has already been replaced.
+     *
+     * @returns the freshly computed map.
+     */
+    refreshLocations(): Map<string, SubscriptionLocation>;
+    /**
      * Read one subscribed entry's body.
      * @param id - entry id.
      * @returns the body, or `undefined` when it is not a subscribed entry.
      */
     readBody(id: string): string | undefined;
+    /** Build the location map from every source's bookkeeping. */
+    private computeLocations;
     /**
      * The configured sources with their on-disk situation.
      * @returns one summary per source.
@@ -103,7 +128,7 @@ export declare class Subscriptions {
      * Check one source against its upstream and stage whatever changed.
      * @param slug - source id.
      * @returns the check outcome, tagged with its source.
-     * @throws {CheckError} when the source is unknown or the check cannot conclude.
+     * @throws {CheckError} when the source is unknown, switched off, or the check cannot conclude.
      */
     check(slug: string): Promise<CheckOutcome & {
         slug: string;
@@ -128,6 +153,10 @@ export declare class Subscriptions {
     }>;
     /**
      * Forget one source: its files and its entries.
+     *
+     * A source that is switched off can still be forgotten: removing it is exactly
+     * what a person does with one they no longer want.
+     *
      * @param slug - source id.
      * @returns the index that resulted.
      */
@@ -159,5 +188,17 @@ export declare class Subscriptions {
      * @throws {CheckError} when no such source is configured.
      */
     private source;
+    /**
+     * Look up a source that may be operated on.
+     *
+     * A switched-off source keeps the bodies it already applied — turning it off
+     * is not a way to erase entries that are in force — but it takes no new work
+     * from upstream until it is switched back on.
+     *
+     * @param slug - source id.
+     * @returns the source.
+     * @throws {CheckError} when no such source is configured, or it is switched off.
+     */
+    private writableSource;
 }
 //# sourceMappingURL=subscriptions.d.ts.map

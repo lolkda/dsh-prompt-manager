@@ -15,12 +15,15 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { ResolvedBody } from './entries.js'
-import { DEFAULT_SOURCE_REF, MAX_BODY_BYTES } from './entries.js'
+import { DEFAULT_SOURCE_REF, isEntryId, MAX_BODY_BYTES, MAX_ENTRIES } from './entries.js'
 import { bodyHash, PromptStore, PromptStoreError } from './store.js'
+import { malformedReferences } from './guard.js'
 import { isRepo, isRef, isSourceId, MAX_SOURCES, normalizeMirror, sourceSlug } from './source.js'
 import { CheckError } from './sync.js'
 import { FetchFailure } from './net.js'
+import { ScriptError, type PromptScripts } from './scripts.js'
 import type { Subscriptions } from './subscriptions.js'
+import type { VariableView } from './index.js'
 
 /** The single prefix every route below lives under. */
 export const ROUTE_PREFIX = '/prompt-manager'
@@ -52,12 +55,15 @@ export interface PromptRouteHost {
   warn(message: string): void
   /** The subscription engine, for the source routes. */
   subscriptions: Subscriptions
+  /** The user-script engine, for the variable and script routes. */
+  scripts: PromptScripts
   /**
-   * The prompt variables this row registered, with the values in force. Probes
-   * run once at mount, so this is how a deployment checks what they measured
-   * without making a model step.
+   * The prompt variables in force, with their provenance and the entries that
+   * reference them. Probes and cached script runs are read once at mount, so
+   * this is how a deployment checks what is actually being interpolated without
+   * making a model step.
    */
-  variables(): Record<string, string>
+  variables(): VariableView[]
 }
 
 /**
@@ -94,6 +100,17 @@ function createHandler(host: PromptRouteHost): (request: IncomingMessage, respon
         sendJson(response, 403, { error: 'the prompt store is reachable from loopback clients only' })
         return
       }
+      // The peer address alone does not settle where the request came from: a
+      // page served by a name that resolves to this machine reaches the same
+      // socket, and presents a `Host` and a matching `Origin` of its own. Only
+      // loopback host names answer here, so a rebound name cannot get in.
+      if (!isLoopbackHost(request.headers.host)) {
+        sendJson(response, 403, {
+          error: 'the prompt store answers loopback host names only (127.0.0.1, localhost, [::1])',
+          code: 'host-not-loopback',
+        })
+        return
+      }
       const method = request.method ?? 'GET'
       if (method !== 'GET' && method !== 'HEAD' && !sameOrigin(request)) {
         sendJson(response, 403, { error: 'cross-origin writes are refused' })
@@ -106,7 +123,11 @@ function createHandler(host: PromptRouteHost): (request: IncomingMessage, respon
       const tail = slash < 0 ? '' : rest.slice(slash + 1)
 
       if (head === 'status' && method === 'GET') {
-        sendJson(response, 200, { ...host.store.status(), variables: host.variables() })
+        sendJson(response, 200, {
+          ...host.store.status(),
+          maxEntries: MAX_ENTRIES,
+          variables: Object.fromEntries(host.variables().map((variable) => [variable.name, variable.value])),
+        })
         return
       }
       if (head === 'id' && method === 'POST') {
@@ -120,11 +141,31 @@ function createHandler(host: PromptRouteHost): (request: IncomingMessage, respon
         return
       }
       if (head === 'body' && tail.length > 0) {
-        await handleBody(host, method, decodeId(tail), request, response)
+        // The id grammar is checked here, so every method answers the same way
+        // for an id that could never address a body file.
+        const id = decodeId(tail)
+        if (id === undefined || !isEntryId(id)) {
+          sendJson(response, 400, { error: `the entry id is not a valid id: ${JSON.stringify(tail)}`, code: 'invalid-id' })
+          return
+        }
+        await handleBody(host, method, id, request, response)
         return
       }
       if (head === 'sources') {
         await handleSources(host, method, tail, request, response)
+        return
+      }
+      if (head === 'variables') {
+        await handleVariables(host, method, tail, request, response)
+        return
+      }
+      if (head === 'script' && tail.length > 0) {
+        const name = decodeId(tail)
+        if (name === undefined || !isEntryId(name)) {
+          sendJson(response, 400, { error: `the script name is not a usable name: ${JSON.stringify(tail)}`, code: 'invalid-id' })
+          return
+        }
+        await handleScript(host, method, name, request, response)
         return
       }
       sendJson(response, 404, { error: 'unknown prompt route' })
@@ -296,24 +337,140 @@ function slugFor(repo: string, taken: readonly string[]): string {
 }
 
 /**
+ * Serve the variable routes: the list of what the prompt can interpolate, a
+ * test run, and a refresh.
+ *
+ * A test run is deliberately the same execution a saved script gets, down to
+ * running from a real file, so what the page reports is what saving would
+ * produce. What it does *not* do is register anything: a draft that is only
+ * being tried out cannot change the prompt.
+ *
+ * @param host - the script engine and the variable list.
+ * @param method - HTTP method of the request.
+ * @param tail - empty, `run`, or `refresh`.
+ * @param request - the request, read for a JSON body on `run`.
+ * @param response - the response to answer on.
+ */
+async function handleVariables(
+  host: PromptRouteHost,
+  method: string,
+  tail: string,
+  request: IncomingMessage,
+  response: ServerResponse,
+): Promise<void> {
+  if (tail.length === 0) {
+    if (method !== 'GET') {
+      sendJson(response, 405, { error: `method ${method} is not allowed on the variable list` })
+      return
+    }
+    sendJson(response, 200, {
+      dir: host.scripts.dir,
+      variables: host.variables(),
+      scripts: host.scripts.list(),
+    })
+    return
+  }
+  if (method !== 'POST') {
+    sendJson(response, 405, { error: `method ${method} is not allowed on ${tail}` })
+    return
+  }
+  if (tail === 'run') {
+    const payload = asRecord(await readJsonBody(request))
+    const name = typeof payload?.['name'] === 'string' ? payload['name'].trim() : ''
+    const source = payload?.['source']
+    if (source !== undefined) {
+      if (typeof source !== 'string') {
+        sendJson(response, 400, { error: 'source must be a string when present' })
+        return
+      }
+      sendJson(response, 200, await host.scripts.runSource(name.length > 0 ? name : 'draft', source))
+      return
+    }
+    if (name.length === 0) {
+      sendJson(response, 400, { error: 'send either name (a saved script) or source (a draft)' })
+      return
+    }
+    sendJson(response, 200, await host.scripts.run(name))
+    return
+  }
+  if (tail === 'refresh') {
+    sendJson(response, 200, { reports: await host.scripts.refresh() })
+    return
+  }
+  sendJson(response, 404, { error: `unknown variable route: ${tail}` })
+}
+
+/**
+ * Serve one script: read its source, save a new one, or forget it.
+ *
+ * A save validates, runs, and only then writes: the file is put in place by the
+ * same atomic write a prompt body uses, and a script whose output or variable
+ * names are unusable never becomes a file at all.
+ *
+ * @param host - the script engine.
+ * @param method - HTTP method of the request.
+ * @param name - decoded script name.
+ * @param request - the request, read for a JSON body on PUT.
+ * @param response - the response to answer on.
+ */
+async function handleScript(
+  host: PromptRouteHost,
+  method: string,
+  name: string,
+  request: IncomingMessage,
+  response: ServerResponse,
+): Promise<void> {
+  if (method === 'GET') {
+    const stored = host.scripts.read(name)
+    if (stored === undefined) {
+      sendJson(response, 404, { error: `没有这个脚本：${name}`, code: 'unknown-script' })
+      return
+    }
+    sendJson(response, 200, { name, source: stored.source, sha1: stored.sha1 })
+    return
+  }
+  if (method === 'PUT') {
+    const payload = asRecord(await readJsonBody(request))
+    const source = payload?.['source']
+    if (typeof source !== 'string') {
+      sendJson(response, 400, { error: 'source must be a string' })
+      return
+    }
+    const fence = payload?.['fileSha1']
+    if (fence !== undefined && fence !== null && typeof fence !== 'string') {
+      sendJson(response, 400, { error: 'fileSha1 must be a string when present' })
+      return
+    }
+    const saved = await host.scripts.save(
+      name,
+      source,
+      fence === undefined || fence === null ? { kind: 'absent' } : { kind: 'sha1', sha1: fence },
+    )
+    sendJson(response, 200, saved)
+    return
+  }
+  if (method === 'DELETE') {
+    sendJson(response, 200, { name, removed: host.scripts.remove(name) })
+    return
+  }
+  sendJson(response, 405, { error: `method ${method} is not allowed on a script` })
+}
+
+/**
  * Serve one entry's body: read, write, or restore the bundled default.
  * @param host - body resolution and the store.
  * @param method - HTTP method of the request.
- * @param id - decoded entry id.
+ * @param id - decoded entry id, already checked against the id grammar.
  * @param request - the request, read for a JSON body on PUT.
  * @param response - the response to answer on.
  */
 async function handleBody(
   host: PromptRouteHost,
   method: string,
-  id: string | undefined,
+  id: string,
   request: IncomingMessage,
   response: ServerResponse,
 ): Promise<void> {
-  if (id === undefined) {
-    sendJson(response, 400, { error: 'the entry id is not a valid id' })
-    return
-  }
   if (method === 'GET') {
     sendJson(response, 200, viewOf(host, id))
     return
@@ -332,6 +489,19 @@ async function handleBody(
     const fence = payload?.['fileSha1']
     if (fence !== undefined && fence !== null && typeof fence !== 'string') {
       sendJson(response, 400, { error: 'fileSha1 must be a string when present' })
+      return
+    }
+    // A reference the registry cannot even read as a variable name makes every
+    // later model step fail, so it never reaches a file. A well-formed name that
+    // happens to be unregistered is not refused here: another row may register
+    // it, and the assembly guard covers the rest.
+    const malformed = malformedReferences(body)
+    if (malformed.length > 0) {
+      sendJson(response, 422, {
+        error: `正文里有非法引用，注册表只认 {{名字}} 这样的简单引用：${malformed.join(' ')}（保存它会让之后每一步组装都失败）`,
+        code: 'malformed-reference',
+        references: malformed,
+      })
       return
     }
     host.store.write(id, body, fence === undefined || fence === null
@@ -388,10 +558,21 @@ function handleFailure(host: PromptRouteHost, error: unknown, response: ServerRe
     sendJson(response, status, { error: error.message, code: error.code })
     return
   }
+  if (error instanceof ScriptError) {
+    const status = error.reason === 'unknown-script'
+      ? 404
+      : error.reason === 'conflict'
+        ? 409
+        : error.reason === 'invalid-output' || error.reason === 'too-many'
+          ? 422
+          : 400
+    sendJson(response, status, { error: error.message, code: error.reason, report: error.report })
+    return
+  }
   if (error instanceof CheckError) {
     const status = error.reason === 'unknown-source'
       ? 404
-      : error.reason === 'nothing-staged'
+      : error.reason === 'nothing-staged' || error.reason === 'disabled'
         ? 409
         : error.reason === 'manifest'
           ? 422
@@ -417,6 +598,29 @@ function handleFailure(host: PromptRouteHost, error: unknown, response: ServerRe
 function isLoopback(request: IncomingMessage): boolean {
   const address = request.socket?.remoteAddress ?? ''
   return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1' || address.startsWith('127.')
+}
+
+/**
+ * Loopback-host check: which name the client used to reach this socket.
+ *
+ * A page served from a name that resolves to this machine — the classic
+ * DNS-rebinding setup — arrives from a loopback peer and presents a `Host` and
+ * a matching `Origin` of its own, which the peer check and the same-origin
+ * check both accept. Requiring a loopback host name closes that door.
+ *
+ * @param host - the `Host` header value.
+ * @returns `true` when it names the local machine.
+ */
+function isLoopbackHost(host: string | undefined): boolean {
+  if (host === undefined) return false
+  let name: string
+  try {
+    name = new URL(`http://${host}`).hostname
+  } catch {
+    return false
+  }
+  const bare = name.startsWith('[') && name.endsWith(']') ? name.slice(1, -1) : name
+  return bare === '127.0.0.1' || bare === 'localhost' || bare === '::1' || bare.startsWith('127.')
 }
 
 /**

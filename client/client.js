@@ -156,9 +156,97 @@ window.__ModuleLoader__.load({
         const detail = data && typeof data.error === 'string' ? data.error : `${method} ${path} failed (${response.status})`
         const error = new Error(detail)
         error.status = response.status
+        // A refused save carries the run that refused it, so the editor can show
+        // what the script actually printed rather than only that it was refused.
+        error.report = data && typeof data === 'object' ? data.report : undefined
         throw error
       }
       return data
+    }
+
+    /** Where a variable's value came from, in the page's own words. */
+    const SOURCE_LABELS = { environment: '系统', config: '配置', probe: '探测', script: '脚本' }
+
+    /** Valid variable names, mirroring the registry's own rule. */
+    const VARIABLE_NAME = /^[a-z][a-z0-9_]*$/
+
+    /**
+     * The source a brand-new script starts from.
+     *
+     * It runs as it stands — printing a JSON object whose keys become variable
+     * names — so the first thing a person sees is a working example rather than
+     * an empty box and a paragraph explaining what to type.
+     */
+    const SCRIPT_TEMPLATE = [
+      '// 打印一个 JSON 对象：键就是提示词里能用的变量名。',
+      '// 这个脚本跑在一个独立子进程里，超时、报错都不会影响 DSH 本身。',
+      'const { execSync } = require("node:child_process")',
+      '',
+      'const firstLine = (command) => {',
+      '  try {',
+      '    return execSync(command, { encoding: "utf8" }).trim().split("\\n")[0]',
+      '  } catch {',
+      '    return "(not installed)"',
+      '  }',
+      '}',
+      '',
+      'console.log(JSON.stringify({',
+      '  rust: firstLine("rustc --version"),',
+      '}))',
+      '',
+    ].join('\n')
+
+    /**
+     * Every `{{...}}` a body carries, as written.
+     *
+     * The inner text is returned whatever it holds, because the point of this
+     * scan is to catch a reference that would fail assembly — and a name that is
+     * not a valid variable name fails it just as hard as one that is not
+     * registered.
+     * @param text - markdown body.
+     * @returns the reference texts, in order, without repeats.
+     */
+    function referencesIn(text) {
+      const found = []
+      const pattern = /\{\{([^{}]*)\}\}/g
+      let match = pattern.exec(text)
+      while (match !== null) {
+        if (!found.includes(match[1])) found.push(match[1])
+        match = pattern.exec(text)
+      }
+      return found
+    }
+
+    /**
+     * A stored timestamp as the page shows it: local time, falling back to the
+     * raw value when it cannot be parsed (an empty string means "never").
+     * @param value - ISO-8601 text from the Host.
+     * @returns the text to render.
+     */
+    function stamp(value) {
+      const parsed = new Date(value)
+      return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString()
+    }
+
+    /**
+     * Whether a script source parses, checked here so the editor can say so
+     * while somebody types. The Host re-checks before writing, and this is only
+     * ever a hint: a browser without `new Function` simply reports nothing.
+     * @param source - script text.
+     * @returns the parser's complaint, or `null` when it parses.
+     */
+    function syntaxProblem(source) {
+      try {
+        // The compilation is what is wanted here, never the call.
+        Function(source)
+        return null
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error)
+        // A host that forbids eval refuses the compilation itself. That is not a
+        // syntax error, so the editor says nothing rather than something wrong.
+        if (error && (error.name === 'EvalError' || /Content Security Policy|unsafe-eval/i.test(message))) return null
+        return message
+      }
     }
 
     /** Read the entry index out of a settings snapshot. */
@@ -173,6 +261,22 @@ window.__ModuleLoader__.load({
       const value = snapshot && snapshot.value
       const list = value && Array.isArray(value.sources) ? value.sources : []
       return list.filter((entry) => entry !== null && typeof entry === 'object' && typeof entry.id === 'string')
+    }
+
+    /**
+     * The paths a check staged, whatever shape the answer arrived in.
+     *
+     * A proxy that answers with something that is not the Host's JSON would
+     * otherwise turn every consumer of the outcome into a `TypeError`, which the
+     * page can only report as gibberish.
+     * @param outcome - the check answer.
+     * @returns the staged paths, or an empty list.
+     */
+    function changedPaths(outcome) {
+      const changes = outcome && Array.isArray(outcome.changes) ? outcome.changes : []
+      return changes
+        .map((change) => (change !== null && typeof change === 'object' ? change.path : undefined))
+        .filter((path) => typeof path === 'string')
     }
 
     /**
@@ -334,6 +438,48 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * What one script run produced, as the editor shows it.
+     *
+     * A test run is the same execution a save performs, so this is not a
+     * simulation: it is the variables the script would supply, the exit code it
+     * exited with, and everything that went wrong — which is exactly what a
+     * person needs before deciding to save.
+     * @param props - the run report, or null when nothing has been run.
+     */
+    function RunReport(props) {
+      const report = props.report
+      if (report === null || report === undefined) return null
+      const names = report.variables === undefined || report.variables === null ? [] : Object.keys(report.variables)
+      return h('div', { className: 'dsh-prompt-manager__changes' }, [
+        h('span', {
+          key: 'head',
+          className: report.ok === true
+            ? 'dsh-prompt-manager__status dsh-prompt-manager__status--ok'
+            : 'dsh-prompt-manager__status dsh-prompt-manager__status--error',
+        }, [
+          report.ok === true ? `这次会提供 ${String(names.length)} 个变量` : '这次运行没有产出可用的变量',
+          `退出码 ${report.exitCode === undefined ? '无' : String(report.exitCode)}`,
+          `${String(report.ms)}ms`,
+        ].join(' · ')),
+        ...names.map((name) => h('div', { key: name, className: 'dsh-prompt-manager__change' }, [
+          h('span', { key: 'token', className: 'dsh-prompt-manager__changePath' }, `{{${name}}}`),
+          h('span', { key: 'value', className: 'dsh-prompt-manager__delta' }, report.variables[name]),
+        ])),
+        ...(report.problems ?? []).map((problem, index) => h('span', {
+          key: `problem-${String(index)}`,
+          className: 'dsh-prompt-manager__status dsh-prompt-manager__status--error',
+        }, problem)),
+        ...(report.warnings ?? []).map((warning, index) => h('span', {
+          key: `warning-${String(index)}`,
+          className: 'dsh-prompt-manager__note',
+        }, warning)),
+        typeof report.stderr === 'string' && report.stderr.length > 0
+          ? h('pre', { key: 'stderr', className: 'dsh-prompt-manager__previewRaw' }, report.stderr)
+          : null,
+      ])
+    }
+
+    /**
      * Render the settings section: the entry list, the editor page, or the
      * subscription sources.
      * @param props - composed slot props carrying the bound settings scope.
@@ -363,6 +509,11 @@ window.__ModuleLoader__.load({
       const [newRepo, setNewRepo] = React.useState('')
       const [newRef, setNewRef] = React.useState('main')
       const [newMirror, setNewMirror] = React.useState('')
+      const [variableReport, setVariableReport] = React.useState(null)
+      const [scriptDraft, setScriptDraft] = React.useState(null)
+      const [scriptSaved, setScriptSaved] = React.useState(null)
+      const [runReport, setRunReport] = React.useState(null)
+      const [caret, setCaret] = React.useState(null)
 
       const refreshStore = React.useCallback(() => {
         return request('GET', '/status')
@@ -376,10 +527,20 @@ window.__ModuleLoader__.load({
           .catch((error) => { setStatus({ kind: 'error', text: error.message }) })
       }, [])
 
+      /** Read the variables in force and the scripts that supply them. */
+      const refreshVariables = React.useCallback(() => {
+        return request('GET', '/variables')
+          .then((next) => { setVariableReport(next) })
+          .catch((error) => {
+            setVariableReport({ variables: [], scripts: [], error: error.message })
+          })
+      }, [])
+
       React.useEffect(() => {
         void refreshStore()
         void refreshSources()
-      }, [refreshSources, refreshStore])
+        void refreshVariables()
+      }, [refreshSources, refreshStore, refreshVariables])
 
       const writable = snapshot.writable !== false && (store === null || store.writable !== false)
       // A brand-new entry has no saved side yet and is therefore always dirty.
@@ -389,6 +550,18 @@ window.__ModuleLoader__.load({
       const subscribedDraft = draft !== null && draft.source === 'subscribed'
       // A built-in body ships with the plugin; editing and saving overrides it.
       const builtinDraft = draft !== null && draft.source === 'builtin'
+      // The variables in force, and the scripts that supply them, as the Host
+      // last reported them. The list is what a body may reference, so it is also
+      // what the editor uses to catch a reference that would fail assembly.
+      const variables = variableReport !== null && Array.isArray(variableReport.variables) ? variableReport.variables : []
+      const scripts = variableReport !== null && Array.isArray(variableReport.scripts) ? variableReport.scripts : []
+      const knownVariables = variables.map((variable) => variable.name)
+      // A reference the prompt cannot resolve makes assembly throw, so the body
+      // editor says so first: a name that is not registered, and a reference
+      // whose shape is not a variable name at all.
+      const referencedInDraft = draft === null ? [] : referencesIn(draft.body)
+      const unknownInDraft = referencedInDraft.filter((name) => !knownVariables.includes(name) && VARIABLE_NAME.test(name))
+      const malformedInDraft = referencedInDraft.filter((name) => !VARIABLE_NAME.test(name))
 
       /** Load one entry's body and enter the editor page. */
       const open = React.useCallback(async (id) => {
@@ -439,6 +612,14 @@ window.__ModuleLoader__.load({
       }, [draft, dirty, saved])
 
       const add = React.useCallback(async () => {
+        // The registry keeps a bounded number of sections, so an entry past the
+        // cap would save a body and then never reach the prompt. Refusing here is
+        // the only place a person can be told why.
+        const cap = store !== null && typeof store.maxEntries === 'number' ? store.maxEntries : null
+        if (cap !== null && entries.length >= cap) {
+          setStatus({ kind: 'error', text: `最多 ${String(cap)} 条提示词，先删掉一条，或关掉不用的条目（关掉的条目也占位置）。` })
+          return
+        }
         setBusy(true)
         try {
           const allocated = await request('POST', '/id', { title: '新提示词' })
@@ -461,7 +642,7 @@ window.__ModuleLoader__.load({
         } finally {
           setBusy(false)
         }
-      }, [entries])
+      }, [entries, store])
 
       const save = React.useCallback(async () => {
         if (draft === null) return
@@ -471,20 +652,33 @@ window.__ModuleLoader__.load({
             body: draft.body,
             fileSha1: draft.fileSha1,
           })
-          const nextEntries = draft.isNew
-            ? [...entries, { id: draft.id, title: draft.title, order: draft.order, enabled: true }]
-            : entries.map((entry) => entry.id === draft.id
-              ? { ...entry, title: draft.title, order: draft.order }
-              : entry)
-          if (indexChanged(entries, nextEntries)) await scope.set('entries', nextEntries)
+          // The body is on disk, so the fence the editor holds has to be the one
+          // that write produced — a later save that reused the old hash would be
+          // refused as stale, and the editor would be stuck on 409.
           const next = {
             ...draft,
-            source: written.source,
+            source: typeof written.source === 'string' ? written.source : draft.source,
             fileSha1: typeof written.fileSha1 === 'string' ? written.fileSha1 : null,
             isNew: false,
           }
           setDraft(next)
           setSaved(next)
+          const nextEntries = draft.isNew
+            ? [...entries, { id: draft.id, title: draft.title, order: draft.order, enabled: true }]
+            : entries.map((entry) => entry.id === draft.id
+              ? { ...entry, title: draft.title, order: draft.order }
+              : entry)
+          if (indexChanged(entries, nextEntries)) {
+            try {
+              await scope.set('entries', nextEntries)
+            } catch (error) {
+              // Half a save is worth saying precisely: the prose is stored, only
+              // the index write failed, and pressing save again finishes it.
+              setStatus({ kind: 'error', text: `正文已保存，但索引没写进去：${error.message}（再点一次「保存修改」即可）` })
+              await refreshStore()
+              return
+            }
+          }
           setStatus({ kind: 'info', text: '已保存，下一个模型步骤生效。' })
           await refreshStore()
         } catch (error) {
@@ -523,7 +717,7 @@ window.__ModuleLoader__.load({
           setStatus({ kind: 'info', text: `已添加来源 ${allocated.id}，正在检查…` })
           const outcome = await request('POST', `/sources/${encodeURIComponent(allocated.id)}/check`)
           setReport(outcome)
-          setPicked(outcome.changes.map((change) => change.path))
+          setPicked(changedPaths(outcome))
           await refreshSources()
         } catch (error) {
           setStatus({ kind: 'error', text: error.message })
@@ -536,11 +730,12 @@ window.__ModuleLoader__.load({
         setBusy(true)
         try {
           const outcome = await request('POST', `/sources/${encodeURIComponent(slug)}/check`)
-          setReport(outcome)
-          setPicked(outcome.changes.map((change) => change.path))
+          const changes = Array.isArray(outcome.changes) ? outcome.changes : []
+          setReport({ ...outcome, changes })
+          setPicked(changedPaths(outcome))
           setStatus({
             kind: 'info',
-            text: outcome.upToDate ? `「${slug}」已是最新。` : `「${slug}」有 ${String(outcome.changes.length)} 个文件可以更新。`,
+            text: outcome.upToDate === true ? `「${slug}」已是最新。` : `「${slug}」有 ${String(changes.length)} 个文件可以更新。`,
           })
           await refreshSources()
         } catch (error) {
@@ -556,7 +751,8 @@ window.__ModuleLoader__.load({
           const outcome = await request('POST', `/sources/${encodeURIComponent(slug)}/apply`, { files: picked })
           setReport(null)
           setPicked([])
-          setStatus({ kind: 'info', text: `「${slug}」应用了 ${String(outcome.applied.length)} 个文件；新条目默认关闭，打开后才会注入。` })
+          const applied = Array.isArray(outcome.applied) ? outcome.applied : []
+          setStatus({ kind: 'info', text: `「${slug}」应用了 ${String(applied.length)} 个文件；新条目默认关闭，打开后才会注入。` })
           await refreshSources()
         } catch (error) {
           setStatus({ kind: 'error', text: error.message })
@@ -570,7 +766,8 @@ window.__ModuleLoader__.load({
         setBusy(true)
         try {
           const outcome = await request('POST', `/sources/${encodeURIComponent(slug)}/revert`)
-          setStatus({ kind: 'info', text: `「${slug}」还原了 ${String(outcome.reverted.length)} 个文件。` })
+          const reverted = Array.isArray(outcome.reverted) ? outcome.reverted : []
+          setStatus({ kind: 'info', text: `「${slug}」还原了 ${String(reverted.length)} 个文件。` })
           await refreshSources()
         } catch (error) {
           setStatus({ kind: 'error', text: error.message })
@@ -583,12 +780,17 @@ window.__ModuleLoader__.load({
         if (!window.confirm(`删除来源「${slug}」？它导入的条目会一起移除，本地条目不受影响。`)) return
         setBusy(true)
         try {
-          await scope.set('entries', entries.filter((entry) => entry.source !== slug))
+          // The Host drops the files and rebuilds the index; the settings writes
+          // only record what it already did. Deleting first keeps a failure from
+          // leaving the page showing a source the engine still has.
+          const outcome = await request('DELETE', `/sources/${encodeURIComponent(slug)}`)
+          await scope.set('entries', Array.isArray(outcome.entries)
+            ? outcome.entries
+            : entries.filter((entry) => entry.source !== slug))
           await scope.set('sources', configured.filter((source) => source.id !== slug))
-          await request('DELETE', `/sources/${encodeURIComponent(slug)}`)
           if (report !== null && report.slug === slug) setReport(null)
-          setStatus({ kind: 'info', text: `已删除来源「${slug}」。` })
           await refreshSources()
+          setStatus({ kind: 'info', text: `已删除来源「${slug}」。` })
         } catch (error) {
           setStatus({ kind: 'error', text: error.message })
         } finally {
@@ -602,32 +804,42 @@ window.__ModuleLoader__.load({
         setBusy(true)
         try {
           const allocated = await request('POST', '/id', { title: draft.title })
-          const placed = {
+          const title = `${draft.title}（本地）`
+          // The index goes first. If the body write then fails, what is left is a
+          // visible entry with an empty body — which this editor can fix — where
+          // the other order would leave a body file no page can reach.
+          await scope.set('entries', [...entries, { id: allocated.id, title, order: draft.order, enabled: false }])
+          const forked = {
             id: allocated.id,
-            title: `${draft.title}（本地）`,
+            title,
             order: draft.order,
             body: draft.body,
             source: 'empty',
             fileSha1: null,
-            isNew: true,
+            isNew: false,
           }
-          await request('PUT', `/body/${encodeURIComponent(allocated.id)}`, { body: draft.body, fileSha1: null })
-          await scope.set('entries', [...entries, {
-            id: allocated.id,
-            title: placed.title,
-            order: placed.order,
-            enabled: false,
-          }])
           setSelectedId(allocated.id)
-          setDraft(placed)
+          setDraft(forked)
           setSaved(null)
+          const written = await request('PUT', `/body/${encodeURIComponent(allocated.id)}`, { body: draft.body, fileSha1: null })
+          // The body file exists now, so the editor must fence against exactly
+          // what the write produced: keeping `null` would make the next save look
+          // like a create, and the store refuses to create over an existing file.
+          const placed = {
+            ...forked,
+            source: typeof written.source === 'string' ? written.source : 'user',
+            fileSha1: typeof written.fileSha1 === 'string' ? written.fileSha1 : null,
+          }
+          setDraft(placed)
+          setSaved(placed)
           setStatus({ kind: 'info', text: `已 fork 成 ${allocated.id}，改完点保存；原订阅条目继续跟随更新。` })
+          await refreshStore()
         } catch (error) {
           setStatus({ kind: 'error', text: error.message })
         } finally {
           setBusy(false)
         }
-      }, [draft, entries, scope])
+      }, [draft, entries, refreshStore, scope])
 
       const toggle = React.useCallback((entry, enabled) => {
         const nextEntries = entries.map((candidate) => candidate.id === entry.id ? { ...candidate, enabled } : candidate)
@@ -640,10 +852,12 @@ window.__ModuleLoader__.load({
 
       const remove = React.useCallback((entry) => {
         if (!window.confirm(`删除「${entry.title}」？它的正文文件也会一起删除。`)) return
-        const nextEntries = entries.filter((candidate) => candidate.id !== entry.id)
         setBusy(true)
-        Promise.resolve(scope.set('entries', nextEntries))
-          .then(() => request('DELETE', `/body/${encodeURIComponent(entry.id)}`))
+        // The body file goes first: if that fails, nothing has changed and the
+        // entry is still there to retry, rather than an index record pointing at
+        // a file the page no longer shows.
+        request('DELETE', `/body/${encodeURIComponent(entry.id)}`)
+          .then(() => scope.set('entries', entries.filter((candidate) => candidate.id !== entry.id)))
           .then(async () => {
             if (selectedId === entry.id) {
               setDraft(null)
@@ -656,6 +870,215 @@ window.__ModuleLoader__.load({
           .catch((error) => setStatus({ kind: 'error', text: error.message }))
           .finally(() => setBusy(false))
       }, [entries, refreshStore, scope, selectedId])
+
+      // ── variables and scripts ────────────────────────────────────────────────
+
+      /** Copy one `{{name}}` so it can be pasted into a body. */
+      const copyVariable = React.useCallback((name) => {
+        const token = `{{${name}}}`
+        const clipboard = typeof navigator === 'object' && navigator !== null ? navigator.clipboard : undefined
+        if (clipboard !== undefined && clipboard !== null && typeof clipboard.writeText === 'function') {
+          clipboard.writeText(token)
+            .then(() => { setStatus({ kind: 'info', text: `已复制 ${token}` }) })
+            .catch((error) => { setStatus({ kind: 'info', text: token }) })
+          return
+        }
+        setStatus({ kind: 'info', text: token })
+      }, [])
+
+      /** Put one `{{name}}` into the body being edited, at the caret. */
+      const insertVariable = React.useCallback((name) => {
+        if (draft === null) return
+        const token = `{{${name}}}`
+        const at = typeof caret === 'number' && caret >= 0 && caret <= draft.body.length ? caret : draft.body.length
+        setDraft({ ...draft, body: `${draft.body.slice(0, at)}${token}${draft.body.slice(at)}` })
+        setCaret(at + token.length)
+      }, [caret, draft])
+
+      /**
+       * Insert a reference and show the body it landed in.
+       *
+       * The variables page has no textarea and no save button, so inserting
+       * without opening the editor would edit a draft nobody can see — and the
+       * next time that entry is opened, the body is read again from the Host and
+       * the insertion is silently gone.
+       * @param name - the variable to reference.
+       */
+      const insertVariableHere = React.useCallback((name) => {
+        if (draft === null) return
+        insertVariable(name)
+        setView('editor')
+      }, [draft, insertVariable])
+
+      /** Open a script in the editor: an existing one, or a fresh template. */
+      const openScript = React.useCallback(async (name) => {
+        setBusy(true)
+        setRunReport(null)
+        try {
+          if (name === null) {
+            const fresh = { name: '', source: SCRIPT_TEMPLATE, fileSha1: null, isNew: true }
+            setScriptDraft(fresh)
+            setScriptSaved(fresh)
+          } else {
+            const stored = await request('GET', `/script/${encodeURIComponent(name)}`)
+            const opened = {
+              name,
+              source: typeof stored.source === 'string' ? stored.source : '',
+              fileSha1: typeof stored.sha1 === 'string' ? stored.sha1 : null,
+              isNew: false,
+            }
+            setScriptDraft(opened)
+            setScriptSaved(opened)
+          }
+          setStatus(null)
+          setView('script')
+        } catch (error) {
+          setStatus({ kind: 'error', text: error.message })
+        } finally {
+          setBusy(false)
+        }
+      }, [])
+
+      /**
+       * Run what the editor holds, without saving it.
+       *
+       * Always sent as a source, so the Host writes a throwaway copy, runs that,
+       * and registers nothing — the same code, the same command and the same
+       * directory a save would use, minus the side effects. Running the saved
+       * file itself is the variables page's own 「运行一次」, which is also what
+       * refreshes the values in force.
+       */
+      const testScript = React.useCallback(async () => {
+        if (scriptDraft === null) return
+        setBusy(true)
+        try {
+          const name = scriptDraft.name.trim()
+          const report = await request('POST', '/variables/run', {
+            name: name.length > 0 ? name : 'draft',
+            source: scriptDraft.source,
+          })
+          setRunReport(report)
+          setStatus(report.ok === true
+            ? { kind: 'info', text: `这次会提供 ${String(Object.keys(report.variables ?? {}).length)} 个变量；保存后才会注册。` }
+            : { kind: 'error', text: report.problems.join('；') })
+        } catch (error) {
+          setRunReport(error.report === undefined ? null : error.report)
+          setStatus({ kind: 'error', text: error.message })
+        } finally {
+          setBusy(false)
+        }
+      }, [scriptDraft])
+
+      /** Save a script: the Host validates, runs, and only then writes it. */
+      const saveScript = React.useCallback(async () => {
+        if (scriptDraft === null) return
+        const name = scriptDraft.name.trim()
+        if (name.length === 0) {
+          setStatus({ kind: 'error', text: '先给脚本起个名字（字母数字和连字符，就是文件名）。' })
+          return
+        }
+        setBusy(true)
+        try {
+          const saved = await request('PUT', `/script/${encodeURIComponent(name)}`, {
+            source: scriptDraft.source,
+            fileSha1: scriptDraft.fileSha1,
+          })
+          const written = { ...scriptDraft, name, fileSha1: typeof saved.sha1 === 'string' ? saved.sha1 : null, isNew: false }
+          setScriptDraft(written)
+          setScriptSaved(written)
+          setRunReport(saved.report === undefined ? null : saved.report)
+          await refreshVariables()
+          const supplied = Object.keys(saved.variables ?? {})
+          setStatus({
+            kind: 'info',
+            text: supplied.length === 0
+              ? '已保存；这条脚本没有提供任何变量。'
+              : `已保存并启用：${supplied.map((variable) => `{{${variable}}}`).join(' ')}，下一个模型步骤生效。`,
+          })
+        } catch (error) {
+          setRunReport(error.report === undefined ? null : error.report)
+          setStatus({ kind: 'error', text: error.message })
+        } finally {
+          setBusy(false)
+        }
+      }, [refreshVariables, scriptDraft])
+
+      /** Measure every script again, and republish what they supply. */
+      const refreshScripts = React.useCallback(async () => {
+        setBusy(true)
+        try {
+          const outcome = await request('POST', '/variables/refresh')
+          await refreshVariables()
+          const reports = Array.isArray(outcome.reports) ? outcome.reports : []
+          const failed = reports.filter((report) => report.ok !== true)
+          setStatus(failed.length === 0
+            ? { kind: 'info', text: `已重新测量 ${String(reports.length)} 条脚本。` }
+            : {
+              kind: 'error',
+              text: `${String(failed.length)} 条脚本失败了：${failed.map((report) => `${report.name}（${report.problems.join('，')}）`).join('；')}`,
+            })
+        } catch (error) {
+          setStatus({ kind: 'error', text: error.message })
+        } finally {
+          setBusy(false)
+        }
+      }, [refreshVariables])
+
+      /**
+       * Forget a script.
+       *
+       * The values it declared stay in force — a reference with no value fails
+       * assembly — so the confirmation names the entries that would be left
+       * holding the last measured value.
+       */
+      const removeScript = React.useCallback(async (name) => {
+        const affected = variables.filter((variable) => variable.detail === name && variable.referencedBy.length > 0)
+        const question = affected.length === 0
+          ? `删除脚本「${name}」？它的文件会被移除。`
+          : `删除脚本「${name}」？这些变量还在被提示词引用：${affected.map((variable) => `${variable.name}（${variable.referencedBy.join('、')}）`).join('；')}。删除后它们会继续用最后一次测到的值，重启 profile 后才真正消失。`
+        if (!window.confirm(question)) return
+        setBusy(true)
+        try {
+          await request('DELETE', `/script/${encodeURIComponent(name)}`)
+          await refreshVariables()
+          if (scriptDraft !== null && scriptDraft.name === name) {
+            setScriptDraft(null)
+            setScriptSaved(null)
+            setView('variables')
+          }
+          setStatus({ kind: 'info', text: `已删除脚本「${name}」。它提供的变量留在最后一次的值上。` })
+        } catch (error) {
+          setStatus({ kind: 'error', text: error.message })
+        } finally {
+          setBusy(false)
+        }
+      }, [refreshVariables, scriptDraft, variables])
+
+      /**
+       * Run a saved script from the list, without opening the editor.
+       *
+       * The list has nowhere to show a full run report, so the outcome is
+       * summarised here and the editor stays the place that shows the variables,
+       * the exit code, and stderr in full.
+       */
+      const runScript = React.useCallback(async (name) => {
+        setBusy(true)
+        try {
+          const report = await request('POST', '/variables/run', { name })
+          await refreshVariables()
+          const provided = Object.keys(report.variables ?? {}).length
+          setStatus(report.ok === true
+            ? {
+              kind: 'info',
+              text: `「${name}」提供了 ${String(provided)} 个变量${report.exitCode === undefined ? '' : `（退出码 ${String(report.exitCode)}）`}，用时 ${String(report.ms)}ms。`,
+            }
+            : { kind: 'error', text: report.problems.join('；') })
+        } catch (error) {
+          setStatus({ kind: 'error', text: error.message })
+        } finally {
+          setBusy(false)
+        }
+      }, [refreshVariables])
 
       const statusLine = status === null ? null : h('p', {
         key: 'status',
@@ -699,7 +1122,14 @@ window.__ModuleLoader__.load({
                   type: 'number',
                   value: String(draft.order),
                   disabled: !writable || busy,
-                  onChange: (event) => setDraft({ ...draft, order: Number(event.target.value) }),
+                  onChange: (event) => {
+                    // An empty box or a lone `-` parses to something unusable;
+                    // keeping the previous number is kinder than writing a value
+                    // the index schema then refuses.
+                    const parsed = Number(event.target.value)
+                    if (!Number.isFinite(parsed)) return
+                    setDraft({ ...draft, order: parsed })
+                  },
                 }),
               ]),
             ]),
@@ -714,8 +1144,29 @@ window.__ModuleLoader__.load({
               readOnly: subscribedDraft,
               spellCheck: false,
               onChange: (event) => setDraft({ ...draft, body: event.target.value }),
+              // The caret is where an inserted reference lands; a host that does
+              // not report one simply gets the reference appended.
+              onSelect: (event) => setCaret(event.target.selectionStart),
+              onKeyUp: (event) => setCaret(event.target.selectionStart),
+              onClick: (event) => setCaret(event.target.selectionStart),
             }),
           ]),
+          h('div', { key: 'vars', className: 'dsh-prompt-manager__actions' }, [
+            h('span', { key: 'label', className: 'dsh-prompt-manager__note' }, '可用变量（点一下插到光标处）：'),
+            ...knownVariables.map((name) => h(Button, {
+              key: name,
+              disabled: busy || !writable,
+              onClick: () => insertVariable(name),
+            }, `{{${name}}}`)),
+          ]),
+          unknownInDraft.length === 0 ? null : h('span', {
+            key: 'unknown',
+            className: 'dsh-prompt-manager__status dsh-prompt-manager__status--error',
+          }, `这些变量还没有注册：${unknownInDraft.map((name) => `{{${name}}}`).join(' ')}（宿主会把它按字面量渲染并记一条警告；去「变量」页建一条脚本提供它，或把引用删掉）`),
+          malformedInDraft.length === 0 ? null : h('span', {
+            key: 'malformed',
+            className: 'dsh-prompt-manager__status dsh-prompt-manager__status--error',
+          }, `这些引用的写法不对：${malformedInDraft.map((name) => `{{${name}}}`).join(' ')}（注册表解析不了这种写法，宿主会按字面量渲染，且保存会被拒绝；变量名只能是数字、下划线和小写字母，且以字母开头）`),
           h('div', { key: 'preview', className: 'dsh-prompt-manager__pane' }, [
             h('span', { key: 'label', className: 'dsh-prompt-manager__paneLabel' }, '预览'),
             h('div', { key: 'body', className: 'dsh-prompt-manager__preview' }, h(Preview, { text: draft.body })),
@@ -731,6 +1182,85 @@ window.__ModuleLoader__.load({
                 ? h('span', { key: 'note', className: 'dsh-prompt-manager__note' }, '这条正文是插件内置的默认内容；保存后会写成本机的覆盖版本，插件升级也不会覆盖它。')
                 : null,
           ]),
+          statusLine,
+        ])
+      }
+
+      // ── the script editor ───────────────────────────────────────────────────
+
+      if (view === 'script' && scriptDraft !== null) {
+        const syntax = syntaxProblem(scriptDraft.source)
+        return h('div', { className: 'dsh-prompt-manager' }, [
+          h('div', { key: 'head', className: 'dsh-prompt-manager__head' }, [
+            h(Button, {
+              key: 'back',
+              variant: 'ghost',
+              disabled: busy,
+              onClick: () => {
+                // Leaving drops the draft, so an edited one is confirmed first —
+                // a half-written script is not recoverable from anywhere else.
+                const dirtyScript = scriptDraft !== null
+                  && (scriptSaved === null || scriptDraft.source !== scriptSaved.source || scriptDraft.name !== scriptSaved.name)
+                if (dirtyScript && !window.confirm(scriptDraft.isNew ? '放弃这条新脚本？' : '放弃未保存的修改？')) return
+                setScriptDraft(null)
+                setScriptSaved(null)
+                setRunReport(null)
+                setView('variables')
+              },
+            }, '← 返回'),
+            h('h2', { key: 'title', className: 'dsh-prompt-manager__headTitle' },
+              scriptDraft.isNew ? '新建脚本' : `脚本「${scriptDraft.name}」`),
+            h('span', { key: 'spacer', className: 'dsh-prompt-manager__headSpacer' }),
+            h('span', { key: 'state', className: 'dsh-prompt-manager__note' },
+              scriptDraft.fileSha1 === null ? '尚未保存' : '已保存'),
+          ]),
+          h('div', { key: 'form', className: 'dsh-prompt-manager__surface' }, [
+            // `--grow` fills the width of a `__fields` row. Put straight into the
+            // column `__surface` it fills the *height* instead, which is the blank
+            // gap that used to sit under this input.
+            h('div', { key: 'fields', className: 'dsh-prompt-manager__fields' }, [
+              h('label', { key: 'name', className: 'dsh-prompt-manager__field dsh-prompt-manager__field--grow' }, [
+                '脚本名（小写字母、数字、连字符；它就是文件名）',
+                h('input', {
+                  key: 'input',
+                  value: scriptDraft.name,
+                  placeholder: 'toolchain',
+                  disabled: !writable || busy || !scriptDraft.isNew,
+                  onChange: (event) => setScriptDraft({ ...scriptDraft, name: event.target.value }),
+                }),
+              ]),
+            ]),
+            h('div', { key: 'body', className: 'dsh-prompt-manager__pane' }, [
+              h('span', { key: 'label', className: 'dsh-prompt-manager__paneLabel' },
+                '脚本正文：打印一个 JSON 对象，键就是提示词里能用的变量名'),
+              h('textarea', {
+                key: 'textarea',
+                value: scriptDraft.source,
+                disabled: !writable || busy,
+                spellCheck: false,
+                onChange: (event) => setScriptDraft({ ...scriptDraft, source: event.target.value }),
+              }),
+            ]),
+            syntax === null ? null : h('span', {
+              key: 'syntax',
+              className: 'dsh-prompt-manager__status dsh-prompt-manager__status--error',
+            }, `语法错误：${syntax}`),
+            h('div', { key: 'actions', className: 'dsh-prompt-manager__actions' }, [
+              h(Button, { key: 'run', disabled: !writable || busy || syntax !== null, onClick: () => { void testScript() } }, '运行一次（测试）'),
+              h(Button, {
+                key: 'save',
+                variant: 'primary',
+                disabled: !writable || busy || syntax !== null,
+                onClick: () => { void saveScript() },
+              }, '保存并启用'),
+              scriptDraft.isNew
+                ? null
+                : h(Button, { key: 'remove', variant: 'danger', disabled: busy, onClick: () => { void removeScript(scriptDraft.name) } }, '删除脚本'),
+            ]),
+            h('span', { key: 'hint', className: 'dsh-prompt-manager__note' },
+              '「运行一次」跑的是上面这个框里的内容：同一条命令、同一个目录，但写成临时文件跑完就删，不写正式文件、不注册变量，所以随便试都不会动到正在生效的值。保存会先跑一遍，跑不出可用输出就不会落盘。想验已经保存的文件本身，用变量页那一行的「运行一次」。'),
+          ]),
+          h(RunReport, { key: 'report', report: runReport }),
           statusLine,
         ])
       }
@@ -854,6 +1384,106 @@ window.__ModuleLoader__.load({
         ])
       }
 
+      // ── the variables page ──────────────────────────────────────────────────
+
+      if (view === 'variables') {
+        const variableRows = variables.map((variable) => h('div', {
+          key: variable.name,
+          className: 'dsh-prompt-manager__card',
+        }, [
+          h('div', { key: 'main', className: 'dsh-prompt-manager__cardMain', style: { cursor: 'default' } }, [
+            h('span', { key: 'name', className: 'dsh-prompt-manager__title' }, `{{${variable.name}}}`),
+            h('span', { key: 'value', className: 'dsh-prompt-manager__meta' }, variable.value),
+            h('span', { key: 'refs', className: 'dsh-prompt-manager__meta' },
+              variable.referencedBy.length === 0
+                ? '还没有提示词引用它'
+                : `被引用：${variable.referencedBy.join('、')}`),
+          ]),
+          h('div', { key: 'side', className: 'dsh-prompt-manager__cardSide' }, [
+            h('span', { key: 'source', className: 'dsh-prompt-manager__badge' },
+              SOURCE_LABELS[variable.source] === undefined ? variable.source : SOURCE_LABELS[variable.source]),
+            variable.detail === undefined
+              ? null
+              : h('span', { key: 'detail', className: 'dsh-prompt-manager__meta' }, variable.detail),
+            h(Button, { key: 'copy', disabled: busy, onClick: () => copyVariable(variable.name) }, '复制引用'),
+            // The insert target is whichever entry's editor is open behind this
+            // page, so the label names it: a button that silently edits an
+            // invisible draft is worse than no button.
+            draft === null
+              ? null
+              : h(Button, {
+                key: 'insert',
+                disabled: busy || !writable,
+                onClick: () => { insertVariableHere(variable.name) },
+              }, `插入到「${draft.title.length > 8 ? `${draft.title.slice(0, 8)}…` : draft.title}」`),
+          ]),
+        ]))
+
+        const scriptCards = scripts.map((script) => h('div', {
+          key: script.name,
+          className: 'dsh-prompt-manager__source',
+        }, [
+          h('div', { key: 'head', className: 'dsh-prompt-manager__sourceHead' }, [
+            h('span', {
+              key: 'dot',
+              className: script.error === undefined
+                ? 'dsh-prompt-manager__dot'
+                : 'dsh-prompt-manager__dot dsh-prompt-manager__dot--error',
+              'aria-hidden': 'true',
+            }),
+            h('span', { key: 'name', className: 'dsh-prompt-manager__sourceRepo' }, script.name),
+            h('span', { key: 'meta', className: 'dsh-prompt-manager__meta' }, [
+              script.variables.length === 0 ? '还没有变量' : script.variables.map((name) => `{{${name}}}`).join(' '),
+              script.ranAt === undefined ? '还没成功运行过' : `上次运行 ${stamp(script.ranAt)}`,
+              script.pending === true ? '文件已改动，待重测' : '',
+            ].filter((part) => part.length > 0).join(' · ')),
+            h('span', { key: 'spacer', className: 'dsh-prompt-manager__headSpacer' }),
+            h('div', { key: 'actions', className: 'dsh-prompt-manager__sourceActions' }, [
+              h(Button, { key: 'run', disabled: busy, onClick: () => { void runScript(script.name) } }, '运行一次'),
+              h(Button, { key: 'edit', disabled: busy, onClick: () => { void openScript(script.name) } }, '编辑'),
+              h(Button, { key: 'remove', variant: 'danger', disabled: busy, onClick: () => { void removeScript(script.name) } }, '删除'),
+            ]),
+          ]),
+          script.error === undefined
+            ? null
+            : h('span', { key: 'error', className: 'dsh-prompt-manager__status dsh-prompt-manager__status--error' }, script.error),
+        ]))
+
+        return h('div', { className: 'dsh-prompt-manager' }, [
+          h('div', { key: 'head', className: 'dsh-prompt-manager__head' }, [
+            h(Button, {
+              key: 'back',
+              variant: 'ghost',
+              disabled: busy,
+              // Through the same guard the editor uses: a body edited from this
+              // page (an inserted reference) must not vanish without a word.
+              onClick: () => { back(); setRunReport(null) },
+            }, '← 返回'),
+            h('h2', { key: 'title', className: 'dsh-prompt-manager__headTitle' }, '提示词变量'),
+            h('span', { key: 'spacer', className: 'dsh-prompt-manager__headSpacer' }),
+            h(Button, { key: 'refresh', disabled: busy, onClick: () => { void refreshScripts() } }, '重新测量'),
+          ]),
+          h('p', { key: 'lede', className: 'dsh-prompt-manager__intro' },
+            '变量是提示词里那段大括号引用的来源：系统事实由插件注册，脚本由你写。一条脚本打印一个 JSON，键就是变量名，所以一条脚本能提供多个变量；它跑在独立子进程里，超时或报错都伤不到 DSH 本身。'),
+          variableReport !== null && typeof variableReport.error === 'string'
+            ? h('p', { key: 'error', className: 'dsh-prompt-manager__status dsh-prompt-manager__status--error' }, variableReport.error)
+            : null,
+          variableRows.length === 0
+            ? h('div', { key: 'empty', className: 'dsh-prompt-manager__empty' }, '还没有注册任何变量。')
+            : h('div', { key: 'vars', className: 'dsh-prompt-manager__list' }, variableRows),
+          h('div', { key: 'scripts', className: 'dsh-prompt-manager__block' }, [
+            h('span', { key: 'label', className: 'dsh-prompt-manager__paneLabel' }, `脚本（${String(scripts.length)}）`),
+            scripts.length === 0
+              ? h('div', { key: 'none', className: 'dsh-prompt-manager__empty' }, '还没有脚本。点「新建脚本」会给你一个能直接跑的模板。')
+              : h('div', { key: 'cards', className: 'dsh-prompt-manager__list' }, scriptCards),
+            h('div', { key: 'addRow', className: 'dsh-prompt-manager__addRow' }, [
+              h(AddButton, { key: 'add', disabled: !writable || busy, onClick: () => { void openScript(null) } }, '新建脚本'),
+            ]),
+          ]),
+          statusLine,
+        ])
+      }
+
       // ── the list page ───────────────────────────────────────────────────────
 
       const visible = entries.filter((entry) => {
@@ -951,6 +1581,12 @@ window.__ModuleLoader__.load({
               disabled: busy,
               onClick: () => setView('sources'),
             }, `订阅来源（${String(sources.length)}）`),
+            h(AddButton, {
+              key: 'variables',
+              icon: 'IconEditOutline16',
+              disabled: busy,
+              onClick: () => { setView('variables'); setRunReport(null) },
+            }, `变量（${String(knownVariables.length)}）`),
           ]),
         ]),
         ready ? null : h('div', { key: 'waiting', className: 'dsh-prompt-manager__empty' }, '设置载入后这里会显示列表。'),

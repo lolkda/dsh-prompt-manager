@@ -31,6 +31,14 @@ const server = createServer((request, response) => {
     response.end('<!doctype html><html><body>captcha</body></html>')
     return
   }
+  if (url.endsWith('/huge.md')) {
+    response.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8' })
+    // Two megabytes, written in chunks so the reader has to stop early.
+    const chunk = 'x'.repeat(64 * 1024)
+    for (let written = 0; written < 32; written += 1) response.write(chunk)
+    response.end()
+    return
+  }
   if (url.endsWith('/conditional.md') && request.headers['if-none-match'] === '"v1"') {
     response.writeHead(304, { etag: '"v1"' })
     response.end()
@@ -82,6 +90,12 @@ try {
   // ── failures ─────────────────────────────────────────────────────────────────
 
   await assert.rejects(
+    fetcher.get(`https://raw.githubusercontent.com/o/r/main/prompts/huge.md`, { timeoutMs: 4000 }),
+    (error) => error instanceof FetchFailure && error.reason === 'too-large',
+    'a body past the read cap is refused while reading it, not after holding it',
+  )
+
+  await assert.rejects(
     createFetcher({ proxy: { kind: 'none', url: '' }, mirror: 'http://127.0.0.1:1' })
       .get(raw, { timeoutMs: 1500 }),
     (error) => error instanceof FetchFailure && error.reason === 'network',
@@ -112,6 +126,7 @@ try {
   console.log(`  mirror      raw URLs become <mirror>/<url>; other hosts stay direct`)
   console.log('  conditional 200 with an etag, then 304 for the same validator')
   console.log('  content     markdown passes, an HTML captcha page is recognised')
+  console.log('  cap         a body past 1 MiB is refused while it is being read')
   console.log('  failures    unreachable mirror, timeout, unreachable http and socks5 proxies')
 } finally {
   server.closeAllConnections()

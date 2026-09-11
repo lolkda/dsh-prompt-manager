@@ -58,14 +58,32 @@ export interface StoreStatus {
  * @returns a lowercase hex digest.
  */
 export declare function bodyHash(body: string): string;
-/** Body files for prompt entries, confined to one directory. */
+/** What one store holds: the file shape and the size a body may reach. */
+export interface PromptStoreOptions {
+    /** File extension, leading dot included. Defaults to `.md`. */
+    extension?: string | undefined;
+    /** Largest accepted body, in bytes. Defaults to {@link MAX_BODY_BYTES}. */
+    maxBytes?: number | undefined;
+}
+/**
+ * Body files for prompt entries, confined to one directory.
+ *
+ * The same guards back the user-script directory, where `id` is a script name
+ * and the file is `<name>.js`: one id grammar, one fence, one atomic write.
+ */
 export declare class PromptStore {
     /** Absolute directory holding the body files. */
     readonly dir: string;
+    /** File extension the store owns, leading dot included. */
+    private readonly extension;
+    /** Largest body this store accepts, in bytes. */
+    private readonly maxBytes;
     /**
-     * @param dir - directory holding `<id>.md`; created on first write.
+     * @param dir - directory holding `<id><extension>`; created on first write.
+     * @param options - file extension and size cap; the prompt-body defaults are
+     * `.md` at 256 KiB, so the script store reuses every guard below unchanged.
      */
-    constructor(dir: string);
+    constructor(dir: string, options?: PromptStoreOptions);
     /**
      * Absolute path of one entry's body file.
      * @param id - entry id; validated against the id grammar.

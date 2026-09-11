@@ -95,7 +95,7 @@ export interface StagedPlan {
 /** A check that could not conclude. */
 export declare class CheckError extends Error {
     /** Machine-readable reason. */
-    readonly reason: 'manifest' | 'network' | 'mirror' | 'too-large' | 'unknown-source' | 'nothing-staged';
+    readonly reason: 'manifest' | 'network' | 'mirror' | 'too-large' | 'unknown-source' | 'nothing-staged' | 'disabled';
     /**
      * @param reason - machine-readable reason.
      * @param message - human-facing detail.

@@ -26,11 +26,13 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import { type ProbeSpec, type ProbeTexts } from './probe.js';
+import { type ScriptOverride } from './scripts.js';
 export { MAX_BODY_BYTES, MAX_ENTRIES } from './entries.js';
 export { PromptStore } from './store.js';
 export { ROUTE_PREFIX } from './routes.js';
 export { MAX_PROBES } from './probe.js';
 export { BUILTIN_PROMPTS } from './entries.js';
+export { MAX_SCRIPTS, MAX_SCRIPT_BYTES, SCRIPTS_DIR_NAME } from './scripts.js';
 /** Cordis plugin name. */
 export declare const name = "prompt-manager";
 /** The prompt registry this row contributes to. */
@@ -88,11 +90,37 @@ export interface Config {
     /** Total time the pass may spend, in milliseconds. Defaults to 8000. */
     probeBudgetMs?: number;
     /**
+     * Per-script execution overrides, keyed by script name. A script is a file a
+     * person wrote under the store's `scripts/` directory whose standard output is
+     * a JSON object of prompt variables; this only changes how one is run —
+     * interpreter, arguments, timeout. A script that needs no change runs under
+     * `node`, in three seconds, with its own path as the only argument.
+     */
+    scripts?: Record<string, ScriptOverride>;
+    /**
      * Directory holding one markdown file per entry, under a `sections/`
-     * subdirectory. Defaults to `$DSH_HOME/prompt-manager`, where `$DSH_HOME` is the
-     * environment value when set and `~/.dsh` otherwise.
+     * subdirectory, and one script per file under `scripts/`. Defaults to
+     * `$DSH_HOME/prompt-manager`, where `$DSH_HOME` is the environment value when
+     * set and `~/.dsh` otherwise.
      */
     storeDir?: string;
+}
+/** Where one prompt variable's value came from. */
+export type VariableSource = 'environment' | 'config' | 'probe' | 'script';
+/** One prompt variable, as the settings page sees it. */
+export interface VariableView {
+    /** The `{{name}}` reference. */
+    name: string;
+    /** The value every assembly currently sees. */
+    value: string;
+    /** Which layer supplied it. */
+    source: VariableSource;
+    /** Owning script name, for a script variable. */
+    detail?: string | undefined;
+    /** When the value was last written. */
+    updatedAt?: string | undefined;
+    /** Titles of the prompt entries whose bodies reference this variable. */
+    referencedBy: string[];
 }
 /**
  * Facts about the running process, as prompt-variable values.

@@ -23,9 +23,10 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && node --check client/client.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check:build": "npm run build && node tools/check-build.mjs",
     "prepare": "npm run build",
     "pretest": "npm run build",
-    "test": "node test/smoke.mjs && node test/probe.mjs && node test/store.mjs && node test/routes.mjs && node test/source.mjs && node test/net.mjs && node test/sync.mjs && node test/client.mjs"
+    "test": "node test/smoke.mjs && node test/probe.mjs && node test/guard.mjs && node test/store.mjs && node test/routes.mjs && node test/source.mjs && node test/net.mjs && node test/sync.mjs && node test/subscriptions.mjs && node test/scripts.mjs && node test/client.mjs"
   },
   "engines": {
     "node": ">=22"

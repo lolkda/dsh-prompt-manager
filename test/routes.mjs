@@ -15,9 +15,10 @@ import { join } from 'node:path'
 
 import { installPromptRoutes, ROUTE_PREFIX } from '../lib/routes.js'
 import { PromptStore } from '../lib/store.js'
-import { entryIdFor } from '../lib/entries.js'
+import { entryIdFor, MAX_ENTRIES } from '../lib/entries.js'
 import { MAX_SOURCES } from '../lib/source.js'
 import { CheckError } from '../lib/sync.js'
+import { ScriptError } from '../lib/scripts.js'
 
 /** Throwaway root for the whole run. */
 const ROOT = mkdtempSync(join(tmpdir(), 'prompt-manager-routes-'))
@@ -86,6 +87,7 @@ try {
     check: async (slug) => {
       engine.calls.push({ action: 'check', slug })
       if (slug === 'nope') throw new CheckError('unknown-source', '没有这个订阅源：nope')
+      if (slug === 'closed') throw new CheckError('disabled', 'closed 已关闭：在设置页打开它，或删掉它，再对上游做操作')
       return { slug, upToDate: false, headSha: 'a'.repeat(40), changes: [{ path: 'p/a.md', id: 'src-a-a', kind: 'changed', added: 2, removed: 1 }], prompts: [], warnings: [] }
     },
     apply: async (slug, files) => {
@@ -103,19 +105,89 @@ try {
     },
   }
 
+  /** One canned run report, as the engine hands it back. */
+  const report = (variables, extra = {}) => ({
+    name: 'draft',
+    ok: true,
+    exitCode: 0,
+    ms: 62,
+    variables,
+    truncated: [],
+    problems: [],
+    warnings: [],
+    stdout: JSON.stringify(variables),
+    stderr: '',
+    ...extra,
+  })
+
+  /** The script names the fake engine accepts, mirroring the real grammar. */
+  const scriptName = /^[a-z0-9][a-z0-9-]*$/
+
+  /** What the fake script engine recorded, and how it answers. */
+  const scripts = {
+    calls: [],
+    dir: join(ROOT, 'scripts'),
+    list: () => [{
+      name: 'toolchain',
+      sha1: 'a'.repeat(40),
+      variables: ['rust', 'go'],
+      ranAt: '2026-09-11T00:00:00.000Z',
+      exitCode: 0,
+      ms: 62,
+      pending: false,
+    }],
+    read: (name) => (name === 'toolchain' ? { source: 'console.log("{}")', sha1: 'a'.repeat(40) } : undefined),
+    run: async (name) => {
+      scripts.calls.push({ action: 'run', name })
+      if (name !== 'toolchain') throw new ScriptError('unknown-script', `没有这个脚本：${name}`)
+      return report({ rust: '1.80.0' })
+    },
+    runSource: async (name, source) => {
+      scripts.calls.push({ action: 'runSource', name, source })
+      if (!scriptName.test(name)) throw new ScriptError('invalid-name', `${JSON.stringify(name)} 不是一个可用的脚本名`)
+      return report({ rust: '1.80.0' })
+    },
+    refresh: async () => {
+      scripts.calls.push({ action: 'refresh' })
+      return [report({ rust: '1.80.0' })]
+    },
+    save: async (name, source, fence) => {
+      scripts.calls.push({ action: 'save', name, fence })
+      if (!scriptName.test(name)) throw new ScriptError('invalid-name', `${JSON.stringify(name)} 不是一个可用的脚本名`)
+      if (name === 'taken') throw new ScriptError('conflict', '变量名已被占用：rust（属于 environment）')
+      if (name === 'broken') throw new ScriptError('invalid-output', '输出不是合法 JSON', report({}, { ok: false, problems: ['输出不是合法 JSON'] }))
+      if (fence.kind === 'sha1' && fence.sha1 !== 'a'.repeat(40)) throw new ScriptError('conflict', 'toolchain.js changed on disk while this draft was open')
+      return { name, sha1: 'b'.repeat(40), variables: { rust: '1.80.0' }, report: report({ rust: '1.80.0' }) }
+    },
+    remove: (name) => {
+      scripts.calls.push({ action: 'remove', name })
+      return name === 'toolchain'
+    },
+  }
+
   installPromptRoutes(ctx, {
     store,
     describe: (id) => {
       if (id === 'src-a-a') return { text: 'SUBSCRIBED', source: 'subscribed' }
-      const stored = store.read(id)
-      return stored === undefined
-        ? { text: '', source: 'empty' }
-        : { text: stored.body, source: 'user' }
+      // The real host swallows an unusable id here and answers an empty body:
+      // refusing one is the dispatcher's job, not this hook's.
+      try {
+        const stored = store.read(id)
+        return stored === undefined
+          ? { text: '', source: 'empty' }
+          : { text: stored.body, source: 'user' }
+      } catch {
+        return { text: '', source: 'empty' }
+      }
     },
     idFor: (title) => entryIdFor(title, store.ids()),
     warn: (message) => warnings.push(message),
     subscriptions: engine,
-    variables: () => ({ os: 'Windows', node: '24.18.0' }),
+    scripts,
+    variables: () => [
+      { name: 'os', value: 'Windows', source: 'environment', updatedAt: '2026-09-11T00:00:00.000Z', referencedBy: ['环境'] },
+      { name: 'node', value: '24.18.0', source: 'probe', updatedAt: '2026-09-11T00:00:00.000Z', referencedBy: [] },
+    ],
   })
 
   assert.equal(routes.length, 1, 'the plugin must register exactly one route')
@@ -139,6 +211,7 @@ try {
   const status = await call({ url: `${ROUTE_PREFIX}/status` })
   assert.equal(status.state.status, 200, 'status must answer 200')
   assert.equal(status.json().dir, SECTIONS, 'status must report the body directory')
+  assert.equal(status.json().maxEntries, MAX_ENTRIES, 'status must report the entry cap the page has to respect')
   assert.deepEqual(
     status.json().variables,
     { os: 'Windows', node: '24.18.0' },
@@ -202,6 +275,25 @@ try {
   const remote = await call({ url: `${ROUTE_PREFIX}/status`, remoteAddress: '192.168.1.5' })
   assert.equal(remote.state.status, 403, 'a non-loopback peer must be refused')
 
+  // A name that resolves to this machine arrives from a loopback peer and brings
+  // an origin of its own, so the requested host name is the gate that holds.
+  const rebound = await call({ url: `${ROUTE_PREFIX}/status`, host: 'evil.example:3080', origin: 'http://evil.example:3080' })
+  assert.equal(rebound.state.status, 403, 'a non-loopback host name must be refused even from a loopback peer')
+  assert.equal(rebound.json().code, 'host-not-loopback', 'and the refusal must say why')
+  const reboundWrite = await call({
+    method: 'PUT',
+    url: `${ROUTE_PREFIX}/body/note`,
+    host: 'evil.example:3080',
+    origin: 'http://evil.example:3080',
+    body: JSON.stringify({ body: 'X', fileSha1: null }),
+  })
+  assert.equal(reboundWrite.state.status, 403, 'a rebound write must be refused even when its origin matches its host')
+  assert.equal(store.has('note'), false, 'and it must not touch the disk')
+  for (const host of ['127.0.0.1:3080', 'localhost:3080', '[::1]:3080', '127.0.0.1']) {
+    const allowed = await call({ url: `${ROUTE_PREFIX}/status`, host })
+    assert.equal(allowed.state.status, 200, `${host} must be accepted as a loopback host name`)
+  }
+
   const crossOrigin = await call({
     method: 'PUT',
     url: `${ROUTE_PREFIX}/body/note`,
@@ -213,6 +305,13 @@ try {
 
   const traversal = await call({ url: `${ROUTE_PREFIX}/body/${encodeURIComponent('../secrets')}` })
   assert.equal(traversal.state.status, 400, 'a traversal id must be refused before it reaches the filesystem')
+  assert.equal(traversal.json().code, 'invalid-id', 'and the refusal must name the id grammar')
+  for (const bad of ['UPPER', 'not%20an%20id', '.dot', 'nobody%2Fx']) {
+    const refused = await call({ url: `${ROUTE_PREFIX}/body/${bad}` })
+    assert.equal(refused.state.status, 400, `GET ${bad} must be refused: every method agrees on an unusable id`)
+  }
+  const refusedScript = await call({ url: `${ROUTE_PREFIX}/script/${encodeURIComponent('a/b')}` })
+  assert.equal(refusedScript.state.status, 400, 'an unusable script name must be refused before it reaches the disk')
 
   const oversized = await call({
     method: 'PUT',
@@ -224,6 +323,29 @@ try {
 
   const wrongMethod = await call({ method: 'PATCH', url: `${ROUTE_PREFIX}/body/note`, origin: 'http://127.0.0.1:3080' })
   assert.equal(wrongMethod.state.status, 405, 'an unsupported method must be refused')
+
+  // ── references the registry could never interpolate ─────────────────────────
+
+  const malformed = await call({
+    method: 'PUT',
+    url: `${ROUTE_PREFIX}/body/note`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({ body: '模板写成 {{ x }} 就会炸', fileSha1: null }),
+  })
+  assert.equal(malformed.state.status, 422, 'a body carrying an unusable reference must be refused')
+  assert.equal(malformed.json().code, 'malformed-reference', 'and the refusal must name the reason')
+  assert.deepEqual(malformed.json().references, ['{{ x }}'], 'and list the references it found')
+  assert.equal(store.has('note'), false, 'a refused reference must never reach the disk')
+
+  const unregistered = await call({
+    method: 'PUT',
+    url: `${ROUTE_PREFIX}/body/note`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({ body: '还没注册的名字 {{not_yet}} 允许保存', fileSha1: null }),
+  })
+  assert.equal(unregistered.state.status, 200, 'a well-formed but unregistered name is still saved: the assembly guard covers it')
+  assert.equal(store.has('note'), true, 'and it reaches the disk')
+  store.remove('note')
 
   const unknown = await call({ url: `${ROUTE_PREFIX}/nope` })
   assert.equal(unknown.state.status, 404, 'an unknown path must 404')
@@ -374,6 +496,9 @@ try {
   assert.equal(unknownSource.state.status, 404, 'an unknown source is a 404')
   const nothingStaged = await call({ method: 'POST', url: `${ROUTE_PREFIX}/sources/stale/apply`, origin: 'http://127.0.0.1:3080' })
   assert.equal(nothingStaged.state.status, 409, 'applying without a check result is a 409')
+  const closed = await call({ method: 'POST', url: `${ROUTE_PREFIX}/sources/closed/check`, origin: 'http://127.0.0.1:3080' })
+  assert.equal(closed.state.status, 409, 'a switched-off source is a 409')
+  assert.equal(closed.json().code, 'disabled', 'and the refusal says the source is switched off')
 
   const badSlug = await call({ url: `${ROUTE_PREFIX}/sources/BAD_SLUG/check` })
   assert.equal(badSlug.state.status, 400, 'an unusable slug never reaches the engine')
@@ -398,13 +523,157 @@ try {
   assert.equal(subscribedWrite.state.status, 403, 'a subscribed body is refused a write')
   assert.equal(store.has('src-a-a'), false, 'and nothing reaches the disk')
 
+  // ── the variable and script routes ──────────────────────────────────────────
+
+  const variables = await call({ url: `${ROUTE_PREFIX}/variables` })
+  assert.equal(variables.state.status, 200, 'the variable list answers 200')
+  assert.equal(variables.json().variables[0].source, 'environment', 'each variable reports which layer supplied it')
+  assert.deepEqual(variables.json().variables[0].referencedBy, ['环境'], 'and which entries reference it, so a delete can warn first')
+  assert.equal(variables.json().scripts[0].name, 'toolchain', 'the list carries the scripts beside the variables')
+  assert.equal(variables.json().dir, scripts.dir, 'and the directory the scripts live in')
+
+  const draftRun = await call({
+    method: 'POST',
+    url: `${ROUTE_PREFIX}/variables/run`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({ name: 'toolchain', source: 'console.log("{}")' }),
+  })
+  assert.equal(draftRun.state.status, 200, 'a test run answers 200')
+  assert.equal(draftRun.json().variables.rust, '1.80.0', 'and reports the variables the draft would supply')
+  assert.equal(scripts.calls.at(-1).action, 'runSource', 'a draft goes through the draft path, which registers nothing')
+
+  const savedRun = await call({
+    method: 'POST',
+    url: `${ROUTE_PREFIX}/variables/run`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({ name: 'toolchain' }),
+  })
+  assert.equal(savedRun.state.status, 200, 'running a saved script answers 200')
+  assert.equal(scripts.calls.at(-1).action, 'run', 'and runs the file rather than a draft')
+
+  const namelessRun = await call({ method: 'POST', url: `${ROUTE_PREFIX}/variables/run`, origin: 'http://127.0.0.1:3080', body: '{}' })
+  assert.equal(namelessRun.state.status, 400, 'a run with neither a name nor a source is refused')
+  const unknownRun = await call({
+    method: 'POST',
+    url: `${ROUTE_PREFIX}/variables/run`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({ name: 'nope' }),
+  })
+  assert.equal(unknownRun.state.status, 404, 'running a script that does not exist is a 404')
+
+  const refreshed = await call({ method: 'POST', url: `${ROUTE_PREFIX}/variables/refresh`, origin: 'http://127.0.0.1:3080' })
+  assert.equal(refreshed.json().reports.length, 1, 'a refresh reports every run it made')
+  const unknownVariableRoute = await call({ method: 'POST', url: `${ROUTE_PREFIX}/variables/nope`, origin: 'http://127.0.0.1:3080' })
+  assert.equal(unknownVariableRoute.state.status, 404, 'an unknown variable route is a 404')
+  const variablesPost = await call({ method: 'POST', url: `${ROUTE_PREFIX}/variables`, origin: 'http://127.0.0.1:3080' })
+  assert.equal(variablesPost.state.status, 405, 'a POST on the variable list is refused')
+
+  const scriptRead = await call({ url: `${ROUTE_PREFIX}/script/toolchain` })
+  assert.equal(scriptRead.json().sha1, 'a'.repeat(40), 'a script read reports the hash the next write must fence against')
+  const missingScript = await call({ url: `${ROUTE_PREFIX}/script/nope` })
+  assert.equal(missingScript.state.status, 404, 'an unknown script is a 404')
+
+  const scriptWrite = await call({
+    method: 'PUT',
+    url: `${ROUTE_PREFIX}/script/toolchain`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({ source: 'console.log("{}")', fileSha1: 'a'.repeat(40) }),
+  })
+  assert.equal(scriptWrite.state.status, 200, 'saving a script answers 200')
+  assert.equal(scriptWrite.json().variables.rust, '1.80.0', 'and reports the variables that are now in force')
+  assert.deepEqual(scripts.calls.at(-1).fence, { kind: 'sha1', sha1: 'a'.repeat(40) }, 'the hash the page read becomes the fence')
+
+  await call({
+    method: 'PUT',
+    url: `${ROUTE_PREFIX}/script/fresh`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({ source: 'console.log("{}")', fileSha1: null }),
+  })
+  assert.deepEqual(scripts.calls.at(-1).fence, { kind: 'absent' }, 'a brand-new script must find no file at all')
+
+  const conflicted = await call({
+    method: 'PUT',
+    url: `${ROUTE_PREFIX}/script/taken`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({ source: 'console.log("{}")', fileSha1: null }),
+  })
+  assert.equal(conflicted.state.status, 409, 'a variable name another source owns is a 409')
+  assert.equal(conflicted.json().code, 'conflict', 'and it reports the conflict reason')
+
+  const brokenWrite = await call({
+    method: 'PUT',
+    url: `${ROUTE_PREFIX}/script/broken`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({ source: 'nonsense', fileSha1: null }),
+  })
+  assert.equal(brokenWrite.state.status, 422, 'a script whose output is unusable is a 422')
+  assert.equal(brokenWrite.json().report.problems[0], '输出不是合法 JSON', 'and the run report reaches the page')
+
+  const staleWrite = await call({
+    method: 'PUT',
+    url: `${ROUTE_PREFIX}/script/toolchain`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({ source: 'console.log("{}")', fileSha1: 'c'.repeat(40) }),
+  })
+  assert.equal(staleWrite.state.status, 409, 'a stale editor is refused with 409')
+
+  for (const [label, payload] of [
+    ['a missing source', {}],
+    ['a non-string source', { source: 7 }],
+    ['a non-string fence', { source: 'x', fileSha1: 7 }],
+  ]) {
+    const refused = await call({
+      method: 'PUT',
+      url: `${ROUTE_PREFIX}/script/toolchain`,
+      origin: 'http://127.0.0.1:3080',
+      body: JSON.stringify(payload),
+    })
+    assert.equal(refused.state.status, 400, `${label} must be refused`)
+  }
+
+  const badScriptName = await call({
+    method: 'PUT',
+    url: `${ROUTE_PREFIX}/script/BAD_NAME`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({ source: 'x', fileSha1: null }),
+  })
+  assert.equal(badScriptName.state.status, 400, 'an unusable script name never reaches the disk')
+
+  const wrongScriptMethod = await call({ method: 'POST', url: `${ROUTE_PREFIX}/script/toolchain`, origin: 'http://127.0.0.1:3080' })
+  assert.equal(wrongScriptMethod.state.status, 405, 'a POST on a script is refused')
+
+  const removedScript = await call({ method: 'DELETE', url: `${ROUTE_PREFIX}/script/toolchain`, origin: 'http://127.0.0.1:3080' })
+  assert.equal(removedScript.json().removed, true, 'a delete reports whether a file went away')
+
+  // Every mutating variable route is gated twice: loopback peer, then origin.
+  for (const [label, options] of [
+    ['a cross-origin draft run', { method: 'POST', url: `${ROUTE_PREFIX}/variables/run`, origin: 'http://evil.example', body: '{}' }],
+    ['a cross-origin refresh', { method: 'POST', url: `${ROUTE_PREFIX}/variables/refresh`, origin: 'http://evil.example' }],
+    ['a cross-origin save', { method: 'PUT', url: `${ROUTE_PREFIX}/script/toolchain`, origin: 'http://evil.example', body: '{"source":"x"}' }],
+    ['a cross-origin delete', { method: 'DELETE', url: `${ROUTE_PREFIX}/script/toolchain`, origin: 'http://evil.example' }],
+  ]) {
+    const refused = await call(options)
+    assert.equal(refused.state.status, 403, `${label} must be refused`)
+  }
+
+  for (const [label, options] of [
+    ['a remote draft run', { method: 'POST', url: `${ROUTE_PREFIX}/variables/run`, remoteAddress: '10.0.0.5', host: '10.0.0.5:3080', origin: 'http://10.0.0.5:3080', body: '{}' }],
+    ['a remote save', { method: 'PUT', url: `${ROUTE_PREFIX}/script/toolchain`, remoteAddress: '10.0.0.5', host: '10.0.0.5:3080', origin: 'http://10.0.0.5:3080', body: '{"source":"x"}' }],
+  ]) {
+    const refused = await call(options)
+    assert.equal(refused.state.status, 403, `${label} must be refused: user code is written from the host only`)
+  }
+
   assert.deepEqual(warnings, [], `no warning expected, got: ${warnings.join(' | ')}`)
 
   console.log('routes ok')
-  console.log('  gates       loopback peers only, same-origin writes only, traversal ids refused')
+  console.log('  gates       loopback peer + loopback host + same-origin writes only, unusable ids refused')
   console.log('  fencing     409 on absent-or-changed override, 200 on a matching hash')
-  console.log('  statuses    400 malformed/oversized, 404 unknown path, 405 wrong method, 403 gates')
+  console.log('  statuses    400 malformed/oversized, 404 unknown path, 405 wrong method, 422 bad reference')
+  console.log('  gates       403 for a rebound host, a foreign origin, and a non-loopback peer')
   console.log('  sources     add / list / check / apply / revert / forget, subscribed bodies read-only')
+  console.log('  variables   list with provenance and references, draft run, saved run, refresh')
+  console.log('  scripts     read / save with fence / delete, 422 on an unusable run, host-only writes')
 } finally {
   rmSync(ROOT, { recursive: true, force: true })
 }

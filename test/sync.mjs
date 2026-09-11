@@ -7,7 +7,7 @@
  * report — with no network and no real repository.
  */
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -20,6 +20,7 @@ import {
   SourceWorkspace,
 } from '../lib/sync.js'
 import { rawUrl, headAtomUrl } from '../lib/source.js'
+import { bodyHash } from '../lib/store.js'
 
 /** Throwaway storage root. */
 const ROOT = mkdtempSync(join(tmpdir(), 'prompt-manager-sync-'))
@@ -228,6 +229,74 @@ try {
     'an unreachable commits feed is reported, not fatal',
   )
 
+  // ── a body file that vanished must be fetched again, never blanked ───────────
+
+  /** Bookkeeping that remembers one body file, ready for the file to vanish. */
+  const holed = (slug) => {
+    const workspace = new SourceWorkspace(ROOT, slug)
+    mkdirSync(join(workspace.currentDir, 'prompts'), { recursive: true })
+    writeFileSync(join(workspace.currentDir, 'prompts/a.md'), 'ONE\nTWO', 'utf8')
+    workspace.writeState({
+      ref: 'main',
+      files: { 'prompts/a.md': { id: `${slug}-a`, enabled: true, sha1: bodyHash('ONE\nTWO'), etag: 'etag-a' } },
+    })
+    return workspace
+  }
+
+  const holey = holed('holey')
+  rmSync(join(holey.currentDir, 'prompts/a.md'))
+  const refetch = fakeFetcher({
+    [ATOM_URL]: { status: 404 },
+    [MANIFEST_URL]: manifest([{ file: 'prompts/a.md', title: 'A' }]),
+    [A_URL]: { status: 200, text: 'ONE\nTWO\nTHREE', etag: 'etag-a2' },
+  })
+  const recovered = await checkSource({ source: SOURCE, workspace: holey, fetcher: refetch })
+  assert.equal(
+    refetch.calls.find((call) => call.url === A_URL).etag,
+    undefined,
+    'a missing body file must drop the validator, so the answer carries content',
+  )
+  assert.deepEqual(
+    recovered.changes.map((change) => [change.path, change.kind]),
+    [['prompts/a.md', 'changed']],
+    'the vanished file is staged as an ordinary change',
+  )
+  assert.equal(
+    readFileSync(join(holey.stagingDir, 'prompts/a.md'), 'utf8'),
+    'ONE\nTWO\nTHREE',
+    'what is staged is the real body, never an empty 304 answer',
+  )
+  const restored = applyChanges({
+    workspace: holey,
+    state: holey.readState(),
+    plan: holey.readPlan(),
+    source: SOURCE,
+    nowIso: '2026-01-04T00:00:00.000Z',
+  })
+  holey.writeState(restored.state)
+  holey.clearStaging()
+  assert.equal(
+    readFileSync(join(holey.currentDir, 'prompts/a.md'), 'utf8'),
+    'ONE\nTWO\nTHREE',
+    'applying the plan puts a body back in force',
+  )
+
+  // An upstream that answers 304 anyway (a broken mirror, a stub) must be
+  // skipped rather than staged as an empty body.
+  const stubborn = holed('stubborn')
+  rmSync(join(stubborn.currentDir, 'prompts/a.md'))
+  const stubbornOutcome = await checkSource({
+    source: SOURCE,
+    workspace: stubborn,
+    fetcher: fakeFetcher({
+      [ATOM_URL]: { status: 404 },
+      [MANIFEST_URL]: manifest([{ file: 'prompts/a.md' }]),
+      [A_URL]: () => ({ status: 304, text: '', etag: 'etag-a' }),
+    }),
+  })
+  assert.deepEqual(stubbornOutcome.changes, [], 'an unasked-for 304 stages nothing')
+  assert.equal(existsSync(join(stubborn.stagingDir, 'prompts/a.md')), false, 'and leaves no empty body in staging')
+
   // ── the workspace refuses to escape itself ───────────────────────────────────
 
   const guard = new SourceWorkspace(ROOT, 'guard')
@@ -238,6 +307,7 @@ try {
   console.log('  rotation    staging -> current, replaced bodies kept in previous')
   console.log('  accounting  added / changed / removed with line counts, partial apply honoured')
   console.log('  revert      the replaced body and the dropped file both come back')
+  console.log('  conditional a vanished body is refetched, and a 304 never stages an empty one')
   console.log('  failures    no manifest, an HTML mirror, a missing file, a traversal path')
 } finally {
   rmSync(ROOT, { recursive: true, force: true })

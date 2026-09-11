@@ -35,7 +35,7 @@ export interface SourceSummary {
   ref: string
   /** Effective mirror, with the global default already folded in. */
   mirror: string
-  /** Whether the source takes part in a check. */
+  /** Whether the source takes part in a check, an apply, or a revert. */
   enabled: boolean
   /** When its files were last applied. */
   appliedAt?: string
@@ -89,11 +89,26 @@ export interface ApplyOutcome {
 export class Subscriptions {
   private readonly host: SubscriptionHost
 
+  /** How one source's workspace is built; replaced in tests. */
+  private readonly workspaceOf: (slug: string) => SourceWorkspace
+
+  /**
+   * Where the subscribed bodies were last found.
+   *
+   * Section text is resolved on every assembly, so `readBody` runs once per
+   * subscribed entry per model step. Rebuilding this map each time would re-read
+   * and re-parse every source's `state.json` in that hot path, so it is computed
+   * once and dropped whenever the files or the source list can have changed.
+   */
+  private cachedLocations: Map<string, SubscriptionLocation> | undefined
+
   /**
    * @param host - the plugin side of the engine.
+   * @param options - workspace factory, for tests that count what the engine reads.
    */
-  constructor(host: SubscriptionHost) {
+  constructor(host: SubscriptionHost, options: { workspace?: (slug: string) => SourceWorkspace } = {}) {
     this.host = host
+    this.workspaceOf = options.workspace ?? ((slug) => new SourceWorkspace(this.host.root(), slug))
   }
 
   /**
@@ -102,7 +117,7 @@ export class Subscriptions {
    * @returns its file workspace.
    */
   workspace(slug: string): SourceWorkspace {
-    return new SourceWorkspace(this.host.root(), slug)
+    return this.workspaceOf(slug)
   }
 
   /**
@@ -110,14 +125,21 @@ export class Subscriptions {
    * @returns entry id → source and path, for the entries on disk.
    */
   locate(): Map<string, SubscriptionLocation> {
-    const located = new Map<string, SubscriptionLocation>()
-    for (const source of this.host.sources()) {
-      const state = this.workspace(source.id).readState()
-      for (const [path, file] of Object.entries(state.files)) {
-        located.set(file.id, { slug: source.id, path })
-      }
-    }
-    return located
+    this.cachedLocations ??= this.computeLocations()
+    return this.cachedLocations
+  }
+
+  /**
+   * Forget the cached map and read the sources again.
+   *
+   * Called when the source list changed, or after this engine moved files, so
+   * the map never describes a snapshot that has already been replaced.
+   *
+   * @returns the freshly computed map.
+   */
+  refreshLocations(): Map<string, SubscriptionLocation> {
+    this.cachedLocations = undefined
+    return this.locate()
   }
 
   /**
@@ -129,6 +151,18 @@ export class Subscriptions {
     const location = this.locate().get(id)
     if (location === undefined) return undefined
     return this.workspace(location.slug).read('current', location.path)
+  }
+
+  /** Build the location map from every source's bookkeeping. */
+  private computeLocations(): Map<string, SubscriptionLocation> {
+    const located = new Map<string, SubscriptionLocation>()
+    for (const source of this.host.sources()) {
+      const state = this.workspace(source.id).readState()
+      for (const [path, file] of Object.entries(state.files)) {
+        located.set(file.id, { slug: source.id, path })
+      }
+    }
+    return located
   }
 
   /**
@@ -159,10 +193,10 @@ export class Subscriptions {
    * Check one source against its upstream and stage whatever changed.
    * @param slug - source id.
    * @returns the check outcome, tagged with its source.
-   * @throws {CheckError} when the source is unknown or the check cannot conclude.
+   * @throws {CheckError} when the source is unknown, switched off, or the check cannot conclude.
    */
   async check(slug: string): Promise<CheckOutcome & { slug: string }> {
-    const source = this.source(slug)
+    const source = this.writableSource(slug)
     const outcome = await checkSource({
       source,
       workspace: this.workspace(slug),
@@ -179,7 +213,7 @@ export class Subscriptions {
    * @throws {CheckError} when nothing is staged for this source.
    */
   async apply(slug: string, files?: readonly string[]): Promise<ApplyOutcome> {
-    const source = this.source(slug)
+    const source = this.writableSource(slug)
     const workspace = this.workspace(slug)
     const plan = workspace.readPlan()
     if (plan === undefined) throw new CheckError('nothing-staged', `${slug} 还没有检查结果，先点「检查更新」`)
@@ -194,6 +228,7 @@ export class Subscriptions {
     })
     workspace.writeState(next.state)
     workspace.clearStaging()
+    this.cachedLocations = undefined
     const entries = await this.syncEntries()
     return { slug, applied: next.applied, entries }
   }
@@ -204,22 +239,28 @@ export class Subscriptions {
    * @returns the paths that moved back and the index that resulted.
    */
   async revert(slug: string): Promise<{ slug: string; reverted: string[]; entries: PromptEntry[] }> {
-    this.source(slug)
+    this.writableSource(slug)
     const workspace = this.workspace(slug)
     const next = revertChanges({ workspace, state: workspace.readState() })
     workspace.writeState(next.state)
     workspace.clearStaging()
+    this.cachedLocations = undefined
     const entries = await this.syncEntries()
     return { slug, reverted: next.reverted, entries }
   }
 
   /**
    * Forget one source: its files and its entries.
+   *
+   * A source that is switched off can still be forgotten: removing it is exactly
+   * what a person does with one they no longer want.
+   *
    * @param slug - source id.
    * @returns the index that resulted.
    */
   async remove(slug: string): Promise<{ slug: string; entries: PromptEntry[] }> {
     this.workspace(slug).remove()
+    this.cachedLocations = undefined
     const entries = await this.syncEntries()
     return { slug, entries }
   }
@@ -280,5 +321,24 @@ export class Subscriptions {
     const found = this.host.sources().find((candidate) => candidate.id === slug)
     if (found === undefined) throw new CheckError('unknown-source', `没有这个订阅源：${slug}`)
     return found
+  }
+
+  /**
+   * Look up a source that may be operated on.
+   *
+   * A switched-off source keeps the bodies it already applied — turning it off
+   * is not a way to erase entries that are in force — but it takes no new work
+   * from upstream until it is switched back on.
+   *
+   * @param slug - source id.
+   * @returns the source.
+   * @throws {CheckError} when no such source is configured, or it is switched off.
+   */
+  private writableSource(slug: string): PromptSource {
+    const source = this.source(slug)
+    if (!source.enabled) {
+      throw new CheckError('disabled', `${slug} 已关闭：在设置页打开它，或删掉它，再对上游做操作`)
+    }
+    return source
   }
 }

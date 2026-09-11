@@ -2,12 +2,15 @@
 
 把提示词作为 **system prompt section** 注入 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH），并在 Web GUI 的 **设置 → 提示词** 里管理它们：开关、排序、新增、删除、改正文（markdown）。
 
-提示词是一份**列表**，每条一个条目：
+提示词是一份**列表**，每条一个条目；正文里可以引用**变量**，而变量可以由你自己写的**脚本**提供：
 
 | 部分 | 存在哪 | 谁在改 |
 |---|---|---|
 | 索引（标题 / 顺序 / 开关） | `$DSH_HOME/settings.yaml` 的 `prompt-manager:` 段 | 设置页，或手改文件 |
 | 正文（markdown） | `$DSH_HOME/prompt-manager/sections/<id>.md` | 设置页，或任意编辑器 |
+| 变量脚本 | `$DSH_HOME/prompt-manager/scripts/<name>.js` | 设置页的「变量」页，或任意编辑器 |
+
+脚本是一段跑在子进程里的 JS（也可以是别的语言），打印一个 JSON 对象，键就成了提示词里能用的 `{{名字}}` —— 见「变量脚本」一节。
 
 插件**只内置一条**提示词：机器环境（系统 / shell / 工具链版本，值由变量在挂载时探测填充）。其余提示词自己写，或从可订阅的仓库拉（见下节）。一份现成的提示词包在 [lolkda/dsh-prompt-pack](https://github.com/lolkda/dsh-prompt-pack)，里面是 CTF 作业契约和 FastCtx 工具路由两份。
 
@@ -77,17 +80,19 @@ pnpm add github:lolkda/dsh-prompt-manager
 
 打开 **设置 → 提示词**（侧栏位置由 `settings.section` 的 order 60 决定，排在 General / Models / Plugins / Agent presets / 市场之后）。
 
-页面是三个视图（设置面板很窄，一次只做一件事）：
+页面是几个视图（设置面板很窄，一次只做一件事）：
 
-- **列表**：三个 tab（全部 / 本地 / 订阅）做分层；每条一行 = 标题 + 注入开关 + 右侧「⋯」菜单（编辑 / 删除）。订阅来的条目带「订阅」徽标、metadata 里写明来源。点标题或「编辑」进入编辑器页面。右上角是「新增提示词」和「来源」。没有任何条目时，列表提示去点「新增提示词」。
-- **编辑器页面**：整个区域切成编辑器 —— 左上角「← 返回」，然后是标题、顺序、只读的 id 与正文状态、Markdown 正文 textarea、实时预览（用 shell 自带的 `MarkdownText` 渲染），底部「保存修改」。**订阅条目的正文只读**，另有「fork 成本地条目」把它复制成一条可编辑的本地条目。返回时会确认未保存修改；新增提示词也直接进这个页面。
+- **列表**：三个 tab（全部 / 本地 / 订阅）做分层；每条一行 = 标题 + 注入开关 + 右侧「⋯」菜单（编辑 / 删除）。订阅来的条目带「订阅」徽标、metadata 里写明来源。点标题或「编辑」进入编辑器页面。底部是「新增提示词」「订阅来源（N）」「变量（N）」。没有任何条目时，列表提示去点「新增提示词」；索引已经到上限（`/status` 的 `maxEntries`）时「新增提示词」会直接拒绝并说明原因，因为再多的条目也不会被注入。
+- **编辑器页面**：整个区域切成编辑器 —— 左上角「← 返回」，然后是标题、顺序、只读的 id 与正文状态、Markdown 正文 textarea、实时预览（用 shell 自带的 `MarkdownText` 渲染），底下是可用变量芯片（点一下插到光标处）和未注册/写法不对的引用警告，底部「保存修改」。**订阅条目的正文只读**，另有「fork 成本地条目」把它复制成一条可编辑的本地条目。返回时会确认未保存修改；新增提示词也直接进这个页面。
 - **来源页面**：订阅源的增删、检查更新、应用、还原，见下节。
+- **变量页面**：变量清单（值、来源、被哪些提示词引用）+ 脚本列表（它提供哪些变量、上次运行状态）+「新建脚本」「重新测量」。
+- **脚本编辑器**：脚本名、正文、实时语法提示，底部「运行一次（测试）」和「保存并启用」，见「变量脚本」一节。
 
 生效时机：**下一个模型步骤**。`systemPrompt.assemble()` 每个 agent step 调用一次，section 文本每次现算，所以开关、排序、正文都在下一轮对话生效，**不需要重启**。改代码另说，见文末「注意」。
 
 持久化：只有 `http://127.0.0.1:...` 打开页面时索引才写进 `settings.yaml`；用局域网地址打开时 DSH 的设置通道退化为内存模式，页面会显示只读。
 
-删除对任何条目都可用：删掉一条就是把它从索引里移除、连它的正文文件一起删掉。手改 `settings.yaml` 时要注意：settings 的分层合并对数组是「上层整体覆盖」，所以用户层写下的 `entries` 数组就是最终列表。
+删除对任何条目都可用：删掉一条 = 先删它的正文文件，再把这一条从索引里移除（顺序是有意的：文件删不掉时索引不动，那条条目还在页面上、还能重试）。手改 `settings.yaml` 时要注意：settings 的分层合并对数组是「上层整体覆盖」，所以用户层写下的 `entries` 数组就是最终列表。
 
 ## 订阅 GitHub 仓库
 
@@ -110,12 +115,14 @@ pnpm add github:lolkda/dsh-prompt-manager
 
 ### 手动更新的四步
 
-1. **检查更新** —— 分支先用 `github.com/<repo>/commits/<ref>.atom` 拿 head sha（**零 API 配额**）；sha 没变就直接说"已是最新"，不发文件请求。变了（或 ref 是 tag/commit）才逐个文件发条件请求（`If-None-Match`），304 复用本地。
+1. **检查更新** —— 分支先用 `github.com/<repo>/commits/<ref>.atom` 拿 head sha（**零 API 配额**）；sha 没变就直接说"已是最新"，不发文件请求。变了（或 ref 是 tag/commit）才逐个文件发条件请求（`If-None-Match`），304 复用本地。本地那份正文文件如果被删了（手工清过、或者从别的机器同步过来），条件请求会退回无条件请求把它取回来 —— 否则 304 会把一个空正文当成最新版本暂存下来。
 2. **看变更** —— 每个文件一行：`prompts/a.md  +14 / −3`，带勾选框（默认全选）。远端删掉的文件标「（删除）」。
 3. **应用** —— 旧正文进 `previous/`，暂存内容覆盖 `current/`，写回 `state.json`，然后补上新条目：**新条目默认关闭**，打开开关后才会注入。
 4. **还原** —— 一次撤销：把上一次应用覆盖掉的文件放回去（记在 state 的 undo 账本里，所以被删的文件会连同标题/顺序/开关一起回来）。
 
 订阅条目的正文只读（想改就 fork），标题、顺序、开关照旧可改；源被删掉时它的条目会一起移除。
+
+把来源的 `enabled` 设成 `false` 是「**先停对上游的动作，但别动已经在用的正文**」：检查 / 应用 / 还原都返回 409 并说明原因，已应用的条目照常注入（页面上关掉某个条目才是让它不注入的方式）。要彻底停就把来源删掉。
 
 ### 通道
 
@@ -146,6 +153,8 @@ prompt-manager:
 ```
 $DSH_HOME/prompt-manager/
   sections/<id>.md                        本地条目正文
+  scripts/<name>.js                       变量脚本（一条脚本一个文件，输出一个 JSON 对象）
+  scripts/.state.json                     每条脚本上次成功运行的 sha1 / 时间 / 变量值 / 退出码
   sources/<slug>/current/<file>.md        订阅正文快照（只读来源）
   sources/<slug>/previous/<file>.md       上一次应用替换掉的版本
   sources/<slug>/staging/<file>.md        检查下载完、还没应用的正文
@@ -162,6 +171,7 @@ $DSH_HOME/prompt-manager/
 | `variables` | 空 | 额外的 `{{名字}}` 变量，固定值，键值对形式。名字要满足 `[a-z][a-z0-9_]*`，不能和已注册的重名 |
 | `probes` | 空 | 挂载时跑一次的命令，每个命令注册一个变量（见下节）。名字规则同 `variables`，最多 64 项 |
 | `probeDefaults` | `true` | 同时运行包内自带的探测默认值（`pwsh` / `bash` / `git` / `node` / `python`），内置条目靠它们解析变量。设为 `false` 只跑 `probes` 里写的 |
+| `scripts` | 空 | 变量脚本的执行覆盖：`{ <脚本名>: { command, args, timeoutMs } }`。默认 `node <脚本>`、3 秒超时；`args` 里的 `{script}` 会换成脚本绝对路径，没写就附加在末尾 |
 | `probeTexts` | 英文占位符 | 探测没拿到版本时用的文案，可覆盖 `missing` / `empty` / `timeout` / `skipped` |
 | `probeBudgetMs` | `8000` | 整轮探测的时间上限，超出的探测直接记 `skipped` 文案，不再执行 |
 | `storeDir` | `$DSH_HOME/prompt-manager` | 正文文件所在目录（插件在其中使用 `sections/` 子目录）。`$DSH_HOME` 取值规则：显式 `storeDir` > 非空 `$DSH_HOME` > `~/.dsh` |
@@ -181,7 +191,7 @@ $DSH_HOME/prompt-manager/
 - **关掉**在设置页把开关拨掉即可。**删掉**会往 user 层写一份不含该 id 的 `entries` 数组，base 层随之被整体遮蔽 —— 想恢复就在 `settings.yaml` 里删掉 `prompt-manager.entries` 这一项，或手写回一条 `{id: env, title: 机器环境, order: 5, enabled: true}`。
 - 部署**没有 settings 服务**时也照样注入（此时索引就是内置条目本身），不会被静默丢掉。
 
-内置正文引用的 `{{...}}` 由包内自带的探测默认值提供（下一节），所以开箱即可渲染。反过来，把 `probeDefaults` 关掉却留着这条条目，组装会因为未注册的变量直接抛错 —— 两者是一对。
+内置正文引用的 `{{...}}` 由包内自带的探测默认值提供（下一节），所以开箱即可渲染。反过来，把 `probeDefaults` 关掉却留着这条条目，那 6 个变量就没人注册 —— 组装**不会因此失败**（见下面「未注册的引用按字面量渲染」），但正文里会出现 `Runtime environment: {{os}} ({{platform}}, {{arch}}).` 这样的原文，日志里各有一条警告。两者还是一对。
 
 ## 探测：把工具版本变成变量
 
@@ -222,15 +232,65 @@ config:
 几条要紧的话：
 
 - **探测只在挂载时跑一次**。DSH 的变量 provider 是**每次组装同步求值**的，把命令放进去等于每个模型步骤都起一批子进程。所以装/卸了工具后，改一下这一行的 config（`patchReload: live` 会重挂它）或重启 profile 才会更新。实测一轮 5 项约 0.4 秒，全在本机跑。
-- **`probes` 与默认值按名字合并**，config 里的同名项覆盖默认值（例如这台机器要把 `bash` 写成绝对路径，就在 `probes.bash` 里覆盖）。整组默认值用 `probeDefaults: false` 关掉。
+- **`probes` 里的同名项是整体替换，不是逐字段合并**。默认值里 `git` 带着 `args` 和 `pattern`，你只写 `git: { command: git }` 就同时丢掉了那两样（值变成输出整行、也不再带 `--version`），想要就一起写上。整组默认值用 `probeDefaults: false` 关掉。
 - **占位符必须存在**。provider 返回 `undefined` 会让引用它的条目渲染失败，所以插件从不注册空值 —— 缺工具也是一个值。
 - **名字被占了只警告、不炸**。别的行已经注册过同名变量时，这一项被跳过并写进日志；其余变量照常注册，挂载不受影响。
 - **写错的配置会拒绝挂载**。变量名不合法、`probes` 不是键值对、缺 `command`、`pattern` 不是合法正则、超过 64 项 —— 这些是组合文件的错，直接抛错比留下一个渲染不了的 `{{名字}}` 好。
 - **探测在宿主进程里执行，不经 DSH 的工具沙箱**。命令只来自组合配置（部署自己的文件），永不接受来自模型或页面的输入。
 
+## 变量脚本：让提示词用你自己写的 JS
+
+插件的变量分两类：**系统事实**（`{{os}}` 这类，插件注册）和**测量值**（探测，见上一节）。第三类是你自己写的脚本，在 **设置 → 提示词 → 变量** 里管：
+
+- 一条脚本 = 一个文件 `scripts/<name>.js`，跑的时候是一个**独立子进程**。
+- 脚本**打印一个 JSON 对象**，键就是变量名：`console.log(JSON.stringify({ rust: '1.80.0', go: 'go1.22' }))` —— 所以**一条脚本能给多个变量**，不需要在别处再登记名字。
+- 值只在**挂载时**或你点「运行一次 / 重新测量」时测一次，然后缓存下来，之后每次组装读的是内存里的值。
+
+### 新增一条脚本的四步
+
+1. **新建脚本** —— 给个名字（小写字母、数字、连字符，就是文件名），页面给一份**能直接跑**的模板：探测两个工具版本并打印成 JSON。
+2. **写** —— 改成你要探测的东西。想加变量就往 JSON 里加一个键。任何语言都行，见下面 `config.scripts`。
+3. **运行一次（测试）** —— 跑的就是保存时会跑的同一件事：同一条命令、同一个工作目录。页面会列出**这次会提供哪些变量、各是什么值**，还有退出码、耗时、stderr 和失败原因。
+   **测试不写文件、不注册变量**，所以随便试都没有副作用 —— 试坏了也不会影响正在用的提示词。
+4. **保存并启用** —— 保存会先跑一遍：输出不是合法 JSON、变量名不合法、名字和别的来源撞车，**都会被拒绝，磁盘上不会留下坏脚本**。通过后才落盘并注册，**下一个模型步骤生效，不用重启**。
+
+保存成功后回到正文编辑器，输入框上方会列出当前所有可用变量，点一下就插到光标处；写了一个没注册的名字、或者写成 `{{不是变量名}}`，预览区下面会直接标红 —— 不用等模型步骤报错才发现。
+
+### 约定
+
+| 事情 | 行为 |
+|---|---|
+| 脚本输出 | 必须是**平铺的 JSON 对象**；值是字符串或数字（数字转成文本）。数组、嵌套对象、null 值、空对象都拒绝 |
+| 变量名 | 键必须匹配 `^[a-z][a-z0-9_]*$`（小写字母开头，只含小写字母、数字、下划线），最长 64 个 |
+| 值的长度 | 超过 120 字符会截断，页面会标出来 |
+| 单脚本变量数 | 最多 64 个；脚本数最多 20 条 |
+| 非 0 退出码 | 输出还能解析就照用（很多工具非 0 也照样打印），退出码在页面上显示；输出坏了才算失败 |
+| 超时 / 起不来 | 默认 3 秒后杀掉（只杀解释器本身，脚本自己起的子进程不归它管）；`node` 不在 PATH 上时报「无法启动」 |
+| 失败时 | **保留上一次成功测到的值**，只把错误显示在变量页上。提示词不会因此炸掉 |
+| 删除脚本 | 文件、缓存一起删，但它提供的**变量留在最后一次的值上**（否则正文里那几个 `{{名字}}` 会变成原文），重启 profile 后才真正消失。删除前页面会列出哪些提示词还在引用它 |
+| 改名的正确做法 | 先删掉旧脚本，再存成新名字 —— 旧名字的变量会被新脚本接管。两条脚本同时在磁盘上抢同一个名字会被拒（409），谁也不会悄悄覆盖谁 |
+| 手工放文件 | 直接把 `.js` 丢进 `scripts/` 也一样，页面下次打开就能看到；没有缓存的那条会在挂载后台跑一次补上 |
+| 两个 profile 共用一个 `storeDir` | 不推荐：`scripts/.state.json` 是整目录一份，两边各写各的、后写的覆盖先写的（最坏结果是某些脚本被判成「待重测」再跑一次，值不会错）。文案文件各存各的，没问题 |
+
+### 脚本是怎么跑的
+
+默认 `node <脚本绝对路径>`，工作目录是 `scripts/`，继承宿主的环境变量（所以 `PATH` 里的工具直接能用），加两个环境变量 `DSH_PROMPT_MANAGER=1` 和 `DSH_PROMPT_MANAGER_SCRIPT=<名字>`。想换解释器或加参数：
+
+```yaml
+- insert:
+    - id: prompt-manager
+      name: './vendor/dsh-prompt-manager/lib/index.js'
+      config:
+        scripts:
+          toolchain: { timeoutMs: 5000 }
+          inventory: { command: 'python', args: ['{script}'] }   # {script} 换成脚本绝对路径
+```
+
+**脚本以宿主进程的身份运行，没有沙箱** —— 它能读能写能上网。页面写入只有 loopback + same-origin 能过（和正文文件一样），但「设置页能写的东西现在包括会被执行的代码」这件事要自己心里有数：别把不信任的脚本放进去。
+
 ## 变量
 
-section 文本在每次组装时做 `{{变量}}` 插值，所以提示词里可以写实时事实。**变量必须由某一行注册**：本部署里 `@deepseek-ai/*` 的包没有注册任何提示词变量，所以 `{{...}}` 认的就是下面这 4 个，加上 `variables` 和 `probes` 补进来的那些。
+section 文本在每次组装时做 `{{变量}}` 插值，所以提示词里可以写实时事实。**变量必须由某一行注册**：本部署里 `@deepseek-ai/*` 的包没有注册任何提示词变量，所以 `{{...}}` 认的就是下面这 4 个，加上 `variables`、`probes` 和变量脚本补进来的那些。
 
 | 变量 | 本机实测值 | 来源 |
 |---|---|---|
@@ -257,7 +317,20 @@ config:
 Shell: {{shell}}.
 ```
 
-**插值是严格的**：引用未注册的变量、或注册了但 provider 返回 `undefined`，`assemble()` 直接抛错，不会渲染成空串，而且**没有转义语法**（想输出字面 `{{` 目前做不到）。所以加 `{{...}}` 之前，先确认对应变量已经注册。
+### 未注册的引用按字面量渲染
+
+`@deepseek-ai/dsh-system-prompt` 的插值是**严格**的：引用未注册的变量、或注册了但 provider 返回 `undefined`，`renderPrompt()` 直接抛错，而 `dsh-agent-loop` 那一步没有兜底 —— 一个手滑的 `{{名字}}` 会让**整个系统提示词组装失败**，这一行配置再正确也一样。
+
+所以插件在 `system-prompt/assemble` 这一步给自己的条目做一层护栏：**只有自己条目里、解析不了的那几个引用**会被就地转义成字面量（在 `{` 后面插一个零宽空格，渲染出来就是 `{{名字}}` 原文，人看不出区别，但注册表再也认不出它），每个引用在宿主日志里记一条警告，其余部分照常渲染。别人的 section 一个字节都不碰。
+
+护栏只兜自己条目、只兜「解析不了」这一种：能解析的引用原样交给注册表；**变量脚本报错留下的不可用值、以及别的行注册失败**这类系统性问题，仍然按原样暴露。
+
+配套的两件事：
+
+- **保存时就拦**：`PUT /body/<id>` 遇到写法上就不成立的引用（`{{ x }}`、`{{a.b}}`、`{{}}` 这类，注册表正则无论如何都匹配不上）直接返回 422 并列出是哪几个，磁盘上不会留下注定渲染成原文的正文。名字合法但没注册的引用允许保存（它可能就是下一步要建的脚本），编辑器会标红提醒。
+- **编辑器先说**：正文编辑器把当前可用变量列在输入框上方，未注册的引用和写法不对的引用都会在预览下方标出来，不用等一个模型步骤才发现。
+
+想输出字面 `{{` 而没有对应的变量时，没有专门的转义语法：markdown 代码块在插值面前没有特殊地位，护栏也只管解析不了的写法，所以这种正文只能自己绕开（例如把大括号拆开写，或改成说明文字）。
 
 ## 条件注入（已移除）
 
@@ -271,9 +344,9 @@ Shell: {{shell}}.
 
 | 方法 + 路径 | 作用 | 网关 |
 |---|---|---|
-| `GET /prompt-manager/status` | `{ dir, writable, ids, variables }` | 仅 loopback 对端 |
+| `GET /prompt-manager/status` | `{ dir, writable, ids, variables, maxEntries }` | 仅 loopback 对端 |
 | `GET /prompt-manager/body/<id>` | `{ body, source, sha1, fileSha1 }` | 仅 loopback 对端 |
-| `PUT /prompt-manager/body/<id>` | 写入正文，body 是 `{ body, fileSha1 }`，上限 256 KiB | loopback + same-origin |
+| `PUT /prompt-manager/body/<id>` | 写入正文，body 是 `{ body, fileSha1 }`，上限 256 KiB；写法不成立的 `{{...}}` 报 422 | loopback + same-origin |
 | `DELETE /prompt-manager/body/<id>` | 删除覆盖文件（= 恢复默认） | loopback + same-origin |
 | `POST /prompt-manager/id` | 为新标题分配一个未占用的 id | loopback + same-origin |
 | `GET /prompt-manager/sources` | 列出配置的来源及其磁盘状态 | 仅 loopback 对端 |
@@ -282,11 +355,22 @@ Shell: {{shell}}.
 | `POST /prompt-manager/sources/<slug>/apply` | 应用，body 可带 `{ files: [...] }` 只应用子集 | loopback + same-origin |
 | `POST /prompt-manager/sources/<slug>/revert` | 还原上一次应用 | loopback + same-origin |
 | `DELETE /prompt-manager/sources/<slug>` | 删除来源，它导入的条目一起移除 | loopback + same-origin |
+| `GET /prompt-manager/variables` | 变量清单（值 / 来源 / 引用它的提示词）+ 脚本清单 + 脚本目录 | 仅 loopback 对端 |
+| `POST /prompt-manager/variables/run` | 测试运行：`{ name }` 跑已保存的脚本，`{ name, source }` 把草稿写进临时文件跑 | loopback + same-origin |
+| `POST /prompt-manager/variables/refresh` | 重跑全部脚本并刷新值 | loopback + same-origin |
+| `GET /prompt-manager/script/<name>` | `{ source, sha1 }` | 仅 loopback 对端 |
+| `PUT /prompt-manager/script/<name>` | 校验 → 跑 → 落盘 → 注册；body 是 `{ source, fileSha1 }` | loopback + same-origin |
+| `DELETE /prompt-manager/script/<name>` | 删除脚本（它提供的变量冻结在最后一次的值上） | loopback + same-origin |
 
-- **并发保护**：页面读到的 `fileSha1` 会随写入回传，文件在编辑期间被外部改动就返回 409，页面提示重载；新建条目用 `fileSha1: null` 表示"这个 id 必须还没有文件"。
-- **`/status` 顺带回报变量表**：探测在挂载时跑完就固定了，`status` 里的 `variables` 是不用等一个模型步骤就能核对探测结果的地方。
-- **路径安全**：`<id>` 必须匹配 `^[a-z0-9][a-z0-9-]*$`（最长 64 字符），解析后的路径必须仍在 `sections/` 里，否则 400，不会碰文件系统。
+- **网关是两道**：对端必须是 loopback（`127.0.0.0/8` / `::1`），**并且 `Host` 头必须解析成 loopback 主机名**。第二道挡的是 DNS rebinding：`evil.example` 解析到 `127.0.0.1` 时对端地址是 loopback，只有 `Host` 才能说明这请求本来是冲谁来的。两类拒绝都返回 403 并说明是哪一道拒的。
+  写操作再加一道 same-origin（`Origin` 必须是本机自己，缺 `Origin` 的同源请求也放行）。
+  **这不是认证**：同一台机器上的任何进程都能直接调这些路由。它的边界是"浏览器里的别人家的页面进不来"，不是"本机的别的程序进不来" —— 单用户工作机上是合适的取舍，多用户共享主机时就不够了。
+- **并发保护**：页面读到的 `fileSha1` 会随写入回传，文件在编辑期间被外部改动就返回 409，页面提示重载；新建条目用 `fileSha1: null` 表示"这个 id 必须还没有文件"。脚本的保存是同一套栅栏。
+- **脚本保存先跑后写**：`PUT /script/<name>` 会先把源码写到临时文件跑一遍，输出不合法（422）或变量名被别的来源占用（409）就拒绝，磁盘上不会留下坏脚本。测试运行（`/variables/run`）跑的是同一条命令，但不写文件、不注册变量。
+- **`/status` 顺带回报变量表**：探测在挂载时跑完就固定了，`status` 里的 `variables` 是不用等一个模型步骤就能核对探测结果的地方；`maxEntries` 是索引上限（也是页面「新增」按钮拒绝的依据 —— 超过上限的条目正文能存下来，但永远不会被注入）。
+- **路径安全**：`<id>` / `<name>` / `<slug>` 必须匹配各自的字符集（最长 64 字符），解析后的路径必须仍在 `sections/`、`scripts/`、`sources/` 里，否则 400，不会碰文件系统。id 在分发到 handler 之前先校验，所以每个 handler 拿到的都是合法 id，不用各自再防一遍。
 - **原子写**：先写临时文件再 `rename`，中断不会留下半截正文。
+- **单个响应有上限**：拉正文时边读边数，超过 1 MiB 就断开并报 `too-large`；`Content-Length` 撒谎也没用。
 - **添加来源**：Host 只做三件事 —— 校验 `repo`/`ref`/`mirror`（`mirror` 只收 https 源，且不带凭据、查询、锚点）、分配一个未占用的 slug、把规范化后的三样回显给页面。来源列表本身仍由设置页写进 settings，和条目索引同一条通道，所以不存在第二个写入者。重复的 `repo@ref` 直接 409（同一个仓库导两遍会让条目翻倍），来源总数上限 20、每个来源最多 50 条提示词。
 - 没有 web server 的组合（TUI / SDK profile）不会注册这条路由，设置页显示正文目录不可达，提示词注入本身不受影响。
 
@@ -298,20 +382,23 @@ Shell: {{shell}}.
 dsh --profile web --dump-config
 ```
 
-仓库自带七个测试，跑的是构建产物：
+仓库自带十一个测试，跑的是构建产物：
 
 ```bash
 DSH_PACKAGES="$DSH_HOME/profiles/node_modules/@deepseek-ai" npm test
 ```
 
-- `test/smoke.mjs`：把插件挂进真实的 `SystemPrompt` 注册表，断言新装即注入内置的机器环境条目（含包内正文的静态校验、本机正文覆盖内置、base 层索引）、settings 驱动的增删开关与排序、正文来自本地文件 / 订阅快照 / 缺失三种情况、垃圾索引清洗、四个环境变量与严格插值、探测变量（含缺工具与撞名两种情况），以及真实 schemastery 能解析这份索引 schema。
+- `test/smoke.mjs`：把插件挂进真实的 `SystemPrompt` 注册表，断言新装即注入内置的机器环境条目（含包内正文的静态校验、本机正文覆盖内置、base 层索引）、settings 驱动的增删开关与排序、正文来自本地文件 / 订阅快照 / 缺失三种情况、垃圾索引清洗、四个环境变量、探测变量（含缺工具、撞名、以及「同名覆盖是整体替换」三种情况）、未注册引用按字面量渲染并记警告、变量脚本在真实注册表里的完整链路（缓存值挂载即生效、没有缓存的脚本在挂载后台被真解释器测出来并能组装、删掉脚本后值冻结而不是报错），以及真实 schemastery 能解析这份索引 schema。
 - `test/probe.mjs`：探测的取值规则（stdout / stderr / 空输出 / 起不来 / 超时 / 预算用尽）、`pattern` 抽取与三种退回、截断、`probes` 配置的形状校验，末尾再用真 runner 跑两个真命令。
+- `test/guard.mjs`：护栏与真实 `renderPrompt` 对齐 —— 哪些引用会被转义、转义后渲染出来正好是原文、转义标记的数量与幂等性、能解析的引用一个字节不改、替换进去的值不会被二次扫描，以及 `{{{{嵌套}}}}` / `a{{{b` 这类相邻写法。
 - `test/store.mjs`：id 语法、路径不外逃、`absent`/`sha1`/`any` 三种写入栅栏、256 KiB 上限、原子写不留临时文件、目录不可用时的降级。
-- `test/routes.mjs`：用假 req/res 直打路由 handler，覆盖 loopback 与 same-origin 网关、409 栅栏、400/404/405 状态码、遍历 id、超大请求，新增来源的校验（repo / ref / mirror）与 slug 分配、重复来源与来源上限，以及订阅源的六个动作与「订阅正文只读」。
+- `test/routes.mjs`：用假 req/res 直打路由 handler，覆盖两道 loopback 网关（对端与 `Host`）与 same-origin、409 栅栏、400/404/405/422 状态码、非法 id 在分发前被拒、遍历 id、超大请求、写法不成立的引用被拒，新增来源的校验（repo / ref / mirror）与 slug 分配、重复来源、来源上限、关闭的来源返回 409，以及订阅源的六个动作与「订阅正文只读」。
 - `test/source.mjs`：仓库/ref/slug 语法、条目 id 派生（长 slug 下仍逐文件唯一）、清单校验（含路径遍历）、镜像的两种写法与 https-only、atom feed 取 head sha。
-- `test/net.mjs`：起一个本地假镜像，验证 `<镜像>/<url>` 重写、条件请求 304、非 raw URL 直连、HTML 页面识别，以及不可达镜像/超时/不可达 http 与 socks5 代理各自的失败分类。
-- `test/sync.mjs`：staging → current 的三槽轮转、逐文件增删行统计、部分应用、还原（连同被删文件与它的标题/开关）、以及无清单/HTML 镜像/网络失败/路径遍历四类拒绝。
-- `test/client.mjs`：在 Node 里用桩模块 materialize `client/client.js`，用一个带状态的最小渲染器驱动：三个 tab 的分层、订阅徽标、来源页增删与变更块、订阅正文只读与 fork、开关写入 settings、编辑器进出的整条链路。
+- `test/net.mjs`：起一个本地假镜像，验证 `<镜像>/<url>` 重写、条件请求 304、非 raw URL 直连、HTML 页面识别、超限响应被拒，以及不可达镜像/超时/不可达 http 与 socks5 代理各自的失败分类。
+- `test/sync.mjs`：staging → current 的三槽轮转、逐文件增删行统计、部分应用、还原（连同被删文件与它的标题/开关）、本地正文文件缺失时条件请求退回无条件请求、以及无清单/HTML 镜像/网络失败/路径遍历四类拒绝。
+- `test/subscriptions.mjs`：订阅引擎的簿记 —— 正文位置表只算一次（读一个正文不会重读 sources）、移动文件后刷新、关闭的来源拒绝检查/应用/还原但保留已应用的正文、删除来源后条目跟着消失、索引重建时本地条目保留 / 失效来源的条目清掉 / 新条目默认关闭、索引没变就不重复写。
+- `test/scripts.mjs`：脚本输出解析与它的各种拒绝（非 JSON、数组、空对象、嵌套值、非法名、超量）、执行覆盖的解析与形状校验、语法检查、**保存先跑后写**的顺序（坏脚本不落盘）、写入栅栏、失败分类（超时 / 起不来 / 非 0 退出但有输出 / 非 0 且输出坏）、缓存与挂载声明、删除后冻结、路径不外逃，末尾用真 runner 跑一条真脚本并真的杀掉一个死循环。
+- `test/client.mjs`：在 Node 里用桩模块 materialize `client/client.js`，用一个带状态的最小渲染器驱动：三个 tab 的分层、订阅徽标、来源页增删与变更块、订阅正文只读与 fork（fork 之后编辑器拿的是写入产生的 sha1，所以接着保存不会被栅栏拒掉）、删除时先删正文文件再改索引、达到索引上限时「新增」按钮拒绝、开关写入 settings、编辑器进出的整条链路、放弃未保存的草稿会先问一次，以及变量页（来源徽标、新建脚本、测试运行不注册也不碰 settings、保存并启用、插入引用会打开它改的那个正文、未注册与写法不对的引用被标红）。
 
 测试按「本文件 → 当前目录的 `node_modules` → `DSH_PACKAGES`」三级解析 DSH 包，所以在 profile 目录下直接 `node /path/to/dsh-prompt-manager/test/smoke.mjs` 也能跑。测试全部离线：网络那一层用本地假镜像或桩 fetcher 覆盖。
 
@@ -319,14 +406,16 @@ DSH_PACKAGES="$DSH_HOME/profiles/node_modules/@deepseek-ai" npm test
 
 ## 注意
 
-- **条目正文里可以写 `{{变量}}`**，但引用的名字必须已注册。smoke test 会把一段带环境变量的正文完整渲染一遍，未注册的引用会让它直接失败。
-- **section 名是派生出来的**：每条固定注册为 `user:prompt-manager:<id>`，所以只要 id 不重复就不会和 `deployment:persona`、`harness:identity`、`app:web-surface` 这类已注册的 section 撞名。变量名撞上别的行时，这一项被跳过并记一条警告，挂载照常进行 —— 但正文里那个 `{{名字}}` 就会让组装失败，所以看到警告要么改名，要么把引用删掉。
+- **条目正文里可以写 `{{变量}}`**，但引用的名字要已注册。没注册的引用不会炸掉组装（插件会把它转义成字面量并记一条警告，见「未注册的引用按字面量渲染」），但**别把它当兜底**：那一段注入的就真是 `{{名字}}` 原文，模型看到的是一句带大括号的话，而不是你要的机器事实。
+- **section 名是派生出来的**：每条固定注册为 `user:prompt-manager:<id>`，所以只要 id 不重复就不会和 `deployment:persona`、`harness:identity`、`app:web-surface` 这类已注册的 section 撞名。变量名撞上别的行时，这一项被跳过并记一条警告，挂载照常进行 —— 正文里那个 `{{名字}}` 于是变成字面量（同样有一条警告），等于这一行没提供它，所以看到警告要么给自己的变量改名，要么把引用删掉。
 - **`package.json` 里的 `dsh.client` 和 `client/client.js` 必须同时存在**：只声明浏览器半边而没有 bundle，浏览器插件表在挂载时会直接报错。两者的包名必须都叫 `dsh-prompt-manager`。
 - **改 `cordis.patch.yml` 会热加载**：`patchReload: live` 时 HMR 会为这个 patch 文件单独起一个精确 watcher，所以增删 row 不用重启。
 - **改插件代码要重启，改浏览器半边不用**：DSH 不监听插件模块文件，而 loader 按 URL 缓存 ESM 模块，所以改完 `lib/` 必须重启 profile。
   浏览器半边不同：`dsh-client-hmr` 会轮询已注册 bundle 的文件基线，字节一变就调 `clientModules.rebuilt(id)` 并往 `/plugins/events` 推一帧 `rebuilt`，页面收到后 `invalidate(id, rev)` + `entry.refresh()` —— **原地重载，不用刷新页面**（实测：往 `client/client.js` 里加 25 字节，1 秒内就收到两帧，旧 rev → 新 rev）。
   部署**没挂** `dsh-client-hmr` 时没有这条链路：bundle 的 rev 不变、URL 带 `cache-control: immutable`，所以刷新页面也可能继续吃到旧副本，只能重启 profile。
 - **改正文不用重启**：`sections/*.md` 每次组装现读；订阅正文在点过「应用」之后，也是下一次组装就生效。
+- **加变量脚本不用重启**：脚本是数据文件，保存时插件自己注册新变量（实测：挂载之后调 `systemPrompt.variable()` 有效，下一次组装就读得到）。只有改 `lib/` 里的代码才要重启 profile。
+- **脚本值不随会话变**：值在挂载或你点「重新测量」时测一次就固定下来 —— 这既是性能考虑，也是 KV cache 考虑：随每次组装变化的变量会让缓存前缀每步失效。会话相关的事实（模型、cwd 之类）归注册它们的插件所有，不在这个插件里造。
 - **KV cache**：section 文本或顺序一变，缓存前缀从该点失效。文本稳定时开销只有一次。
 
 ## 结构
@@ -334,9 +423,11 @@ DSH_PACKAGES="$DSH_HOME/profiles/node_modules/@deepseek-ai" npm test
 ```
 src/index.ts                插件入口：设置索引注册、section 调和、变量、路由装配
 src/entries.ts              条目模型、id 语法、settings schema、内置条目与包内正文
-src/store.ts                正文文件存储（路径限定、原子写、sha1 栅栏）
+src/store.ts                正文文件存储（路径限定、原子写、sha1 栅栏；脚本目录复用同一份）
+src/scripts.ts              变量脚本：目录、异步执行、JSON 校验、缓存、保存/运行/删除
 src/source.ts               订阅源：slug/id 派生、清单校验、镜像拼接、URL 构造
 src/probe.ts                挂载时探测：命令取值规则、配置校验、结果兜底、默认探测组
+src/guard.ts                引用护栏：把注册表解析不了的 {{...}} 转义成字面量
 src/net.ts                  唯一出网口径：代理 dispatcher 与条件 GET
 src/sync.ts                 源的三槽轮转：检查、应用、还原、state.json
 src/subscriptions.ts        订阅引擎：源列表、检查/应用/还原、索引同步
@@ -346,11 +437,15 @@ lib/                        构建产物，loader 实际加载的文件
 test/smoke.mjs              宿主行为冒烟测试（跑的是构建产物）
 test/store.mjs              存储测试
 test/probe.mjs              探测测试（注入 runner，末尾两个真命令）
+test/guard.mjs              引用护栏测试（与真实 renderPrompt 交叉验证）
 test/routes.mjs             路由测试
 test/source.mjs             订阅源与清单测试
 test/net.mjs                出网与代理测试（本地假镜像）
 test/sync.mjs               检查/应用/还原测试
+test/subscriptions.mjs      订阅引擎测试（位置表缓存、来源开关、索引重建）
+test/scripts.mjs            变量脚本测试（注入 runner，末尾真脚本与真超时）
 test/client.mjs             浏览器 bundle 测试
+tools/check-build.mjs       提交前核对 lib/ 是不是 src/ 的新构建
 examples/cordis.patch.yml   可直接抄进 profile 的 patch 行
 environment.md              内置的机器环境条目正文（随包发布，可被本机正文覆盖）
 tsconfig.json               构建与类型检查配置
@@ -364,10 +459,13 @@ tsconfig.json               构建与类型检查配置
 npm install          # 装 typescript 与 DSH 类型包；prepare 会自动构建一次
 npm run build        # src/*.ts -> lib/*.js + lib/types/*.d.ts，并检查 client/client.js
 npm run typecheck    # tsc --noEmit
-npm test             # 先构建，再跑四个测试
+npm test             # 先构建，再跑十一个测试
+npm run check:build  # 构建后核对 lib/ 没有未提交的改动（提交前跑）
 ```
 
-`lib/` 与 `client/` 都提交进仓库，所以克隆下来就能按相对路径挂载，不需要本地工具链。改完源码记得 `npm run build` 并一起提交。
+`lib/` 与 `client/` 都提交进仓库，所以克隆下来就能按相对路径挂载，不需要本地工具链 —— 这正是 `check:build` 存在的原因：**`lib/` 与 `src/` 必须同一个提交**，否则克隆出来挂载的是一份和源码对不上的代码（多出一个 `lib/foo.js` 而没被 `git add` 时尤其隐蔽，挂载会直接 `ERR_MODULE_NOT_FOUND`）。改完源码：`npm run build && npm test && npm run check:build && git add src lib client test README.md && git commit`。
+
+在 profile 里用相对路径挂载时，`vendor/dsh-prompt-manager/` 是**另一份拷贝**，仓库里的改动不会自动过去：`npm run build` 之后要把 `lib/`（以及 `client/`、`environment.md` 这些随包发布的东西）同步过去，并重启 profile（宿主半边不热加载）。
 
 宿主产物只 import `node:crypto` / `node:fs` / `node:module` / `node:os` / `node:path` / `node:url` / `node:http` 这几个内置模块；settings 需要的那份 `@deepseek-ai/schemastery` 是**运行时按需解析**的（取不到就不注册设置命名空间，设置页无从编辑，宿主照常挂载空索引），DSH 的包都只是 devDependencies，用来取类型。
 

@@ -117,7 +117,7 @@ export interface StagedPlan {
 /** A check that could not conclude. */
 export class CheckError extends Error {
   /** Machine-readable reason. */
-  readonly reason: 'manifest' | 'network' | 'mirror' | 'too-large' | 'unknown-source' | 'nothing-staged'
+  readonly reason: 'manifest' | 'network' | 'mirror' | 'too-large' | 'unknown-source' | 'nothing-staged' | 'disabled'
 
   /**
    * @param reason - machine-readable reason.
@@ -402,9 +402,19 @@ export async function checkSource(input: {
 
   for (const prompt of prompts) {
     const known = state.files[prompt.file]
-    const response = await fetchOrThrow(fetcher, rawUrl(source.repo, source.ref, prompt.file), known?.etag)
+    // A conditional request is only worth sending when the copy it would
+    // validate is on disk. With the body file gone — deleted by hand, or lost
+    // between two applies — a 304 would answer with no content at all, and
+    // staging that empty answer would silently blank the entry for good. So the
+    // validator is dropped and the file is fetched in full instead.
+    const local = workspace.read('current', prompt.file)
+    const response = await fetchOrThrow(
+      fetcher,
+      rawUrl(source.repo, source.ref, prompt.file),
+      local === undefined ? undefined : known?.etag,
+    )
     const id = entryIdFor(source.id, prompt.file)
-    if (response.status === 304 && known !== undefined && workspace.read('current', prompt.file) !== undefined) continue
+    if (response.status === 304) continue
     if (response.status === 404) {
       warnings.push(`${prompt.file} 在远端不存在，已跳过`)
       continue
@@ -417,7 +427,7 @@ export async function checkSource(input: {
     }
     workspace.stage(prompt.file, response.text)
     if (response.etag !== undefined) etags[prompt.file] = response.etag
-    const counts = diffCounts(workspace.read('current', prompt.file) ?? '', response.text)
+    const counts = diffCounts(local ?? '', response.text)
     const change: PlannedChange = {
       path: prompt.file,
       id,

@@ -14,7 +14,9 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { ResolvedBody } from './entries.js';
 import { PromptStore } from './store.js';
+import { type PromptScripts } from './scripts.js';
 import type { Subscriptions } from './subscriptions.js';
+import type { VariableView } from './index.js';
 /** The single prefix every route below lives under. */
 export declare const ROUTE_PREFIX = "/prompt-manager";
 /** What the route needs from the plugin that owns the index. */
@@ -29,12 +31,15 @@ export interface PromptRouteHost {
     warn(message: string): void;
     /** The subscription engine, for the source routes. */
     subscriptions: Subscriptions;
+    /** The user-script engine, for the variable and script routes. */
+    scripts: PromptScripts;
     /**
-     * The prompt variables this row registered, with the values in force. Probes
-     * run once at mount, so this is how a deployment checks what they measured
-     * without making a model step.
+     * The prompt variables in force, with their provenance and the entries that
+     * reference them. Probes and cached script runs are read once at mount, so
+     * this is how a deployment checks what is actually being interpolated without
+     * making a model step.
      */
-    variables(): Record<string, string>;
+    variables(): VariableView[];
 }
 /**
  * Register the prompt-store route.

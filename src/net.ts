@@ -60,15 +60,66 @@ export class FetchFailure extends Error {
   }
 }
 
+/** The reader slice of a response body stream. */
+interface BodyReader {
+  /** Next chunk, or a `done` marker. */
+  read(): Promise<{ done: boolean; value?: Uint8Array | undefined }>
+  /** Give up on the rest of the stream. */
+  cancel(): Promise<void>
+}
+
 /** The slice of undici this module uses. */
 interface UndiciLike {
   fetch: (url: string, init?: Record<string, unknown>) => Promise<{
     status: number
     headers: { get(name: string): string | null }
     text(): Promise<string>
+    /** Present on every real fetch; absent only in a hand-rolled stand-in. */
+    body?: { getReader(): BodyReader } | null | undefined
   }>
   ProxyAgent: new (uri: string) => unknown
   Socks5ProxyAgent?: new (uri: string) => unknown
+}
+
+/** The response slice the bounded reader needs. */
+type StreamedResponse = Awaited<ReturnType<UndiciLike['fetch']>>
+
+/**
+ * Read a response body, refusing anything past {@link READ_LIMIT}.
+ *
+ * The cap is enforced while reading, not after: a mirror — or an upstream file —
+ * that answers with something enormous must not be able to make the host hold
+ * all of it in memory first.
+ *
+ * @param response - the response to read.
+ * @param target - the URL, for the failure message.
+ * @returns the body text.
+ * @throws {FetchFailure} when the body exceeds the cap.
+ */
+async function readBounded(response: StreamedResponse, target: string): Promise<string> {
+  const body = response.body
+  if (body === undefined || body === null) {
+    const text = await response.text()
+    if (Buffer.byteLength(text, 'utf8') > READ_LIMIT) {
+      throw new FetchFailure('too-large', `${target}: response exceeds ${String(READ_LIMIT)} bytes`)
+    }
+    return text
+  }
+  const reader = body.getReader()
+  const chunks: Buffer[] = []
+  let size = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (value === undefined) continue
+    size += value.byteLength
+    if (size > READ_LIMIT) {
+      await reader.cancel().catch(() => undefined)
+      throw new FetchFailure('too-large', `${target}: response exceeds ${String(READ_LIMIT)} bytes`)
+    }
+    chunks.push(Buffer.from(value))
+  }
+  return Buffer.concat(chunks).toString('utf8')
 }
 
 /** One request path, with its dispatcher already decided. */
@@ -160,8 +211,7 @@ export function createFetcher(config: { proxy: ProxyConfig; mirror: string }): F
       const etag = response.headers.get('etag') ?? undefined
       const contentType = response.headers.get('content-type') ?? undefined
       if (response.status === 304) return { status: 304, text: '', etag, contentType }
-      const text = await response.text()
-      if (text.length > READ_LIMIT) throw new FetchFailure('too-large', `${target}: response exceeds ${String(READ_LIMIT)} bytes`)
+      const text = await readBounded(response, target)
       return { status: response.status, text, etag, contentType }
     },
   }
