@@ -145,10 +145,36 @@ try {
   assert.deepEqual(steady, synced, 'a second pass must agree')
   assert.equal(host.written.length, 1, 'and must not write an unchanged index again')
 
+  // An entry whose id moved — a manifest that started declaring its own `id`, or
+  // a file renamed with its body edited too — is still the same prompt, so what
+  // a person gave the old id comes with it instead of starting the entry over.
+  host.entriesList = [
+    { id: 'local', title: '本地条目', order: 10, enabled: true },
+    { id: 'src-b-old', title: '人工起的标题', order: 70, enabled: true, source: 'src-b' },
+  ]
+  host.sourcesList = [source('src-b')]
+  snapshot(
+    'src-b',
+    { 'prompts/new.md': { id: 'src-b-new', renamedFromId: 'src-b-old', enabled: true } },
+    { 'prompts/new.md': 'BODY-B' },
+  )
+  engine.refreshLocations()
+
+  const carried = await engine.syncEntries()
+  assert.deepEqual(carried, [
+    { id: 'local', title: '本地条目', order: 10, enabled: true },
+    { id: 'src-b-new', title: '人工起的标题', order: 70, enabled: true, source: 'src-b' },
+  ], 'the title, placement, and switch move to the id the entry has now')
+  assert.ok(
+    carried.every((entry, index) => index === 0 || entry.id !== 'src-b-old'),
+    'and the id it left behind is not in the index twice',
+  )
+
   console.log('subscriptions ok')
   console.log('  locations   the body map is computed once, refreshed when the engine moves files')
   console.log('  switch      a switched-off source takes no check / apply / revert, and keeps its bodies')
   console.log('  index       locals survive, stale sources lose their entries, new entries arrive off')
+  console.log('  identity    an entry whose id moved keeps the title, placement, and switch it had')
 } finally {
   rmSync(ROOT, { recursive: true, force: true })
 }

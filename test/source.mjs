@@ -10,6 +10,7 @@ import assert from 'node:assert/strict'
 
 import {
   entryIdFor,
+  entryIdForPrompt,
   headAtomUrl,
   isRepo,
   isRef,
@@ -51,6 +52,18 @@ assert.notEqual(
   entryIdFor(longSlug, 'prompts/two.md'),
   'two files of one long-named source must keep distinct ids',
 )
+
+assert.equal(
+  entryIdForPrompt('src', { file: 'prompts/whatever.md', id: 'contract' }),
+  'src-contract',
+  'a declared id is the entry id, whatever the file happens to be called',
+)
+assert.equal(
+  entryIdForPrompt('src', { file: 'prompts/contract.md' }),
+  entryIdFor('src', 'prompts/contract.md'),
+  'without a declaration the file name decides, exactly as before',
+)
+assert.equal(entryIdForPrompt(longSlug, { file: 'prompts/whatever.md', id: 'one' }).length, 64, 'a declared id obeys the cap too')
 
 assert.ok(isMovableRef('main'), 'a branch is worth probing')
 assert.ok(!isMovableRef('0'.repeat(40)), 'a pinned commit is not worth probing')

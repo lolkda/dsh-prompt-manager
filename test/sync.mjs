@@ -297,6 +297,175 @@ try {
   assert.deepEqual(stubbornOutcome.changes, [], 'an unasked-for 304 stages nothing')
   assert.equal(existsSync(join(stubborn.stagingDir, 'prompts/a.md')), false, 'and leaves no empty body in staging')
 
+  // ── a file renamed upstream ──────────────────────────────────────────────────
+
+  /**
+   * Take one source through two revisions, the first one applied.
+   * @param slug - source slug and workspace directory.
+   * @param before - the first revision: manifest prompts and their bodies.
+   * @param after - the second revision, checked but not applied.
+   * @returns the second check, and the workspace with the first one in force.
+   */
+  async function revised(slug, before, after) {
+    const space = new SourceWorkspace(ROOT, slug)
+    const source = { id: slug, repo: 'o/r', ref: 'main', mirror: '', enabled: true }
+    /**
+     * One body's route: a string is a plain 200, an object is a whole response,
+     * and a function is called with the request options so a case can answer 304.
+     */
+    const route = (body) => {
+      if (typeof body === 'function') return body
+      if (typeof body === 'string') return { status: 200, text: body }
+      return { status: 200, ...body }
+    }
+    const routesFor = (revision) => ({
+      [ATOM_URL]: { status: 404 },
+      [MANIFEST_URL]: manifest(revision.prompts),
+      ...Object.fromEntries(Object.entries(revision.bodies).map(([file, body]) => [
+        rawUrl('o/r', 'main', file),
+        route(body),
+      ])),
+    })
+    const opening = await checkSource({ source, workspace: space, fetcher: fakeFetcher(routesFor(before)) })
+    assert.equal(opening.upToDate, false, `${slug}: the first revision must stage something`)
+    const landed = applyChanges({
+      workspace: space,
+      state: space.readState(),
+      plan: space.readPlan(),
+      source,
+      nowIso: '2026-01-01T00:00:00.000Z',
+    })
+    space.writeState(landed.state)
+    space.clearStaging()
+    const second = await checkSource({ source, workspace: space, fetcher: fakeFetcher(routesFor(after)) })
+    return { space, source, second, opening }
+  }
+
+  const CONTRACT = '# 契约\n\n上游正文\n'
+
+  // The signal that needs nobody's cooperation: the same body under a new name.
+  const moved = await revised(
+    'ren',
+    { prompts: [{ file: 'prompts/contract.md', title: '契约', order: 30 }], bodies: { 'prompts/contract.md': CONTRACT } },
+    { prompts: [{ file: 'prompts/ctf.md', title: '契约', order: 30 }], bodies: { 'prompts/ctf.md': CONTRACT } },
+  )
+  assert.equal(moved.opening.changes[0].id, 'ren-contract', 'the first revision gets the id its file name earns')
+  const arrives = moved.second.changes.find((change) => change.kind === 'added')
+  const leaves = moved.second.changes.find((change) => change.kind === 'removed')
+  assert.equal(arrives.id, 'ren-contract', 'the renamed file inherits the id the preset knows')
+  assert.equal(arrives.renamedFrom, 'prompts/contract.md', 'and says which path it came from')
+  assert.equal(leaves.id, 'ren-contract', 'the dropped path is reported under the same identity')
+  assert.equal(leaves.renamedTo, 'prompts/ctf.md', 'pointing at where it went')
+  assert.equal(
+    moved.second.warnings.some((warning) => warning.includes('改名')),
+    false,
+    'a recognised rename is not a warning',
+  )
+
+  // The pair is one move: a partial apply that names only the new path must not
+  // leave two state records claiming the same entry id.
+  const halfMoved = applyChanges({
+    workspace: moved.space,
+    state: moved.space.readState(),
+    plan: moved.space.readPlan(),
+    source: moved.source,
+    selected: ['prompts/ctf.md'],
+    nowIso: '2026-01-02T00:00:00.000Z',
+  })
+  assert.deepEqual(
+    halfMoved.applied.map((change) => change.path).sort(),
+    ['prompts/contract.md', 'prompts/ctf.md'],
+    'selecting one side of a rename applies both',
+  )
+  assert.equal(halfMoved.state.files['prompts/contract.md'], undefined, 'the old path leaves the bookkeeping')
+  assert.equal(halfMoved.state.files['prompts/ctf.md'].id, 'ren-contract', 'and the id survives the move')
+  assert.equal(readFileSync(join(moved.space.currentDir, 'prompts/ctf.md'), 'utf8'), CONTRACT, 'with its body in place')
+
+  // A body edited in the same commit is not recognisable as the same prompt, and
+  // the check must not guess: it becomes a new entry, which is what the report
+  // says and what the composition page shows as a member that no longer exists.
+  const edited = await revised(
+    'edit',
+    { prompts: [{ file: 'prompts/contract.md' }], bodies: { 'prompts/contract.md': CONTRACT } },
+    { prompts: [{ file: 'prompts/ctf.md' }], bodies: { 'prompts/ctf.md': `${CONTRACT}加了一句\n` } },
+  )
+  assert.equal(
+    edited.second.changes.find((change) => change.kind === 'added').id,
+    'edit-ctf',
+    'a rename with a changed body cannot be matched, so it arrives as its own entry',
+  )
+
+  // Two files may carry one body — a copy, a translation left identical — and
+  // then no hash can say which of them inherited the id.
+  const ambiguous = await revised(
+    'amb',
+    { prompts: [{ file: 'prompts/contract.md' }], bodies: { 'prompts/contract.md': CONTRACT } },
+    {
+      prompts: [{ file: 'prompts/x.md' }, { file: 'prompts/y.md' }],
+      bodies: { 'prompts/x.md': CONTRACT, 'prompts/y.md': CONTRACT },
+    },
+  )
+  assert.deepEqual(
+    ambiguous.second.changes.filter((change) => change.kind === 'added').map((change) => change.id),
+    ['amb-x', 'amb-y'],
+    'an ambiguous body is left to the file names rather than guessed at',
+  )
+  assert.ok(
+    ambiguous.second.warnings.some((warning) => warning.includes('不敢确定是改名')),
+    `the declined match must be reported, got: ${ambiguous.second.warnings.join(' | ')}`,
+  )
+
+  // The declaration that survives a rename *and* an edit: `id` is identity.
+  const declared = await revised(
+    'dec',
+    { prompts: [{ file: 'prompts/old.md', id: 'stable', title: '稳定' }], bodies: { 'prompts/old.md': 'V1' } },
+    { prompts: [{ file: 'prompts/new.md', id: 'stable', title: '稳定' }], bodies: { 'prompts/new.md': 'V2（改过）' } },
+  )
+  assert.equal(declared.opening.changes[0].id, 'dec-stable', 'a declared id outranks the file name')
+  const declaredArrives = declared.second.changes.find((change) => change.kind === 'added')
+  const declaredLeaves = declared.second.changes.find((change) => change.kind === 'removed')
+  assert.equal(declaredArrives.id, 'dec-stable', 'and it holds while the file is renamed')
+  assert.equal(declaredArrives.renamedFrom, 'prompts/old.md', 'the move is still reported as one')
+  assert.equal(declaredLeaves.renamedTo, 'prompts/new.md', 'from both sides')
+
+  // Declaring an id for a file that is already here moves the entry onto it —
+  // which is how a preset that lost an id learns it again. The body is untouched,
+  // so the mirror answers 304 and the move has to be noticed anyway.
+  const repinned = await revised(
+    'pin',
+    { prompts: [{ file: 'prompts/a.md', title: 'A' }], bodies: { 'prompts/a.md': { text: 'BODY', etag: 'etag-a' } } },
+    {
+      prompts: [{ file: 'prompts/a.md', id: 'was-here', title: 'A' }],
+      bodies: {
+        'prompts/a.md': (options) => (options.etag === 'etag-a'
+          ? { status: 304, text: '', etag: 'etag-a' }
+          : { status: 200, text: 'BODY' }),
+      },
+    },
+  )
+  const repinnedChange = repinned.second.changes[0]
+  assert.equal(repinned.second.changes.length, 1, 'an id that moved alone is one change')
+  assert.equal(repinnedChange.id, 'pin-was-here', 'the declared id replaces the derived one')
+  assert.equal(repinnedChange.kind, 'changed', 'while the file itself did not move')
+  assert.equal(repinnedChange.added + repinnedChange.removed, 0, 'and no line did either')
+  const repinnedLand = applyChanges({
+    workspace: repinned.space,
+    state: repinned.space.readState(),
+    plan: repinned.space.readPlan(),
+    source: repinned.source,
+    nowIso: '2026-01-03T00:00:00.000Z',
+  })
+  assert.equal(
+    repinnedLand.state.files['prompts/a.md'].renamedFromId,
+    'pin-a',
+    'the apply records the id the entry had, so the index can move its title and switch along',
+  )
+  assert.equal(
+    repinnedLand.state.files['prompts/a.md'].etag,
+    'etag-a',
+    'and keeps the validator the unchanged body was fetched under',
+  )
+
   // ── the workspace refuses to escape itself ───────────────────────────────────
 
   const guard = new SourceWorkspace(ROOT, 'guard')
@@ -308,6 +477,7 @@ try {
   console.log('  accounting  added / changed / removed with line counts, partial apply honoured')
   console.log('  revert      the replaced body and the dropped file both come back')
   console.log('  conditional a vanished body is refetched, and a 304 never stages an empty one')
+  console.log('  rename      a new path inherits the old id, the pair applies together, a declared id is identity')
   console.log('  failures    no manifest, an HTML mirror, a missing file, a traversal path')
 } finally {
   rmSync(ROOT, { recursive: true, force: true })

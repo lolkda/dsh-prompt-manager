@@ -386,6 +386,34 @@ try {
     'and the plugin must report the id it could not resolve',
   )
 
+  // A preset that exists while a member does not is the quieter half of the same
+  // problem: the preset still switches, the other members still inject, and the
+  // missing one simply stops appearing — exactly what an upstream rename looks
+  // like from here. It has to be said out loud, once.
+  const danglingBefore = driven.warnings.length
+  settings.state.value = {
+    ...settings.state.value,
+    activePreset: 'partial',
+    presets: [{ id: 'partial', name: '缺一条', entries: ['early', 'renamed-away'] }],
+  }
+  settings.state.watcher()
+  const partial = await driven.read()
+  assert.ok(partial.prompt.includes('EARLY-BODY'), 'the members that do exist still inject')
+  const dangling = driven.warnings.slice(danglingBefore).filter((warning) => warning.includes('renamed-away'))
+  assert.equal(dangling.length, 1, 'the member no entry answers to is reported exactly once')
+  assert.ok(dangling[0].includes('partial'), 'and the report names the preset it is missing from')
+
+  // Reporting is keyed on which ids are missing, so an unchanged broken preset
+  // says it once rather than on every assembly.
+  const settled = driven.warnings.length
+  settings.state.watcher()
+  await driven.read()
+  assert.equal(
+    driven.warnings.slice(settled).filter((warning) => warning.includes('renamed-away')).length,
+    0,
+    'a preset left broken must not repeat itself on every settings sync',
+  )
+
   // ── prompt variables ────────────────────────────────────────────────────────
 
   const facts = environmentFacts()
@@ -898,6 +926,7 @@ try {
   console.log(`  sections    ${addedNames.join(' -> ')}`)
   console.log('  index       settings-driven add / enable / disable / order / sanitize')
   console.log('  presets     one activePreset write swaps the set, unknown id falls back to the switches')
+  console.log('  members     a preset naming an entry this machine lacks is reported once, not every step')
   console.log('  bodies      store file, subscribed snapshot, and a bodyless entry')
   console.log(`  variables   os=${facts.os} platform=${facts.platform} arch=${facts.arch} release=${facts.os_release}`)
   console.log(`              home=${facts.home} dsh_home=${facts.dsh_home} user=${facts.user} host=${facts.host}`)

@@ -1714,6 +1714,13 @@ window.__ModuleLoader__.load({
                   }),
                   h('span', { key: 'path', className: 'dsh-prompt-manager__changePath' },
                     `${change.kind === 'removed' ? '（删除）' : ''}${change.path}`),
+                  // A rename is one move across two rows. Saying so is what keeps
+                  // it from looking like a deletion plus an unrelated new prompt —
+                  // and it is why picking either row applies both.
+                  change.renamedFrom === undefined && change.renamedTo === undefined
+                    ? null
+                    : h('span', { key: 'rename', className: 'dsh-prompt-manager__note' },
+                      change.renamedFrom !== undefined ? `由 ${change.renamedFrom} 改名` : `改名为 ${change.renamedTo}`),
                   h('span', { key: 'delta', className: 'dsh-prompt-manager__delta' }, `+${String(change.added)} / −${String(change.removed)}`),
                 ])),
                 h('div', { key: 'apply', className: 'dsh-prompt-manager__actions' }, [

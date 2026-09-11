@@ -414,7 +414,12 @@ function materialize(React) {
             slug: 'o-r',
             upToDate: false,
             headSha: 'a'.repeat(40),
-            changes: [{ path: 'prompts/a.md', id: 'o-r-a', kind: 'changed', added: 2, removed: 1 }],
+            changes: [
+              { path: 'prompts/a.md', id: 'o-r-a', kind: 'changed', added: 2, removed: 1 },
+              // A rename reaches the page as two rows that are one move.
+              { path: 'prompts/ctf.md', id: 'o-r-contract', kind: 'added', added: 4, removed: 0, renamedFrom: 'prompts/contract.md' },
+              { path: 'prompts/contract.md', id: 'o-r-contract', kind: 'removed', added: 0, removed: 4, renamedTo: 'prompts/ctf.md' },
+            ],
             prompts: [],
             warnings: [],
           }),
@@ -713,6 +718,10 @@ assert.ok(
 )
 assert.ok(inspect(renderer.tree).text.includes('prompts/a.md'), 'the change list names the file that moved')
 assert.ok(inspect(renderer.tree).text.includes('+2'), 'and how much moved')
+assert.ok(
+  inspect(renderer.tree).text.includes('由 prompts/contract.md 改名'),
+  'a rename is named as one, so it does not read as a deletion plus an unrelated new prompt',
+)
 
 // ── a subscribed entry is read-only, with a way out ───────────────────────────
 

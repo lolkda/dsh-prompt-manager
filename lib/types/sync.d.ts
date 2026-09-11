@@ -17,6 +17,14 @@ import { type ManifestPrompt, type PromptSource } from './source.js';
 export interface SourceFileState {
     /** Local entry id this file became. */
     id: string;
+    /**
+     * The id this file carried before the apply that recorded it, when that apply
+     * changed the id — a manifest that started declaring its own `id`, or a file
+     * whose name changed. The index reads it to move the title, placement, and
+     * switch a person chose onto the new id instead of starting the entry over.
+     * Dropped by the next apply of the same path, so it never outlives its use.
+     */
+    renamedFromId?: string;
     /** Display title the manifest asked for, when it asked for one. */
     title?: string;
     /** Placement the manifest asked for, when it asked for one. */
@@ -65,6 +73,16 @@ export interface PlannedChange {
     added: number;
     /** Lines the old body had and the new one does not. */
     removed: number;
+    /**
+     * On an added file: the path this file was renamed from, when the check
+     * recognised it as a rename. The pair is applied together or not at all.
+     */
+    renamedFrom?: string;
+    /**
+     * On a removal: the path this file was renamed to. Present exactly when the
+     * matching added change carries {@link renamedFrom}.
+     */
+    renamedTo?: string;
 }
 /** What a check concluded. */
 export interface CheckOutcome {

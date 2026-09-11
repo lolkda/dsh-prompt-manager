@@ -99,6 +99,26 @@ export declare function stemOf(file: string): string;
  */
 export declare function entryIdFor(sourceId: string, file: string): string;
 /**
+ * The local entry id one stem becomes.
+ *
+ * Kept separate from {@link entryIdFor} because a manifest may declare the stem
+ * itself: `id` is the file's identity, not a label, so a file may be renamed in
+ * the repository while its local entry — and every preset naming it — stays put.
+ *
+ * @param sourceId - owning source slug.
+ * @param stem - declared id, or a file's own stem.
+ * @returns `<sourceId>-<stem>`, within the entry-id grammar.
+ */
+export declare function entryIdForStem(sourceId: string, stem: string): string;
+/**
+ * The entry id one manifest prompt becomes, its own declaration first.
+ *
+ * @param sourceId - owning source slug.
+ * @param prompt - the manifest entry.
+ * @returns the local entry id.
+ */
+export declare function entryIdForPrompt(sourceId: string, prompt: ManifestPrompt): string;
+/**
  * Validate and normalize a repository manifest.
  *
  * The manifest is untrusted input from the internet: every field is checked,
