@@ -51,6 +51,16 @@ window.__ModuleLoader__.load({
     /** Style tag identity, so unload removes exactly this bundle's styles. */
     const STYLE_ID = 'dsh-prompt-manager/Section.css'
 
+    /**
+     * This plugin's own repository, shown on the section's heading line.
+     *
+     * The bundle is hand-written and has no build step that could import
+     * `package.json`, so the two are kept in step by hand — this mirrors the
+     * `repository` field there.
+     */
+    const REPO_SLUG = 'lolkda/dsh-prompt-manager'
+    const REPO_URL = `https://github.com/${REPO_SLUG}`
+
     // Every value below is copied from the shell's own settings pages — the
     // plugin page (heading/intro/tab row/card list) and the model page (row
     // card, chip, row buttons, dashed add buttons, status dot) — so this section
@@ -87,8 +97,8 @@ window.__ModuleLoader__.load({
 .dsh-prompt-manager__cardSide{display:inline-flex;align-items:center;gap:8px;margin-left:auto;flex:0 0 auto}
 .dsh-prompt-manager__title{font-size:14px;font-weight:500;line-height:22px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsh-prompt-manager__meta{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dsh-prompt-manager__sourceLink{color:inherit;text-decoration:underline;text-decoration-color:var(--dsw-alias-border-l2);text-underline-offset:2px}
-.dsh-prompt-manager__sourceLink:hover{color:var(--dsw-alias-label-primary);text-decoration-color:currentColor}
+.dsh-prompt-manager__sourceLink{color:var(--dsw-alias-link);cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+.dsh-prompt-manager__sourceLink:hover{color:var(--dsw-alias-label-primary)}
 .dsh-prompt-manager__iconButton{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;border-radius:14px;background:0 0;color:var(--dsw-alias-label-secondary);cursor:pointer}
 .dsh-prompt-manager__iconButton:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .dsh-prompt-manager__inlineMenu{display:flex;flex-direction:column;gap:2px;padding:6px;margin:0 0 6px 28px;border:.5px solid var(--dsw-alias-border-l3);border-radius:12px}
@@ -2039,8 +2049,18 @@ window.__ModuleLoader__.load({
 
       return h('div', { className: 'dsh-prompt-manager' }, [
         h('h1', { key: 'heading', className: 'dsh-prompt-manager__heading' }, '提示词'),
-        h('p', { key: 'lede', className: 'dsh-prompt-manager__intro' },
-          '每条提示词都是一个独立的 system prompt section；开关、排序、正文改动在下一个模型步骤生效，不需要重启。'),
+        h('p', { key: 'lede', className: 'dsh-prompt-manager__intro' }, [
+          '每条提示词都是一个独立的 system prompt section；开关、排序、正文改动在下一个模型步骤生效，不需要重启。',
+          '插件源码：',
+          h('a', {
+            key: 'repo',
+            className: 'dsh-prompt-manager__sourceLink',
+            href: REPO_URL,
+            target: '_blank',
+            rel: 'noreferrer',
+            title: `${REPO_SLUG}（这个插件的仓库）`,
+          }, REPO_SLUG),
+        ]),
         h('p', { key: 'dir', className: 'dsh-prompt-manager__note' }, [
           `已启用 ${String(enabledCount)}/${String(entries.length)}`,
           store !== null && typeof store.dir === 'string' ? `正文目录：${store.dir}` : '',

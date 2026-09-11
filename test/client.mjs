@@ -533,6 +533,15 @@ assert.ok(listing.text.includes('新增提示词'), 'the list must offer an add 
 assert.ok(listing.text.includes('下一个模型步骤生效'), 'the list must say when a change takes effect')
 assert.ok(listing.text.includes('/tmp/prompt-manager/sections'), 'the list must show where the bodies live')
 
+// The plugin's own repository: this page is somebody's work, and the one place
+// they can point at it is here.
+const repoLink = inspect(tree, 'a').nodes.find(
+  (node) => node.props.href === 'https://github.com/lolkda/dsh-prompt-manager',
+)
+assert.ok(repoLink !== undefined, 'the section must link to its own repository')
+assert.equal(textOf(repoLink), 'lolkda/dsh-prompt-manager', 'the link text is the repository path')
+assert.equal(repoLink.props.target, '_blank', 'and opens away from the settings panel')
+
 const controls = inspect(tree, 'button').nodes.map((node) => textOf(node))
 assert.ok(controls.some((label) => label.includes('来源（')), 'the list must link to the sources page')
 const tabs = inspect(tree).text
@@ -678,6 +687,7 @@ assert.equal(badges().length, 1, 'exactly the subscribed row carries the badge')
 // The repository is the row's one real link: it is the address a person wants
 // when they go looking at what upstream actually says.
 const sourceLinks = inspect(renderer.tree, 'a').nodes
+  .filter((node) => String(node.props.href).includes('github.com/o/r'))
 assert.equal(sourceLinks.length, 1, 'exactly the subscribed row links out')
 assert.equal(textOf(sourceLinks[0]), 'o/r', 'the link text is the repository itself')
 assert.equal(sourceLinks[0].props.href, 'https://github.com/o/r', 'the link points at the configured repository')
@@ -1119,7 +1129,7 @@ console.log('client ok')
 console.log('  bundle      factory id dsh-prompt-manager, materialized and driven against stub modules')
 console.log(`  section     settings.section id=prompt-manager order=${String(meta.order)}`)
 console.log(`  chip        ${chipMeta.name} id=prompt-manager, switches the preset with one settings write`)
-console.log(`  list        ${String(ENTRIES.length)} rows, switches, kebab menus, add control refused at the cap`)
+console.log(`  list        ${String(ENTRIES.length)} rows, switches, kebab menus, the plugin's own repo link, add control refused at the cap`)
 console.log('  views       row menu -> editor page -> save -> back to the list')
 console.log('  presets     list, editor, member checklist, id from the Host, delete clears the selection')
 console.log('  fence       a forked draft carries the hash the fork wrote, so the next save is accepted')
