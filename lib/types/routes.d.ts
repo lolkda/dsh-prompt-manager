@@ -22,6 +22,7 @@ import { PromptStore } from './store.js';
 import { type PromptScripts } from './scripts.js';
 import { type PackApplyResult, type PromptPack } from './pack.js';
 import type { Subscriptions } from './subscriptions.js';
+import type { CompactionPromptStats } from './compaction.js';
 import type { VariableView } from './index.js';
 /** The single prefix every route below lives under. */
 export declare const ROUTE_PREFIX = "/dsh-prompt-manager";
@@ -71,6 +72,16 @@ export interface PromptRouteHost {
      * it is.
      */
     importPack(pack: PromptPack): Promise<PackApplyResult>;
+    /**
+     * What the compaction seam has done since this mount, or `undefined` when the
+     * feature is switched off.
+     *
+     * Health reporting only, and read live: whether an instruction was replaced is
+     * invisible from the outside — the summary simply comes back looking like it
+     * was written to a different template — so the one thing a page cannot work
+     * out for itself is whether this seam ever fired.
+     */
+    compaction?(): CompactionPromptStats | undefined;
 }
 /**
  * Register the prompt-store route.

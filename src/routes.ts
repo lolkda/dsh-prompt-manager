@@ -36,6 +36,7 @@ import { FetchFailure } from './net.js'
 import { ScriptError, type PromptScripts } from './scripts.js'
 import { MAX_PACK_BYTES, parsePack, type PackApplyResult, type PromptPack } from './pack.js'
 import type { Subscriptions } from './subscriptions.js'
+import type { CompactionPromptStats } from './compaction.js'
 import type { VariableView } from './index.js'
 
 /** The single prefix every route below lives under. */
@@ -105,6 +106,16 @@ export interface PromptRouteHost {
    * it is.
    */
   importPack(pack: PromptPack): Promise<PackApplyResult>
+  /**
+   * What the compaction seam has done since this mount, or `undefined` when the
+   * feature is switched off.
+   *
+   * Health reporting only, and read live: whether an instruction was replaced is
+   * invisible from the outside — the summary simply comes back looking like it
+   * was written to a different template — so the one thing a page cannot work
+   * out for itself is whether this seam ever fired.
+   */
+  compaction?(): CompactionPromptStats | undefined
 }
 
 /**
@@ -164,10 +175,14 @@ function createHandler(host: PromptRouteHost): (request: IncomingMessage, respon
       const tail = slash < 0 ? '' : rest.slice(slash + 1)
 
       if (head === 'status' && method === 'GET') {
+        const compaction = host.compaction?.()
         sendJson(response, 200, {
           ...host.store.status(),
           maxEntries: MAX_ENTRIES,
           variables: Object.fromEntries(host.variables().map((variable) => [variable.name, variable.value])),
+          // Absent rather than zeroed when the feature is off: a page cannot tell
+          // "switched off" from "on but never fired" if both read as 0.
+          ...(compaction === undefined ? {} : { compaction }),
         })
         return
       }

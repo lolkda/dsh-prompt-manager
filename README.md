@@ -6,10 +6,12 @@
 
 正文里可以引用 `{{变量}}`。变量来自三类：插件注册的机器事实、挂载时跑的探测命令、你自己写的脚本（打印一个 JSON 对象，键就是变量名）。
 
+除了 system prompt，这个插件还能替换 **DSH 压缩上下文时发给摘要模型的那条指令**（原本写死在 `dsh-compaction-basic` 里）—— 见「压缩指令」一节。
+
 | 部分 | 存在哪 | 谁在改 |
 |---|---|---|
-| 索引（标题 / 顺序 / 开关） | `$DSH_HOME/settings.yaml` 的 `prompt-manager:` 段 | 设置页，或手改文件 |
-| 组合（挑哪几条） | 同一段里的 `presets` / `activePreset` | 设置页的「组合」页，或聊天页输入栏的切换器 |
+| 索引（标题 / 顺序 / 开关 / 压缩指令指针） | `$DSH_HOME/settings.yaml` 的 `prompt-manager:` 段 | 设置页，或手改文件 |
+| 组合（挑哪几条 / 用哪条压缩指令） | 同一段里的 `presets` / `activePreset` | 设置页的「组合」页，或聊天页输入栏的切换器 |
 | 正文（markdown） | `$DSH_HOME/prompt-manager/sections/<id>.md` | 设置页，或任意编辑器 |
 | 变量脚本 | `$DSH_HOME/prompt-manager/scripts/<name>.js` | 设置页的「变量」页，或任意编辑器 |
 
@@ -74,6 +76,7 @@ curl -s http://127.0.0.1:3080/dsh-prompt-manager/status | head -c 200
 - **写**：只管上面这两处。settings 段由页面通过 `scope.update` 写；正文与脚本先写临时文件再 `rename`，不留半截文件。
 - **起进程**：按你 settings 里的配置跑**探测命令**（默认 `pwsh`/`bash`/`git`/`node`/`python`，挂载时各跑一次）和**变量脚本**（`node <脚本文件>`，保存时 / 挂载时 / 你点「重新测量」时各跑一次）。命令与参数都来自这份配置，插件自己不带任何可执行文件。
 - **出网**：只有订阅源会出网（`fetch`，可配 https 镜像）。
+- **改请求**：只碰**压缩**那一次调用（见「压缩指令」一节）。监听 `llm/stream`，只在 `purpose === 'compaction'` 时把最后那条指令消息换成本插件里配置的正文；**普通对话请求一个字节都不动**。没配压缩指令时不注册任何替换动作。可以整体关掉：`compaction: false`。
 - **HTTP**：注册一条 `/dsh-prompt-manager` 前缀路由，**仅 loopback 对端**（`127.0.0.0/8` / `::1`，且 `Host` 头也必须是 loopback 主机名 —— 挡 DNS rebinding）可用，写操作再加 same-origin。端点清单见 `src/routes.ts`。**它不是认证**：同机其它进程照样能调，边界是"别家网页进不来"，单用户工作机上够用。
 
 ## 设置页
@@ -90,12 +93,25 @@ curl -s http://127.0.0.1:3080/dsh-prompt-manager/status | head -c 200
 
 **删除**一条 = 先删正文文件、再从索引移除（顺序有意：文件删不掉时索引不动，条目还在、还能重试）。
 
+## 压缩指令
+
+DSH 把上下文压成摘要时，会额外发一次模型调用：重放当前对话前缀，最后追加一条**指令消息**告诉摘要模型输出什么结构。这条指令原本写死在 `dsh-compaction-basic` 里，本插件让你把它换成自己写的一条 markdown —— 和普通条目一样有 id、有正文文件、能进组合包。
+
+- **建一条**：列表页底部「新增压缩指令」。生成一条标题「压缩指令」的条目（带一段中文骨架），并立刻把它设为当前。它不是 system prompt section：**不注册 section、不参与注入开关**，`order` 只影响列表排序。
+- **改正文**：照常进编辑页写，正文里可以用 `{{变量}}`（插值规则与 section 相同，见「变量」一节；解析不了的引用按字面量写出去并记一条日志，绝不让那次压缩失败）。
+- **哪个生效**：根字段 `compaction: <id>` 决定；**有组合生效时由组合自己的 `compaction` 决定**（组合指向空 = 用 DSH 自带的，不会回退到根字段）。指针指向不存在的条目、指向普通段落条目、或正文为空 → 回退到 DSH 自带指令并记一次日志。**永远不会有"空指令"发出去**。
+- **生效时机是下一次压缩**，不是下一个模型步骤 —— 压缩什么时候发生由 DSH 的阈值策略决定（默认上下文用到 80%）。想立刻验证：`/compact`，或把阈值调低。
+- **导出组合**时，`compaction` 指针和它指向的正文一起进包；导入时指针跟着新 id 走，实在带不动（包没装这条）就把指针清空并明确报告，而不是留一个指不到东西的指针。
+- **看它有没有真的生效**：列表页状态行显示 `压缩指令：<标题> · 已替换 N 次 · 最近 <时间>`（N 来自 `/dsh-prompt-manager/status` 的 `compaction` 字段）。摘要看起来"格式不一样"的时候，第一个该看的就是这行。
+- **改不了的部分**：摘要落进会话时外面那层 `<compacted-summary>` 标签和「自动生成的检查点」前导语（`This is an automatically generated checkpoint …`）是后端在摘要返回**之后**自己拼的，不在这次请求里，所以拦不到。要改它们只能自己写一个压缩后端（实现 `CompactionEngine`）。本插件只替换**发给模型的指令**。
+- **关掉**：`compaction: false`，所有压缩调用恢复原样。
+
 ## 组合
 
 一个**组合** = 从现有条目里挑一组，起个名字。两个入口：
 
 - **聊天页输入框下面**的工具行右侧（模型选择器左边）有「提示词 · …」芯片：点开是全部组合和「不用组合（按每条开关）」，选中即切换。
-- **设置 → 提示词 → 组合**：增删改、设为当前，每个组合用勾选清单挑成员。清单列**全部条目**（含关着的）—— 「把某条关掉的提示词临时打开」正是组合的用途。
+- **设置 → 提示词 → 组合**：增删改、设为当前，每个组合用勾选清单挑成员。清单列**全部条目**（含关着的）—— 「把某条关掉的提示词临时打开」正是组合的用途。压缩指令不在成员清单里，改由组合自己的「压缩指令」选择器挑（见「压缩指令」一节）。
 
 三点要紧的：
 
@@ -202,6 +218,7 @@ $DSH_HOME/prompt-manager/
 | `probeTexts` | 英文占位符 | 探测没拿到版本时的文案，可覆盖 `missing` / `empty` / `timeout` / `skipped` |
 | `probeBudgetMs` | `8000` | 整轮探测的时间上限，超出的记 `skipped` |
 | `storeDir` | `$DSH_HOME/prompt-manager` | 正文所在目录（其中用 `sections/` 子目录）。`$DSH_HOME` 取值：显式 `storeDir` > 非空 `$DSH_HOME` > `~/.dsh` |
+| `compaction` | `true` | 允许把压缩指令换成索引里指定的那条（见「压缩指令」一节）。默认值不改变任何行为：没配条目时压缩调用原样发出。设 `false` 可彻底关掉这个接缝 |
 
 ## 内置条目
 
@@ -293,6 +310,14 @@ section 文本每次组装做 `{{变量}}` 插值。**变量必须由某一行�
 
 ## 升级
 
+### 从 3.0.x（3.1.0）
+
+只加东西，不需要迁移：
+
+- 索引多了可选字段 `compaction`（根字段）和组合上的 `compaction`、条目上的 `kind: 'compaction'`。老文档原样生效：没有 `compaction` 就继续用 DSH 自带的压缩指令，升级前后**压缩调用逐字节相同**。
+- 组合包格式 `dsh-prompt-manager-pack` 版本仍是 1：包里多出可选的 `preset.compaction` 与 `entries[].kind`，3.0 写的包照样能导入（导入后组合不带压缩指令）。
+- 宿主多了一个可选依赖 `@deepseek-ai/dsh-llm`（只用到它的类型；运行时经 `ctx.inject(['llm'], …)` 取服务，没有它插件照常挂载，只是没有压缩接缝）。
+
 ### 从 2.x（3.0.0）
 
 只换**对外身份**，不动数据面：
@@ -338,7 +363,7 @@ DSH 里两种注入方式落在不同通道：
 npm install          # 只装开发依赖：typescript 与 DSH 类型包
 npm run build        # src/*.ts -> lib/*.js + lib/types/*.d.ts，并检查 client/client.js
 npm run typecheck    # tsc --noEmit
-npm test             # 先构建，再跑十二个测试（test/*.mjs，各自文件头有说明）
+npm test             # 先构建，再跑十三个测试（test/*.mjs，各自文件头有说明）
 npm run check:build  # 核对 lib/ 没有未提交的改动（提交前跑）
 npm run check:pack   # 核对 npm 会打包的内容里有 bundle patch、浏览器半边、构建产物
 ```
@@ -347,8 +372,8 @@ npm run check:pack   # 核对 npm 会打包的内容里有 bundle patch、浏览
 
 ```bash
 npm version patch --no-git-tag-version   # 或手改 package.json
-git add -A && git commit -m "chore: 3.0.2"
-git tag v3.0.2 && git push origin main --follow-tags
+git add -A && git commit -m "chore: 3.1.0"
+git tag v3.1.0 && git push origin main --follow-tags
 ```
 
 认证走 npm 的 **Trusted Publisher（OIDC）**，仓库里不放任何 npm token —— npm 正在淘汰"绕过 2FA、长期有效"的发布 token，而 OIDC 换来的凭证只活这一次运行，并顺带生成 provenance（包页面上会标出它是从哪个 commit 的哪次运行构建的）。首次要在 npm 包页 Settings → Trusted Publisher 里填 `lolkda` / `dsh-prompt-manager` / `release.yml`。

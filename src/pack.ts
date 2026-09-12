@@ -80,6 +80,16 @@ export interface PackEntry {
   origin?: PackOrigin | undefined
   /** Present instead of a body when the entry is a subscription. */
   source?: PackSourceRef | undefined
+  /**
+   * `compaction` when this entry feeds the compaction instruction rather than
+   * the system prompt, absent for an ordinary section.
+   *
+   * Carried because it cannot be recovered from anything else: the body of a
+   * compaction instruction reads exactly like the body of a section, so an
+   * import that dropped this would silently turn it into a section and inject
+   * the summarizer's template into every model step.
+   */
+  kind?: 'compaction' | undefined
 }
 
 /** The preset a pack carries. */
@@ -90,6 +100,12 @@ export interface PackPreset {
   name: string
   /** Member ids, referring to {@link PromptPack.entries}. */
   entries: string[]
+  /**
+   * Id of the compaction instruction the preset put in force, when it named one.
+   * That id refers to {@link PromptPack.entries} like a member does, so an import
+   * has to move it with them.
+   */
+  compaction?: string | undefined
 }
 
 /** A pack this build understands. */
@@ -145,6 +161,8 @@ export interface PackMember {
   origin?: PackOrigin | undefined
   /** Subscription origin, when the body belongs to a source. */
   source?: PackSourceRef | undefined
+  /** `compaction` when this member is the compaction instruction. */
+  kind?: 'compaction' | undefined
 }
 
 /** Everything {@link buildPack} needs, all of it already resolved. */
@@ -181,6 +199,8 @@ export interface PackImportEntry {
   source?: string | undefined
   /** The id this entry had on the exporting machine, when it had to change. */
   renamedFrom?: string | undefined
+  /** `compaction` when this entry feeds the compaction instruction. */
+  kind?: 'compaction' | undefined
 }
 
 /** What an import would do, ready to be checked and then carried out. */
@@ -201,6 +221,15 @@ export interface PackImportPlan {
   sourceDropped: string[]
   /** Preset members the pack itself could not carry (already gone at export). */
   missingMembers: string[]
+  /**
+   * Id of the compaction instruction the pack named that could not come along,
+   * present only when that happened.
+   *
+   * The pack named an entry it does not carry, so the pointer would address
+   * nothing here. The preset is imported naming no instruction instead, which is
+   * a working state — the stock one — and this is how the page says so.
+   */
+  compactionDropped?: string | undefined
 }
 
 /** The result of planning an import. */
@@ -251,6 +280,9 @@ export function buildPack(input: PackExportInput): PromptPack {
       order: member.order,
       enabled: member.enabled,
     }
+    // Written only when it is one, so an entry that is not a compaction
+    // instruction exports exactly the bytes it did before this field existed.
+    if (member.kind === 'compaction') carried.kind = 'compaction'
     if (member.body !== undefined) {
       carried.body = member.body
       if (member.origin !== undefined) carried.origin = member.origin
@@ -259,16 +291,21 @@ export function buildPack(input: PackExportInput): PromptPack {
     if (member.source !== undefined) carried.source = member.source
     return carried
   })
+  const preset: PackPreset = {
+    id: input.preset.id,
+    name: input.preset.name,
+    entries: [...input.preset.entries],
+  }
+  // Same rule for the pointer: a pack from a deployment that never made a
+  // compaction entry stays byte-for-byte what it always was.
+  const pointer = input.preset.compaction.trim()
+  if (pointer.length > 0) preset.compaction = pointer
   return {
     format: PACK_FORMAT,
     version: PACK_VERSION,
     exportedAt: (input.now ?? new Date()).toISOString(),
     generator: { plugin: input.pluginName, pluginVersion: input.pluginVersion },
-    preset: {
-      id: input.preset.id,
-      name: input.preset.name,
-      entries: [...input.preset.entries],
-    },
+    preset,
     entries: members,
     missing: [...(input.missing ?? [])],
   }
@@ -350,6 +387,11 @@ export function parsePack(raw: unknown): PackParseResult {
   const membersRaw = presetRaw['entries']
   if (!Array.isArray(membersRaw)) return refuse('bad-preset', 'preset.entries 必须是字符串数组')
   const memberIds = membersRaw.filter((member): member is string => typeof member === 'string')
+  // An unusable pointer is read as no pointer rather than refusing the pack: a
+  // preset that names no compaction instruction is a working preset, so nothing
+  // is lost by ignoring a field this build cannot act on.
+  const compactionRaw = textOf(presetRaw['compaction'])?.trim() ?? ''
+  const pointer = isEntryId(compactionRaw) ? compactionRaw : undefined
 
   const listRaw = root['entries']
   if (!Array.isArray(listRaw)) return refuse('bad-entry', 'entries 必须是一个数组')
@@ -371,6 +413,9 @@ export function parsePack(raw: unknown): PackParseResult {
       order: typeof orderRaw === 'number' && Number.isFinite(orderRaw) ? orderRaw : 0,
       enabled: record['enabled'] === true,
     }
+    // Only the one value this build knows: a hand-edited `kind` of any other
+    // shape reads as an ordinary section, which is what an entry is by default.
+    if (record['kind'] === 'compaction') entry.kind = 'compaction'
     const bodyRaw = record['body']
     if (typeof bodyRaw === 'string') {
       const size = Buffer.byteLength(bodyRaw, 'utf8')
@@ -406,7 +451,15 @@ export function parsePack(raw: unknown): PackParseResult {
       version: PACK_VERSION,
       exportedAt: textOf(root['exportedAt']) ?? '',
       generator: readGenerator(root['generator']),
-      preset: { id: textOf(presetRaw['id']) ?? '', name: presetName.slice(0, MAX_TITLE_LENGTH), entries: memberIds },
+      preset: {
+        id: textOf(presetRaw['id']) ?? '',
+        name: presetName.slice(0, MAX_TITLE_LENGTH),
+        entries: memberIds,
+        // Absent when the pack names none: the page reads a pack back through
+        // the same field it writes, so "no instruction" must stay absent rather
+        // than become an id.
+        ...(pointer === undefined ? {} : { compaction: pointer }),
+      },
       entries,
       missing,
     },
@@ -458,6 +511,7 @@ export function planImport(
     }
     if (entry.body !== undefined) planned.body = entry.body
     if (entry.origin !== undefined) planned.origin = entry.origin
+    if (entry.kind === 'compaction') planned.kind = 'compaction'
     // A subscription's body is found upstream *by id*, so an entry that had to
     // be renamed can never read its file: recording the source anyway would
     // present an entry as read-only-upstream while it can only ever render
@@ -478,6 +532,15 @@ export function planImport(
   const carried = new Set(pack.entries.map((entry) => entry.id))
   const missingMembers = pack.preset.entries.filter((id) => !carried.has(id))
 
+  // The pointer is an id, so it moves with the entry it names. One that names
+  // something the pack never carried cannot move — there is nothing here to
+  // address — so the preset is imported naming no instruction, which is a
+  // working state, and the id is reported rather than quietly kept.
+  const wantedPointer = pack.preset.compaction ?? ''
+  const pointer = wantedPointer.length === 0 || !carried.has(wantedPointer)
+    ? ''
+    : moved.get(wantedPointer) ?? wantedPointer
+
   return {
     ok: true,
     plan: {
@@ -486,11 +549,13 @@ export function planImport(
         id: presetId,
         name: pack.preset.name,
         entries: pack.preset.entries.map((id) => moved.get(id) ?? id),
+        compaction: pointer,
       },
       renamed,
       noBody,
       sourceDropped,
       missingMembers,
+      ...(wantedPointer.length > 0 && pointer.length === 0 ? { compactionDropped: wantedPointer } : {}),
     },
   }
 }

@@ -14,6 +14,11 @@
  * registry can resolve is left untouched, so a variable another row registers
  * still interpolates normally.
  *
+ * One caller has no registry pass at all: the compaction instruction is sent to
+ * the summarizer as-is, so {@link resolveReferences} substitutes the resolvable
+ * references itself and defuses the rest, sharing this scan so the two entry
+ * points cannot disagree about what is safe.
+ *
  * The scan below is a deliberate mirror of the registry's `interpolate`
  * (`@deepseek-ai/dsh-system-prompt`, `lib/index.js`, its `GROUP_AT` and
  * `VARIABLE_NAME` constants). When that implementation changes shape, this one
@@ -36,7 +41,8 @@ export interface GuardedText {
     escaped: string[];
 }
 /**
- * Defuse every reference the registry would throw on.
+ * Defuse every reference the registry would throw on, leaving resolvable ones
+ * for the registry to interpolate.
  *
  * A reference is defused when its shape is not a variable name, when no
  * variable of that name exists for this assembly, or when the variable exists
@@ -48,6 +54,24 @@ export interface GuardedText {
  * @returns the safe text and the references that were defused.
  */
 export declare function sanitizeReferences(text: string, variables: Readonly<Record<string, string | undefined>>): GuardedText;
+/**
+ * The same scan, with resolvable references substituted instead of handed on.
+ *
+ * A compaction instruction is not a section: no registry pass will render it, so
+ * whoever sends it has to finish the job. This entry point does exactly what the
+ * registry would — substitute a resolvable reference, defuse the rest — and it
+ * shares the scan above rather than repeating it, so the two can never disagree
+ * about which references are safe.
+ *
+ * A substituted value is never rescanned, for the same reason the registry does
+ * not rescan one: a value that happens to contain `{{...}}` is data, not a
+ * reference.
+ *
+ * @param text - the text about to be sent as-is.
+ * @param variables - the names that can be resolved for this send.
+ * @returns the rendered text and the references that were defused.
+ */
+export declare function resolveReferences(text: string, variables: Readonly<Record<string, string | undefined>>): GuardedText;
 /**
  * The references that can never resolve, whatever else is registered.
  *

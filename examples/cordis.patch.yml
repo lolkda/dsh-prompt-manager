@@ -68,6 +68,13 @@
 #                the script's absolute path. Every successful run is cached, so a
 #                profile start serves the last measured values without executing
 #                anything. Scripts run as the host user, with no sandbox.
+# compaction:    allow replacing the instruction DSH sends to its summarizer with
+#                the body of the entry the index points at, chosen in
+#                Settings → 提示词 (default true). The default changes nothing: a
+#                deployment that never made such an entry sends every compaction
+#                call exactly as the engine built it, byte for byte. Set false
+#                when another row owns that seam, or to keep this plugin strictly
+#                to the system prompt.
 #
 # Example with every value set:
 # - insert:
@@ -75,6 +82,7 @@
 #       name: './vendor/dsh-prompt-manager/lib/index.js'
 #       config:
 #         environment: true
+#         compaction: true
 #         variables:
 #           shell: 'PowerShell 7 (pwsh)'
 #         probes:

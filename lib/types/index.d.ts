@@ -119,6 +119,17 @@ export interface Config {
      * set and `~/.dsh` otherwise.
      */
     storeDir?: string;
+    /**
+     * Replace the instruction a context compaction sends to its summarizer with
+     * the body of the entry the index puts in force. Defaults to `true`; set
+     * `false` when another row owns that seam, or to keep this plugin strictly to
+     * the system prompt.
+     *
+     * The default changes nothing: with no entry in force — which is every
+     * deployment that never made one — every compaction call goes out exactly as
+     * the engine built it.
+     */
+    compaction?: boolean;
 }
 /** Where one prompt variable's value came from. */
 export type VariableSource = 'environment' | 'config' | 'probe' | 'script';

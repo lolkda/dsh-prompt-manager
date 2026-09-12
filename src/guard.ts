@@ -14,6 +14,11 @@
  * registry can resolve is left untouched, so a variable another row registers
  * still interpolates normally.
  *
+ * One caller has no registry pass at all: the compaction instruction is sent to
+ * the summarizer as-is, so {@link resolveReferences} substitutes the resolvable
+ * references itself and defuses the rest, sharing this scan so the two entry
+ * points cannot disagree about what is safe.
+ *
  * The scan below is a deliberate mirror of the registry's `interpolate`
  * (`@deepseek-ai/dsh-system-prompt`, `lib/index.js`, its `GROUP_AT` and
  * `VARIABLE_NAME` constants). When that implementation changes shape, this one
@@ -58,7 +63,8 @@ function resolvable(name: string, variables: Readonly<Record<string, string | un
 }
 
 /**
- * Defuse every reference the registry would throw on.
+ * Defuse every reference the registry would throw on, leaving resolvable ones
+ * for the registry to interpolate.
  *
  * A reference is defused when its shape is not a variable name, when no
  * variable of that name exists for this assembly, or when the variable exists
@@ -72,6 +78,51 @@ function resolvable(name: string, variables: Readonly<Record<string, string | un
 export function sanitizeReferences(
   text: string,
   variables: Readonly<Record<string, string | undefined>>,
+): GuardedText {
+  return scanReferences(text, variables, false)
+}
+
+/**
+ * The same scan, with resolvable references substituted instead of handed on.
+ *
+ * A compaction instruction is not a section: no registry pass will render it, so
+ * whoever sends it has to finish the job. This entry point does exactly what the
+ * registry would — substitute a resolvable reference, defuse the rest — and it
+ * shares the scan above rather than repeating it, so the two can never disagree
+ * about which references are safe.
+ *
+ * A substituted value is never rescanned, for the same reason the registry does
+ * not rescan one: a value that happens to contain `{{...}}` is data, not a
+ * reference.
+ *
+ * @param text - the text about to be sent as-is.
+ * @param variables - the names that can be resolved for this send.
+ * @returns the rendered text and the references that were defused.
+ */
+export function resolveReferences(
+  text: string,
+  variables: Readonly<Record<string, string | undefined>>,
+): GuardedText {
+  return scanReferences(text, variables, true)
+}
+
+/**
+ * Walk the text reference by reference and build the safe version.
+ *
+ * This is the one scan both entry points use, and a deliberate mirror of the
+ * registry's `interpolate`. When that implementation changes shape, this one has
+ * to follow — once, not twice.
+ *
+ * @param text - the text to scan.
+ * @param variables - the names that resolve for this pass.
+ * @param substitute - replace a resolvable reference with its value instead of
+ * copying it through for a later registry pass.
+ * @returns the safe text and the references that were defused.
+ */
+function scanReferences(
+  text: string,
+  variables: Readonly<Record<string, string | undefined>>,
+  substitute: boolean,
 ): GuardedText {
   const escaped: string[] = []
   let result = ''
@@ -93,8 +144,9 @@ export function sanitizeReferences(
       continue
     }
     const name = group[0].slice(2, -2)
-    if (resolvable(name, variables)) {
-      result += text.slice(last, open + group[0].length)
+    const value = resolvable(name, variables) ? variables[name] : undefined
+    if (value !== undefined) {
+      result += text.slice(last, open) + (substitute ? value : group[0])
       last = open + group[0].length
     } else {
       // Defuse the opener and keep the body of the reference verbatim: the

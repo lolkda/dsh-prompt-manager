@@ -43,7 +43,16 @@ const ENTRIES = [
   // local entry reaches the page like this — and must not read as subscribed.
   { id: 'beta', title: '第二条', order: 20, enabled: false, source: '' },
   { id: 'note', title: '补充说明', order: 40, enabled: true },
+  // A compaction entry: it never becomes a system prompt section, so it carries
+  // no meaningful `enabled` flag and only the entry-level pointer can make it
+  // live. `kind` is the whole difference from a section entry. Its title is
+  // deliberately not the badge's text, so a page that echoed one for the other
+  // would be caught.
+  { id: 'compact-zh', title: '压缩指令（中文版）', order: 90, enabled: false, kind: 'compaction' },
 ]
+
+/** The section entries — the ones the injection switches and the member list are about. */
+const SECTION_ENTRIES = ENTRIES.filter((entry) => entry.kind !== 'compaction')
 
 /** Subscriptions the Host reports for the sources page. */
 const SUBSCRIPTIONS = [
@@ -52,8 +61,8 @@ const SUBSCRIPTIONS = [
 
 /** Presets the Host reports for the presets page and the composer chip. */
 const PRESETS = [
-  { id: 'ctf', name: 'CTF 作业', entries: ['alpha', 'beta'] },
-  { id: 'plain', name: '日常', entries: [] },
+  { id: 'ctf', name: 'CTF 作业', entries: ['alpha', 'beta'], compaction: 'compact-zh' },
+  { id: 'plain', name: '日常', entries: [], compaction: '' },
 ]
 
 /** The pack the export route answers with, as text. */
@@ -178,8 +187,18 @@ const requests = []
  */
 let step = 0
 
-/** What `GET /status` reports; a case below lowers the cap to exercise the add refusal. */
-let STATUS = { dir: '/tmp/prompt-manager/sections', writable: true, ids: [], maxEntries: 50 }
+/**
+ * What `GET /status` reports; a case below lowers the cap to exercise the add
+ * refusal. `compaction` is the optional field the Host adds only while the
+ * feature is on: a case below removes it to exercise the disabled reading.
+ */
+let STATUS = {
+  dir: '/tmp/prompt-manager/sections',
+  writable: true,
+  ids: [],
+  maxEntries: 50,
+  compaction: { matches: 2, replacements: 1, lastReplacedAt: '2026-09-12T03:00:00.000Z', characters: 1234 },
+}
 
 /** The fake settings scope the section binds. Its methods use `this`, exactly
  * like the real SettingsScopeController, so an unbound method reference fails
@@ -190,7 +209,7 @@ const scope = {
     writable: true,
     mode: 'host',
     revision: 3,
-    value: { entries: ENTRIES, presets: [], activePreset: '' },
+    value: { entries: ENTRIES, presets: [], activePreset: '', compaction: '' },
     // The composition base layer, empty because the plugin ships no entries.
     base: { entries: [] },
     user: {},
@@ -619,9 +638,16 @@ assert.ok(tabs.includes('全部') && tabs.includes('本地') && tabs.includes('�
 
 // `source: ''` is what a local entry looks like after the schema resolves it.
 // Badging by presence rather than by value once marked every entry subscribed.
-const badges = () => inspect(renderer.tree, 'span').nodes
-  .filter((node) => String(node.props.className ?? '').includes('__badge'))
-assert.equal(badges().length, 0, 'a local entry must not carry the subscribed badge')
+// The two badges are different claims — "this body comes from upstream" versus
+// "this entry is the compaction instruction" — so each is counted by the class
+// that names it rather than by the shared `__badge`.
+const subscribedBadges = (tree) => inspect(tree, 'span').nodes.filter((node) => {
+  const className = String(node.props.className ?? '')
+  return className.includes('__badge') && !className.includes('--compaction')
+})
+const compactionBadges = (tree) => inspect(tree, 'span').nodes
+  .filter((node) => String(node.props.className ?? '').includes('__badge--compaction'))
+assert.equal(subscribedBadges(renderer.tree).length, 0, 'a local entry must not carry the subscribed badge')
 
 const tabButton = (label) => inspect(renderer.tree, 'button').nodes.find((node) => textOf(node) === label)
 tabButton('本地').props.onClick()
@@ -636,7 +662,11 @@ tabButton('全部').props.onClick()
 await renderer.settle()
 
 const switches = inspect(tree, SWITCH).nodes
-assert.equal(switches.length, ENTRIES.length, 'every entry must carry one switch')
+assert.equal(
+  switches.length,
+  SECTION_ENTRIES.length,
+  'every section entry must carry one switch, and the compaction entry — whose switch would mean nothing — must not',
+)
 assert.equal(switches[0].props.checked, true, 'the first switch must mirror the index')
 assert.equal(switches[1].props.checked, false, 'a disabled entry must render an unchecked switch')
 
@@ -756,7 +786,7 @@ renderer.mount(component, { scope })
 await renderer.settle()
 const subscribedRow = inspect(renderer.tree).text
 assert.ok(subscribedRow.includes('o/r'), 'a subscribed row shows the repository its body comes from')
-assert.equal(badges().length, 1, 'exactly the subscribed row carries the badge')
+assert.equal(subscribedBadges(renderer.tree).length, 1, 'exactly the subscribed row carries the badge')
 
 // The repository is the row's one real link: it is the address a person wants
 // when they go looking at what upstream actually says.
@@ -1144,7 +1174,11 @@ presetNameField.props.onChange({ target: { value: '交付检查' } })
 await presetRenderer.settle()
 
 const memberBoxes = inspect(presetRenderer.tree, 'input').nodes.filter((node) => node.props.type === 'checkbox')
-assert.equal(memberBoxes.length, ENTRIES.length, 'every entry must be offered as a member of the combo')
+assert.equal(
+  memberBoxes.length,
+  SECTION_ENTRIES.length,
+  'every section entry must be offered as a member of the combo, and a compaction entry must not — it is selected by its own control',
+)
 memberBoxes[0].props.onChange()
 await presetRenderer.settle()
 
@@ -1239,12 +1273,457 @@ await presetRenderer.settle()
 assert.equal(requests.length, jsonBefore, 'a file that is not JSON never reaches the Host')
 assert.ok(presetText().includes('notes.txt 不是 JSON 文件'), 'and the page says which file it was')
 
+// ── the compaction entry is a row of its own kind ─────────────────────────────
+
+// The compaction instruction lives in the same index as every section, but it is
+// not one: its `enabled` flag decides nothing, so it must not offer an injection
+// switch, and its state dot answers a different question — whether the compaction
+// pointer is aimed at it right now.
+scope.state = {
+  ...scope.state,
+  value: { entries: ENTRIES, presets: PRESETS, activePreset: '', compaction: '' },
+}
+const compactRenderer = createRenderer()
+const compactSection = materialize(compactRenderer.React).registrations[0].component
+/** Everything the compaction-page mount renders as text. */
+const compactText = () => inspect(compactRenderer.tree).text
+/** The one row whose text carries a title. */
+const rowFor = (tree, title) => inspect(tree, 'div').nodes
+  .find((node) => String(node.props.className ?? '') === 'dsh-prompt-manager__card' && textOf(node).includes(title))
+/** The state dot of one row, as its class list. */
+const dotClass = (tree, title) => {
+  const row = rowFor(tree, title)
+  const dot = inspect(row, 'span').nodes.find((node) => String(node.props.className ?? '').includes('__dot'))
+  return String(dot.props.className)
+}
+/** The kebab menu of one row. */
+const rowMenuOf = (row) => inspect(row, MENU).nodes[0]
+
+compactRenderer.mount(compactSection, { scope })
+await compactRenderer.settle()
+
+assert.equal(compactionBadges(compactRenderer.tree).length, 1, 'the compaction entry carries a badge of its own')
+assert.equal(textOf(compactionBadges(compactRenderer.tree)[0]), '压缩指令', 'and the badge says what that entry is')
+assert.equal(subscribedBadges(compactRenderer.tree).length, 0, 'while no local row reads as subscribed')
+
+// The switch count is about the sections, so the summary above the list counts
+// the same thing: a compaction entry can be "on" in no sense a person would
+// recognise, and counting it would make the fraction mean two different things.
+assert.ok(
+  compactText().includes(`已启用 ${String(SECTION_ENTRIES.filter((entry) => entry.enabled === true).length)}/${String(SECTION_ENTRIES.length)}`),
+  `the enabled summary must count sections only, got: ${compactText()}`,
+)
+
+const compactRow = rowFor(compactRenderer.tree, '压缩指令')
+assert.ok(compactRow !== undefined, 'the compaction entry must be listed like every other entry')
+assert.equal(inspect(compactRow, SWITCH).nodes.length, 0, 'a compaction entry must not offer an injection switch')
+assert.ok(dotClass(compactRenderer.tree, '压缩指令').includes('--idle'), 'with no pointer aimed at it the compaction row is not in force')
+assert.ok(!dotClass(compactRenderer.tree, '第一条').includes('--idle'), 'while a switched-on section still reads as in force')
+
+const compactMenu = rowMenuOf(compactRow)
+assert.deepEqual(
+  compactMenu.props.items.map((candidate) => candidate.label),
+  ['编辑', '设为当前', '删除'],
+  'the compaction row offers its pointer action beside the shared row actions',
+)
+assert.equal(item(compactMenu, 'current').disabled, false, 'and it can be made current right away')
+assert.deepEqual(
+  rowMenuOf(rowFor(compactRenderer.tree, '第一条')).props.items.map((candidate) => candidate.label),
+  ['编辑', '删除'],
+  'a section row keeps exactly its two actions',
+)
+
+// Aiming the pointer is one settings write, the same shape the preset switch has.
+const currentBefore = writes.length
+compactMenu.props.onSelect('current')
+await compactRenderer.settle()
+const aimed = writes.slice(currentBefore).find((write) => write.field === 'compaction')
+assert.ok(aimed !== undefined, '设为当前 must write the compaction pointer')
+assert.equal(aimed.value, 'compact-zh', 'naming the entry that was chosen')
+assert.equal(writes.slice(currentBefore).length, 1, 'and it must not touch any other settings field')
+
+// The page reads the namespace it writes, so it follows the change by itself:
+// the dot lights up and the same action becomes the way back to the built-in text.
+compactRenderer.mount(compactSection, { scope })
+await compactRenderer.settle()
+assert.ok(!dotClass(compactRenderer.tree, '压缩指令').includes('--idle'), 'the entry the pointer names reads as in force')
+const currentMenu = rowMenuOf(rowFor(compactRenderer.tree, '压缩指令'))
+assert.equal(item(currentMenu, 'current').label, '取消当前', 'and the action turns into the way out of it')
+const pointerClearBefore = writes.length
+currentMenu.props.onSelect('current')
+await compactRenderer.settle()
+const released = writes.slice(pointerClearBefore).find((write) => write.field === 'compaction')
+assert.ok(released !== undefined, '取消当前 must write the compaction pointer')
+assert.equal(released.value, '', 'as the empty pointer, which means the built-in instruction')
+
+// A preset in force answers the pointer by itself — the same rule the sections
+// follow, so the row cannot claim a compaction instruction the prompt is not using.
+scope.state = { ...scope.state, value: { ...scope.state.value, activePreset: 'ctf' } }
+compactRenderer.mount(compactSection, { scope })
+await compactRenderer.settle()
+assert.ok(
+  !dotClass(compactRenderer.tree, '压缩指令').includes('--idle'),
+  'a preset that names a compaction entry puts it in force over an empty root pointer',
+)
+// The root pointer is not what decides while a preset is on, so the row must not
+// offer to write it: an action that silently changes nothing is worse than none.
+assert.ok(compactText().includes('组合：生效'), 'the row says the combo is what put it in force')
+assert.equal(
+  item(rowMenuOf(rowFor(compactRenderer.tree, '压缩指令')), 'current').disabled,
+  true,
+  'and the pointer action is refused while the combo answers that question',
+)
+
+// And the preset wins even when it points at the built-in instruction: falling
+// back to the root field here would contradict what the Host does.
+scope.state = {
+  ...scope.state,
+  value: { ...scope.state.value, compaction: 'compact-zh', activePreset: 'plain' },
+}
+compactRenderer.mount(compactSection, { scope })
+await compactRenderer.settle()
+assert.ok(
+  dotClass(compactRenderer.tree, '压缩指令').includes('--idle'),
+  'a preset pointing at the built-in instruction wins over the root pointer',
+)
+assert.ok(compactText().includes('组合：不生效'), 'and the row says so in the combo\'s own words')
+scope.state = { ...scope.state, value: { ...scope.state.value, compaction: '', activePreset: '' } }
+
+// ── adding a compaction instruction ───────────────────────────────────────────
+
+// Unlike a new section, a new compaction entry is not a draft: the pointer has to
+// name it before anything changes, so the index is written and the pointer aimed
+// before the editor opens — and the body is saved from that editor like any other.
+const addCompactWrites = writes.length
+const addCompactRequests = requests.length
+const addCompactButton = button(compactRenderer.tree, '新增压缩指令')
+assert.ok(addCompactButton !== undefined, 'the list must offer a compaction instruction beside the section one')
+addCompactButton.props.onClick()
+await compactRenderer.settle()
+
+const compactAllocation = requests.slice(addCompactRequests).find((request) => request.url === `${ROUTE}/id`)
+assert.ok(compactAllocation !== undefined, 'a new compaction instruction takes an id from the Host')
+assert.equal(JSON.parse(compactAllocation.body).title, '压缩指令', 'allocated for the title the person is about to see')
+
+const addedWrites = writes.slice(addCompactWrites)
+const addedIndex = addedWrites.filter((write) => write.field === 'entries')
+const addedPointer = addedWrites.find((write) => write.field === 'compaction')
+assert.equal(addedIndex.length, 1, 'the index is written exactly once')
+assert.ok(addedPointer !== undefined, 'and the pointer is aimed at the new entry in the same breath')
+assert.equal(addedPointer.value, 'new-note', 'naming the id the Host allocated')
+assert.ok(
+  compactAllocation.seq < addedIndex[0].seq && addedIndex[0].seq < addedPointer.seq,
+  'the id exists first, then the index entry, then the pointer that names it',
+)
+
+const freshEntry = addedIndex[0].value.find((entry) => entry.id === 'new-note')
+assert.equal(freshEntry.kind, 'compaction', 'the new entry is marked as a compaction instruction')
+assert.equal(freshEntry.enabled, false, 'and keeps the switch a section would have, switched off')
+assert.ok(freshEntry.order > 90, 'placed after the entries that already exist')
+
+// The editor opens on it holding the template, so the body is written from here:
+// one flow for a new entry rather than an index record nobody can reach.
+assert.ok(compactText().includes('编辑「压缩指令」'), 'and the editor opens on the entry that was just made')
+const freshBody = inspect(compactRenderer.tree, 'textarea').nodes[0]
+assert.equal(
+  (freshBody.props.value.match(/^## /gm) ?? []).length,
+  8,
+  'the template carries the eight sections the instruction asks the summarizer to fill',
+)
+assert.ok(freshBody.props.value.includes('检查点'), 'and says what the model is being asked to write')
+
+// Compaction entries occupy the same 50-entry cap the sections do, so the refusal
+// has to happen here too — and it has to happen before an id is taken. The cap
+// arrives with `/status`, so this case needs a mount of its own to see it.
+button(compactRenderer.tree, '← 返回').props.onClick()
+await compactRenderer.settle()
+STATUS = { ...STATUS, maxEntries: ENTRIES.length }
+const capRenderer = createRenderer()
+const capSection = materialize(capRenderer.React).registrations[0].component
+capRenderer.mount(capSection, { scope })
+await capRenderer.settle()
+const capBefore = requests.filter((request) => request.url === `${ROUTE}/id`).length
+const cappedAdd = button(capRenderer.tree, '新增压缩指令')
+assert.ok(cappedAdd !== undefined, 'the refusal is exercised through the same control')
+cappedAdd.props.onClick()
+await capRenderer.settle()
+assert.equal(
+  requests.filter((request) => request.url === `${ROUTE}/id`).length,
+  capBefore,
+  'at the cap no id may be allocated for a compaction entry either',
+)
+assert.ok(inspect(capRenderer.tree).text.includes('最多'), 'and the page says why the add was refused')
+STATUS = { ...STATUS, maxEntries: 50 }
+
+// Back to the fixture index for the cases below.
+scope.state = { ...scope.state, value: { ...scope.state.value, entries: ENTRIES, compaction: '' } }
+compactRenderer.mount(compactSection, { scope })
+await compactRenderer.settle()
+
+// ── the compaction editor ─────────────────────────────────────────────────────
+
+/** The control that opens one row's editor, exactly as a person would click it. */
+const openRow = (tree, title) => inspect(rowFor(tree, title), 'button').nodes
+  .find((node) => String(node.props.className ?? '').includes('__cardMain'))
+
+scope.state = { ...scope.state, value: { entries: ENTRIES, presets: PRESETS, activePreset: '', compaction: '' } }
+compactRenderer.mount(compactSection, { scope })
+await compactRenderer.settle()
+openRow(compactRenderer.tree, '压缩指令').props.onClick()
+await compactRenderer.settle()
+
+// The editor has to say what this body is for and when an edit lands: a section
+// takes effect at the next model step, and this one does not.
+assert.ok(compactText().includes('下一次压缩'), 'the editor says a compaction instruction lands at the next compaction')
+assert.ok(compactText().includes('system prompt'), 'and says it is not one of the system prompt sections')
+assert.equal(inspect(compactRenderer.tree, 'textarea').nodes.length, 1, 'while the body field is the same field a section uses')
+
+// Aiming it from the editor is the same single write the row menu makes.
+const aimButton = button(compactRenderer.tree, '设为当前')
+assert.ok(aimButton !== undefined, 'the editor offers to put this instruction in force')
+const aimBefore = writes.length
+aimButton.props.onClick()
+await compactRenderer.settle()
+const aimedFromEditor = writes.slice(aimBefore).find((write) => write.field === 'compaction')
+assert.ok(aimedFromEditor !== undefined, '设为当前 writes the compaction pointer')
+assert.equal(aimedFromEditor.value, 'compact-zh', 'naming the entry being edited')
+assert.ok(compactText().includes('下一次压缩'), 'and the report says when that takes effect')
+
+// It is one control doing both, so the same place is the way back out.
+compactRenderer.mount(compactSection, { scope })
+await compactRenderer.settle()
+const releaseButton = button(compactRenderer.tree, '取消当前')
+assert.ok(releaseButton !== undefined, 'once in force the same control offers the way out')
+const releaseBefore = writes.length
+releaseButton.props.onClick()
+await compactRenderer.settle()
+const releasedFromEditor = writes.slice(releaseBefore).find((write) => write.field === 'compaction')
+assert.ok(releasedFromEditor !== undefined && releasedFromEditor.value === '', '取消当前 writes the empty pointer')
+
+// Saving a compaction body reports the timing that is true of it.
+const compactBody = inspect(compactRenderer.tree, 'textarea').nodes[0]
+compactBody.props.onChange({ target: { value: 'EDITED COMPACTION' } })
+await compactRenderer.settle()
+button(compactRenderer.tree, '保存修改').props.onClick()
+await compactRenderer.settle()
+assert.ok(
+  requests.some((request) => request.method === 'PUT' && request.url === `${ROUTE}/body/compact-zh`
+    && JSON.parse(request.body).body === 'EDITED COMPACTION'),
+  'saving writes the compaction body through the same Host route a section uses',
+)
+assert.ok(compactText().includes('已保存，下一次压缩生效。'), 'and says when it lands, not "next step"')
+
+// An entry can change kind: the same body can become a section, and turning it
+// back must take the field away rather than write `kind: 'section'` — a section
+// entry carries no `kind` key at all, and a phantom one would follow it forever.
+scope.state = { ...scope.state, value: { ...scope.state.value, compaction: 'compact-zh' } }
+compactRenderer.mount(compactSection, { scope })
+await compactRenderer.settle()
+const toSection = button(compactRenderer.tree, '转为普通段落')
+assert.ok(toSection !== undefined, 'the editor offers to turn a compaction instruction back into a section')
+const kindBefore = writes.length
+toSection.props.onClick()
+await compactRenderer.settle()
+const kindWrites = writes.slice(kindBefore)
+const kindIndex = kindWrites.find((write) => write.field === 'entries')
+assert.ok(kindIndex !== undefined, 'changing kind rewrites the index')
+const demoted = kindIndex.value.find((entry) => entry.id === 'compact-zh')
+assert.equal('kind' in demoted, false, 'and a section entry must carry no kind key at all')
+assert.equal(demoted.title, '压缩指令（中文版）', 'the rest of the record is carried over untouched')
+assert.equal(demoted.enabled, false, 'including the switch it already had')
+assert.ok(
+  kindWrites.some((write) => write.field === 'compaction' && write.value === ''),
+  'and the pointer is released in the same step, since it may only name a compaction entry',
+)
+
+// And back the other way, which must mark it again.
+compactRenderer.mount(compactSection, { scope })
+await compactRenderer.settle()
+const toCompaction = button(compactRenderer.tree, '转为压缩指令')
+assert.ok(toCompaction !== undefined, 'a section can be turned into a compaction instruction from its editor')
+const backBefore = writes.length
+toCompaction.props.onClick()
+await compactRenderer.settle()
+const promoted = writes.slice(backBefore).find((write) => write.field === 'entries')
+assert.ok(promoted !== undefined, 'which again rewrites the index')
+assert.equal(promoted.value.find((entry) => entry.id === 'compact-zh').kind, 'compaction', 'marking it as one')
+
+// Back to the fixture index and the list for the cases below.
+scope.state = { ...scope.state, value: { entries: ENTRIES, presets: PRESETS, activePreset: '', compaction: '' } }
+compactRenderer.mount(compactSection, { scope })
+await compactRenderer.settle()
+button(compactRenderer.tree, '← 返回').props.onClick()
+await compactRenderer.settle()
+
+// ── a combo picks the compaction instruction too ──────────────────────────────
+
+// A combo answers both halves of the question — which sections inject, and which
+// compaction instruction is used — so a card has to show both, and the editor has
+// to be able to change either without disturbing the other combos.
+scope.state = { ...scope.state, value: { entries: ENTRIES, presets: PRESETS, activePreset: '', compaction: '' } }
+const comboRenderer = createRenderer()
+const comboSection = materialize(comboRenderer.React).registrations[0].component
+comboRenderer.mount(comboSection, { scope })
+await comboRenderer.settle()
+button(comboRenderer.tree, `组合（${String(PRESETS.length)}）`).props.onClick()
+await comboRenderer.settle()
+
+assert.ok(
+  textOf(rowFor(comboRenderer.tree, 'CTF 作业')).includes('压缩指令：压缩指令（中文版）'),
+  'a combo card says which compaction instruction it would use',
+)
+const emptyComboCard = rowFor(comboRenderer.tree, '日常')
+assert.ok(
+  textOf(emptyComboCard).includes('压缩指令：DSH 自带'),
+  'and an empty choice reads as the instruction DSH ships, not as a blank',
+)
+assert.ok(
+  textOf(emptyComboCard).includes('没有选中任何条目'),
+  'while the note about a combo that selects no sections is still there',
+)
+
+// The editor of one combo: the same checklist, plus one control for the other half.
+openRow(comboRenderer.tree, 'CTF 作业').props.onClick()
+await comboRenderer.settle()
+const comboSelect = inspect(comboRenderer.tree, 'select').nodes[0]
+assert.ok(comboSelect !== undefined, 'the combo editor offers a control for the compaction instruction')
+assert.deepEqual(
+  inspect(comboSelect, 'option').nodes.map((option) => textOf(option)),
+  ['DSH 自带', '压缩指令（中文版）'],
+  'whose choices are the built-in instruction and every compaction entry',
+)
+assert.equal(comboSelect.props.value, 'compact-zh', 'showing the one this combo already names')
+
+// Editing one combo must not clear another combo's choice: the whole preset list
+// is rewritten on save, so every record the page did not touch has to travel
+// through it exactly as it arrived.
+scope.state = {
+  ...scope.state,
+  value: {
+    ...scope.state.value,
+    presets: [
+      { id: 'ctf', name: 'CTF 作业', entries: ['alpha', 'beta'], compaction: 'compact-zh' },
+      { id: 'plain', name: '日常', entries: [], compaction: 'compact-zh' },
+    ],
+  },
+}
+comboRenderer.mount(comboSection, { scope })
+await comboRenderer.settle()
+const stageBefore = writes.length
+inspect(comboRenderer.tree, 'select').nodes[0].props.onChange({ target: { value: '' } })
+await comboRenderer.settle()
+assert.equal(writes.length, stageBefore, 'the control stages the choice; 保存组合 is what writes it')
+button(comboRenderer.tree, '保存组合').props.onClick()
+await comboRenderer.settle()
+const savedPresets = writes.slice(stageBefore).find((write) => write.field === 'presets')
+assert.ok(savedPresets !== undefined, 'saving a combo writes the whole preset list')
+assert.equal(
+  savedPresets.value.find((preset) => preset.id === 'ctf').compaction,
+  '',
+  'with the instruction this combo now names',
+)
+assert.equal(
+  savedPresets.value.find((preset) => preset.id === 'plain').compaction,
+  'compact-zh',
+  'and the combo nobody touched keeps the instruction it had',
+)
+assert.equal(
+  savedPresets.value.find((preset) => preset.id === 'ctf').entries.length,
+  2,
+  'with its members untouched as well',
+)
+
+// Saving lands back on the list, which is where the new choice has to be visible.
+assert.ok(
+  textOf(rowFor(comboRenderer.tree, 'CTF 作业')).includes('压缩指令：DSH 自带'),
+  'and the card follows the change by itself',
+)
+
+// A preset may name an instruction that is gone — a hand-edited document, or a
+// body somebody removed. Saying so beats a blank control that reads as "DSH 自带".
+scope.state = {
+  ...scope.state,
+  value: {
+    ...scope.state.value,
+    presets: [{ id: 'ctf', name: 'CTF 作业', entries: ['alpha'], compaction: 'gone' }],
+  },
+}
+comboRenderer.mount(comboSection, { scope })
+await comboRenderer.settle()
+openRow(comboRenderer.tree, 'CTF 作业').props.onClick()
+await comboRenderer.settle()
+assert.ok(
+  inspect(inspect(comboRenderer.tree, 'select').nodes[0], 'option').nodes
+    .some((option) => textOf(option).includes('gone')),
+  'a choice that names nothing is shown as such rather than silently as the built-in text',
+)
+
+// ── what the Host reports about compaction ────────────────────────────────────
+
+/** The list page as it renders against whatever `/status` and settings say now. */
+const mountListText = async () => {
+  const next = createRenderer()
+  next.mount(materialize(next.React).registrations[0].component, { scope })
+  await next.settle()
+  return inspect(next.tree).text
+}
+
+// Counts and the last time come from the Host, and the page is the only place a
+// person can see whether their instruction is actually being used — "matches" is
+// how often compaction ran, "replacements" how often the text was theirs.
+scope.state = {
+  ...scope.state,
+  value: { entries: ENTRIES, presets: PRESETS, activePreset: '', compaction: 'compact-zh' },
+}
+const replacedText = await mountListText()
+assert.ok(
+  replacedText.includes('压缩指令：压缩指令（中文版）'),
+  `the status line names the instruction in force, got: ${replacedText}`,
+)
+assert.ok(replacedText.includes('已替换 1 次'), 'and how often it has replaced the built-in text')
+assert.ok(
+  replacedText.includes(`最近 ${new Date(STATUS.compaction.lastReplacedAt).toLocaleString()}`),
+  'reported in local time, the way every other timestamp on this page is',
+)
+
+// With the feature switched off the Host omits the field entirely, and the page
+// has to say that rather than show a zero it made up.
+const heldCompaction = STATUS.compaction
+delete STATUS.compaction
+const offText = await mountListText()
+assert.ok(
+  offText.includes('压缩指令：已关闭（配置项 compaction: false）'),
+  `a Host that reports no compaction at all reads as the feature being off, got: ${offText}`,
+)
+assert.ok(!offText.includes('已替换'), 'and no count is invented for it')
+
+// A compaction that ran while the pointer was not aimed at the user's text is
+// worth saying exactly: it is the difference between "not working" and "not used yet".
+STATUS = { ...STATUS, compaction: { matches: 3, replacements: 0, lastReplacedAt: '', characters: 0 } }
+const seenText = await mountListText()
+assert.ok(
+  seenText.includes('已见到 3 次压缩，尚未替换'),
+  `a run that did not replace anything is reported honestly, got: ${seenText}`,
+)
+
+// And the ordinary first-run state, with the built-in instruction in force.
+STATUS = { ...STATUS, compaction: { matches: 0, replacements: 0, lastReplacedAt: '', characters: 0 } }
+scope.state = { ...scope.state, value: { ...scope.state.value, compaction: '' } }
+const idleText = await mountListText()
+assert.ok(idleText.includes('压缩指令：DSH 自带'), 'with nothing pointed at, the line says which text is used instead')
+assert.ok(idleText.includes('还没有遇到压缩'), 'and that no compaction has happened yet')
+STATUS = { ...STATUS, compaction: heldCompaction }
+
 console.log('client ok')
 console.log(`  bundle      factory id ${PACKAGE_NAME}, materialized and driven against stub modules`)
 console.log(`  section     settings.section id=prompt-manager order=${String(meta.order)}`)
 console.log(`  chip        ${chipMeta.name} id=prompt-manager, switches the preset with one settings write`)
 console.log(`  list        ${String(ENTRIES.length)} rows, switches, kebab menus, the plugin's own repo link, add control refused at the cap`)
 console.log('  views       row menu -> editor page -> save -> back to the list')
+console.log('  compaction  a row of its own kind: badge, no switch, the pointer action, and a combo overriding it')
+console.log('  kind        new from the template (8 sections), aimed, saved at the next compaction, switched back to a section')
+console.log('  combos      a combo picks one compaction instruction, and saving it leaves the other combos alone')
+console.log('  report      replacements and matches told apart, local time, and the feature switched off')
 console.log('  presets     list, editor, member checklist, id from the Host, delete clears the selection')
 console.log('  packs       export downloads what the Host built, import reports every id it had to change')
 console.log('  fence       a forked draft carries the hash the fork wrote, so the next save is accepted')

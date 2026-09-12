@@ -23,7 +23,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { MAX_PROBES, ROUTE_PREFIX, SETTINGS_NAMESPACE, apply, environmentFacts, inject, name, resolveHarnessHome } from '../lib/index.js'
-import { activePresetOf, buildIndexSchema, parsePresets } from '../lib/entries.js'
+import { activeCompactionOf, activePresetOf, buildIndexSchema, parseEntries, parsePresets } from '../lib/entries.js'
 import { ESCAPE_MARK } from '../lib/guard.js'
 import { bodyHash } from '../lib/store.js'
 
@@ -413,6 +413,29 @@ try {
     0,
     'a preset left broken must not repeat itself on every settings sync',
   )
+
+  // The other member that never injects: one that is in the index, but is a
+  // compaction instruction. The page's type switch is what creates this — a
+  // preset still lists the id it used to inject as a section — and the symptom is
+  // one prompt quietly missing from the prompt, which is worth one log line.
+  const misplacedBefore = driven.warnings.length
+  writeBody('compact-zh', 'COMPACT-BODY')
+  settings.state.value = {
+    ...settings.state.value,
+    entries: [
+      { id: 'early', title: '先说的', order: 5, enabled: true },
+      { id: 'compact-zh', title: '压缩指令', order: 90, enabled: false, kind: 'compaction' },
+    ],
+    activePreset: 'mixed',
+    presets: [{ id: 'mixed', name: '混了', entries: ['early', 'compact-zh'] }],
+  }
+  settings.state.watcher()
+  const mixed = await driven.read()
+  assert.ok(mixed.prompt.includes('EARLY-BODY'), 'a preset member that is a section still injects')
+  assert.ok(!mixed.prompt.includes('COMPACT-BODY'), 'and the compaction instruction named as a member does not')
+  const misplaced = driven.warnings.slice(misplacedBefore).filter((warning) => warning.includes('compact-zh'))
+  assert.equal(misplaced.length, 1, 'a preset member that is a compaction instruction is reported exactly once')
+  assert.ok(misplaced[0].includes('mixed'), 'and the report names the preset it sits in')
 
   // ── prompt variables ────────────────────────────────────────────────────────
 
@@ -856,7 +879,7 @@ try {
   )
   assert.deepEqual(
     routeSettings.state.value.presets.at(-1),
-    { id: 'ctf-2', name: 'ctf', entries: ['local-one-2', 'pack-ctf-2', 'gone-entry', 'fresh-one'] },
+    { id: 'ctf-2', name: 'ctf', entries: ['local-one-2', 'pack-ctf-2', 'gone-entry', 'fresh-one'], compaction: '' },
     'the imported preset lands beside the one already here, its membership following the renames',
   )
   assert.equal(
@@ -875,6 +898,136 @@ try {
   })
   assert.equal(refused.state.status, 400, 'a pack with an unusable entry is refused')
   assert.equal(JSON.stringify(routeSettings.state.value.entries), entriesBefore, 'and the index is untouched')
+
+  // ── a preset's compaction instruction travels with the pack ─────────────────
+
+  // The pointer is not a membership, which is exactly what makes it easy to lose:
+  // a pack carrying the pointer without the body would arrive at the other
+  // machine naming an instruction that machine cannot produce.
+  writeBody('compact-zh', '压缩正文', LIVE_ROUTES)
+  routeSettings.state.value = {
+    entries: [
+      ...routeSettings.state.value.entries,
+      { id: 'compact-zh', title: '压缩指令', order: 90, enabled: false, kind: 'compaction' },
+    ],
+    presets: [{ id: 'ctf', name: 'ctf', entries: ['local-one'], compaction: 'compact-zh' }],
+    activePreset: 'ctf',
+  }
+  routeSettings.state.watcher()
+  const carrying = (await call({ url: `${ROUTE_PREFIX}/pack/export?preset=ctf` })).json()
+  assert.equal(carrying.preset.compaction, 'compact-zh', 'the pointer travels with the preset it belongs to')
+  assert.deepEqual(
+    carrying.entries.map((entry) => [entry.id, entry.kind]),
+    [['local-one', undefined], ['compact-zh', 'compaction']],
+    'and the instruction it names is carried as a member, still marked as one',
+  )
+  assert.equal(carrying.entries[1].body, '压缩正文', 'with its body, which nothing else could reproduce')
+
+  const landed = await call({
+    method: 'POST',
+    url: `${ROUTE_PREFIX}/pack/import`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify(carrying),
+  })
+  assert.equal(landed.state.status, 200, `importing a pack that carries an instruction must land, got ${landed.state.body}`)
+  assert.equal(
+    landed.json().preset.compaction,
+    'compact-zh-2',
+    'the imported preset points at the id its instruction actually took',
+  )
+  assert.equal(
+    routeSettings.state.value.entries.find((entry) => entry.id === 'compact-zh-2').kind,
+    'compaction',
+    'and the entry lands as a compaction instruction rather than as a section',
+  )
+
+  // ── a compaction instruction is an entry kind, not a section ─────────────────
+  //
+  // It shares the index, the body files, and the reference guard with every other
+  // entry, but it reaches the summary call instead of the system prompt. So the
+  // two things that must hold here: it never registers a section, and only a
+  // pointer — not its own switch — decides which one is in force.
+
+  assert.equal(activeCompactionOf(' compaction-zh '), 'compaction-zh', 'the pointer must be trimmed')
+  assert.equal(activeCompactionOf(undefined), '', 'an absent pointer leaves the stock instruction in force')
+  assert.equal(activeCompactionOf(7), '', 'a non-string pointer must read as none')
+
+  const kinds = parseEntries({
+    entries: [
+      { id: 'plain', title: '段落', order: 10, enabled: true },
+      { id: 'compact-zh', title: '压缩指令', order: 90, enabled: false, kind: 'compaction' },
+      { id: 'bogus', title: '怪东西', order: 20, enabled: true, kind: 'nonsense' },
+    ],
+  })
+  assert.equal(kinds.length, 3, 'every usable entry survives, whatever its kind')
+  assert.equal(kinds[0].kind, undefined, 'a section entry must carry no kind, or every entry gains a phantom field')
+  assert.equal(kinds[1].kind, 'compaction', 'a compaction entry keeps its kind')
+  assert.equal(kinds[2].kind, undefined, 'an unknown kind must read as a section rather than dropping the entry')
+
+  const chosen = parsePresets([{ id: 'ctf', name: 'ctf', entries: ['plain'], compaction: 'compact-zh' }])
+  assert.equal(chosen[0].compaction, 'compact-zh', 'a preset must carry the compaction instruction it selects')
+  assert.equal(
+    parsePresets([{ id: 'bare', name: 'bare', entries: [] }])[0].compaction,
+    '',
+    'a preset that names none must read as the stock instruction',
+  )
+  assert.equal(
+    parsePresets([{ id: 'bad', name: 'bad', entries: [], compaction: 7 }])[0].compaction,
+    '',
+    'an unusable pointer must read as none',
+  )
+
+  // The real schema, skipped only when schemastery itself is unresolvable — an
+  // assertion failure here must never be swallowed into "skipped".
+  let compactSchema
+  try {
+    const { default: Schema } = await load('@deepseek-ai/schemastery')
+    compactSchema = buildIndexSchema(Schema)
+  } catch {
+    compactSchema = undefined
+  }
+  if (compactSchema === undefined) {
+    console.log('  (schemastery is not resolvable here, so the compaction schema round trip is skipped)')
+  } else {
+    const stored = compactSchema({
+      entries: [{ id: 'compact-zh', title: '压缩指令', order: 90, enabled: false, kind: 'compaction' }],
+      compaction: 'compact-zh',
+      presets: [{ id: 'ctf', name: 'ctf', entries: [], compaction: 'compact-zh' }],
+    })
+    assert.equal(stored.entries[0].kind, 'compaction', 'the schema must resolve a stored compaction entry')
+    assert.equal(stored.compaction, 'compact-zh', 'and the pointer that puts it in force')
+    assert.equal(stored.presets[0].compaction, 'compact-zh', 'and the preset that selects it')
+    const plainDoc = compactSchema({ entries: [{ id: 'plain', title: 'x', order: 10, enabled: true }] })
+    assert.equal(plainDoc.entries[0].kind, undefined, 'a stored section entry must not gain a kind')
+    assert.equal(plainDoc.compaction, '', 'a document without a pointer must read as the stock instruction')
+    assert.equal(
+      compactSchema({ presets: [{ id: 'x', name: 'x', entries: [] }] }).presets[0].compaction,
+      undefined,
+      'and a preset must resolve without a phantom pointer field',
+    )
+  }
+
+  const kindSettings = fakeSettings([])
+  const kindDriven = await assembleWith({}, BARE, [kindSettings.plugin])
+  writeBody('compact-zh', 'COMPACT-BODY')
+  kindSettings.state.value = {
+    entries: [
+      { id: 'early', title: '先说的', order: 5, enabled: true },
+      { id: 'compact-zh', title: '压缩指令', order: 90, enabled: true, kind: 'compaction' },
+    ],
+    compaction: 'compact-zh',
+  }
+  kindSettings.state.watcher()
+  const kindRead = await kindDriven.read()
+  assert.ok(kindRead.prompt.includes('EARLY-BODY'), 'a section entry beside a compaction entry must still inject')
+  assert.ok(
+    !kindRead.prompt.includes('COMPACT-BODY'),
+    'a compaction entry must never reach the system prompt, whatever its own switch says',
+  )
+  assert.ok(
+    !kindRead.assembly.sections.some((section) => section.name === sectionName('compact-zh')),
+    'a compaction entry must not register a section at all',
+  )
 
   // ── config validation ───────────────────────────────────────────────────────
   const fakeCtx = {
@@ -926,7 +1079,7 @@ try {
   console.log(`  sections    ${addedNames.join(' -> ')}`)
   console.log('  index       settings-driven add / enable / disable / order / sanitize')
   console.log('  presets     one activePreset write swaps the set, unknown id falls back to the switches')
-  console.log('  members     a preset naming an entry this machine lacks is reported once, not every step')
+  console.log('  members     a preset naming an entry this machine lacks, or one that is a compaction instruction, is reported once')
   console.log('  bodies      store file, subscribed snapshot, and a bodyless entry')
   console.log(`  variables   os=${facts.os} platform=${facts.platform} arch=${facts.arch} release=${facts.os_release}`)
   console.log(`              home=${facts.home} dsh_home=${facts.dsh_home} user=${facts.user} host=${facts.host}`)

@@ -69,6 +69,18 @@ export interface PromptEntry {
    * somebody wrote here.
    */
   source?: string
+  /**
+   * What this entry feeds. Absent means a system-prompt section, which is what
+   * every entry was before this field existed; `compaction` means the body
+   * replaces the instruction a context compaction sends to its summarizer, so it
+   * registers no section and only the document's `compaction` pointer puts it in
+   * force.
+   *
+   * Written only when it is `compaction`: a stored `kind: 'section'` on every
+   * entry would be a phantom field on disk, the same reason `source` has no
+   * default.
+   */
+  kind?: 'section' | 'compaction'
 }
 
 /**
@@ -87,6 +99,13 @@ export interface PromptPreset {
   name: string
   /** Ids of the entries this preset injects. */
   entries: string[]
+  /**
+   * Id of the compaction instruction this preset puts in force, or `''` for the
+   * one DSH ships. A preset answers "which prompts are in force" as a whole, and
+   * the compaction instruction is one of them, so switching a preset switches
+   * this too rather than leaving half the prompt on the previous set.
+   */
+  compaction: string
 }
 
 /** One entry resolved against the store, a subscription, or the package. */
@@ -237,7 +256,7 @@ export function freeId(preferred: string, taken: Iterable<string>): string {
 function toEntry(raw: unknown): PromptEntry | undefined {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
   const record = raw as Record<string, unknown>
-  const { id, title, order, enabled, source } = record
+  const { id, title, order, enabled, source, kind } = record
   if (!isEntryId(id)) return undefined
   if (typeof order !== 'number' || !Number.isFinite(order)) return undefined
   if (typeof enabled !== 'boolean') return undefined
@@ -249,6 +268,10 @@ function toEntry(raw: unknown): PromptEntry | undefined {
     enabled,
   }
   if (typeof source === 'string' && source.length > 0) entry.source = source.slice(0, 64)
+  // A hand-edited document can carry anything here; only the one value this
+  // build knows changes what the entry does. An unknown one reads as a section —
+  // dropping the entry instead would silently delete a prompt somebody wrote.
+  if (kind === 'compaction') entry.kind = 'compaction'
   return entry
 }
 
@@ -281,7 +304,7 @@ export function parseEntries(raw: unknown): PromptEntry[] {
 function toPreset(raw: unknown): PromptPreset | undefined {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
   const record = raw as Record<string, unknown>
-  const { id, name, entries } = record
+  const { id, name, entries, compaction } = record
   if (!isEntryId(id)) return undefined
   const label = typeof name === 'string' ? name.trim() : ''
   const chosen: string[] = []
@@ -297,7 +320,16 @@ function toPreset(raw: unknown): PromptPreset | undefined {
       if (chosen.length >= MAX_PRESET_ENTRIES) break
     }
   }
-  return { id, name: label.length === 0 ? id : label.slice(0, MAX_TITLE_LENGTH), entries: chosen }
+  // Same rule as a member id: a pointer naming an entry the index does not carry
+  // right now is kept, because the entry may come back. Only an unusable value is
+  // read as "the stock instruction".
+  const pointer = typeof compaction === 'string' ? compaction.trim() : ''
+  return {
+    id,
+    name: label.length === 0 ? id : label.slice(0, MAX_TITLE_LENGTH),
+    entries: chosen,
+    compaction: isEntryId(pointer) ? pointer : '',
+  }
 }
 
 /**
@@ -333,6 +365,21 @@ export function activePresetOf(raw: unknown): string {
 }
 
 /**
+ * The id of the compaction instruction in force.
+ *
+ * Read exactly like {@link activePresetOf}: an absent, empty, or unusable value
+ * means `''`, which is "the instruction DSH itself ships". A preset's own
+ * pointer overrides this one while that preset is active, so the caller decides
+ * which of the two it is asking about.
+ *
+ * @param raw - the resolved `compaction` field.
+ * @returns the configured entry id, or `''` when the stock instruction stands.
+ */
+export function activeCompactionOf(raw: unknown): string {
+  return typeof raw === 'string' ? raw.trim() : ''
+}
+
+/**
  * Build the `prompt-manager` namespace schema.
  *
  * @param factory - the schemastery factory loaded at mount.
@@ -350,6 +397,9 @@ export function buildIndexSchema(factory: SchemaFactory): unknown {
     // "subscribed" to anything testing presence rather than value, and a
     // settings write-back would then persist the phantom field to disk.
     source: factory.string(),
+    // Same reason: absent means a system-prompt section, which is what an
+    // existing document holds, so the schema must not invent a value for it.
+    kind: factory.string(),
   })
   const source = factory.object({
     id: factory.string().required(),
@@ -362,6 +412,9 @@ export function buildIndexSchema(factory: SchemaFactory): unknown {
     id: factory.string().required(),
     name: factory.string().default(''),
     entries: factory.array(factory.string()).default([]),
+    // No default, for the same reason as an entry's `source`: a preset that
+    // never named a compaction instruction must not gain a pointer field.
+    compaction: factory.string(),
   })
   const proxy = factory.object({
     kind: factory.string().default('none'),
@@ -373,6 +426,10 @@ export function buildIndexSchema(factory: SchemaFactory): unknown {
     // No default beyond the empty string: an unset preset means the entries'
     // own switches decide, which is what a deployment that never made one gets.
     activePreset: factory.string().default(''),
+    // Same shape as `activePreset`, and the same meaning: "nothing was chosen".
+    // Here that reads as the instruction DSH itself ships, so a document written
+    // before this field existed keeps behaving exactly as it did.
+    compaction: factory.string().default(''),
     sources: factory.array(source).default([]),
     mirror: factory.string().default(''),
     proxy,

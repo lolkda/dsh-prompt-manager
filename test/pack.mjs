@@ -40,7 +40,7 @@ const subscribed = {
 }
 
 const pack = buildPack({
-  preset: { id: 'ctf', name: 'ctf', entries: ['env', 'lolkda-dsh-prompt-pack-ctf', 'gone-entry'] },
+  preset: { id: 'ctf', name: 'ctf', entries: ['env', 'lolkda-dsh-prompt-pack-ctf', 'gone-entry'], compaction: '' },
   members: [local, subscribed],
   missing: ['gone-entry'],
   pluginName: '@lolkda/dsh-prompt-manager',
@@ -66,7 +66,7 @@ assert.deepEqual(
 // A member with neither body nor source is what a bodyless local entry looks
 // like; the pack has to survive it rather than invent one.
 const bare = buildPack({
-  preset: { id: 'p', name: 'p', entries: ['x'] },
+  preset: { id: 'p', name: 'p', entries: ['x'], compaction: '' },
   members: [{ id: 'x', title: '空条目', order: 0, enabled: false }],
   pluginName: '@lolkda/dsh-prompt-manager',
   pluginVersion: '9.9.9',
@@ -159,7 +159,7 @@ const empty = parsePack({
 })
 assert.equal(empty.ok, true, 'a preset with no members is a valid pack')
 assert.deepEqual(empty.pack.entries, [], 'and it carries nothing')
-assert.deepEqual(planImport(empty.pack, { entryIds: [], presetIds: [] }).plan.preset, { id: 'blank', name: 'blank', entries: [] }, 'importing it creates an empty preset')
+assert.deepEqual(planImport(empty.pack, { entryIds: [], presetIds: [] }).plan.preset, { id: 'blank', name: 'blank', entries: [], compaction: '' }, 'importing it creates an empty preset')
 
 // A pack is data: a prompt of the right shape, not a program.
 const withScripts = parsePack({
@@ -199,7 +199,7 @@ assert.deepEqual(free.plan.noBody, ['CTF 沙箱契约'], 'a subscribed member is
 assert.deepEqual(free.plan.missingMembers, ['gone-entry'], 'a member the pack could not carry is reported')
 assert.deepEqual(
   free.plan.preset,
-  { id: 'ctf', name: 'ctf', entries: ['env', 'lolkda-dsh-prompt-pack-ctf', 'gone-entry'] },
+  { id: 'ctf', name: 'ctf', entries: ['env', 'lolkda-dsh-prompt-pack-ctf', 'gone-entry'], compaction: '' },
   'membership survives, including the id that may come back with a source',
 )
 
@@ -216,7 +216,7 @@ assert.deepEqual(
 assert.deepEqual(collided.plan.renamed, [{ from: 'env', to: 'env-2' }], 'and the rename is reported')
 assert.deepEqual(
   collided.plan.preset,
-  { id: 'ctf-2', name: 'ctf', entries: ['env-2', 'lolkda-dsh-prompt-pack-ctf', 'gone-entry'] },
+  { id: 'ctf-2', name: 'ctf', entries: ['env-2', 'lolkda-dsh-prompt-pack-ctf', 'gone-entry'], compaction: '' },
   'the preset follows the entries that moved, keeps its name, and takes a free id',
 )
 assert.equal(collided.plan.entries[0].renamedFrom, 'env', 'the entry remembers what it was called')
@@ -224,7 +224,7 @@ assert.equal(collided.plan.entries[0].renamedFrom, 'env', 'the entry remembers w
 // Two entries in one pack claiming the same id is the same rule, applied twice.
 const doubled = planImport(
   buildPack({
-    preset: { id: 'p', name: 'p', entries: ['dup'] },
+    preset: { id: 'p', name: 'p', entries: ['dup'], compaction: '' },
     members: [
       { id: 'dup', title: '第一份', order: 1, enabled: true, body: 'a' },
       { id: 'dup', title: '第二份', order: 2, enabled: true, body: 'b' },
@@ -249,7 +249,7 @@ assert.deepEqual(
 // title — the one case where the title is the only thing there is to go on.
 const unusable = planImport(
   buildPack({
-    preset: { id: 'p', name: 'p', entries: [] },
+    preset: { id: 'p', name: 'p', entries: [], compaction: '' },
     members: [{ id: 'Not An Id', title: '中文标题', order: 1, enabled: true, body: 'x' }],
     pluginName: '@lolkda/dsh-prompt-manager',
   pluginVersion: '9.9.9',
@@ -297,6 +297,88 @@ const exact = planImport(pack, {
   presetIds: [],
 })
 assert.equal(exact.ok, true, 'a pack that exactly fills the last slots is accepted')
+
+// ── a preset carries the compaction instruction it put in force ───────────────
+
+// The pointer is a preset's, not the machine's: a set of prompts that switches
+// without it would arrive on another machine with half of itself on the previous
+// selection. So it travels with the preset, and it is an id — which means an
+// import has to move it exactly like a member id.
+const compactionMember = {
+  id: 'compact-zh',
+  title: '压缩指令',
+  order: 90,
+  enabled: false,
+  kind: 'compaction',
+  body: '你是压缩引擎，按八节模板输出。',
+}
+
+const carrying = buildPack({
+  preset: { id: 'ctf', name: 'ctf', entries: ['env', 'compact-zh'], compaction: 'compact-zh' },
+  members: [local, compactionMember],
+  pluginName: '@lolkda/dsh-prompt-manager',
+  pluginVersion: '9.9.9',
+})
+assert.equal(carrying.preset.compaction, 'compact-zh', 'the pointer must travel with the preset it belongs to')
+assert.equal(carrying.entries[1].kind, 'compaction', 'and the member must still say what it is on the other side')
+assert.equal(
+  buildPack({
+    preset: { id: 'p', name: 'p', entries: ['env'], compaction: '' },
+    members: [local],
+    pluginName: '@lolkda/dsh-prompt-manager',
+    pluginVersion: '9.9.9',
+  }).preset.compaction,
+  undefined,
+  'a preset that names no instruction must carry no pointer field at all, so a machine that uses none exports unchanged bytes',
+)
+
+const reread = parsePack(JSON.parse(JSON.stringify(carrying)))
+assert.equal(reread.ok, true, 'a pack this build wrote must read back')
+assert.equal(reread.pack.preset.compaction, 'compact-zh', 'with its pointer intact')
+assert.equal(reread.pack.entries[1].kind, 'compaction', 'and the kind of the member that carries it')
+
+const pointerless = parsePack({
+  format: PACK_FORMAT,
+  version: PACK_VERSION,
+  preset: { id: 'x', name: 'x', entries: ['a'] },
+  entries: [{ id: 'a', title: 'a', body: 'hello' }],
+})
+assert.equal(pointerless.ok, true, 'a pack from before this field existed is still a pack')
+assert.equal(pointerless.pack.preset.compaction, undefined, 'and it resolves without inventing a pointer')
+assert.equal(pointerless.pack.entries[0].kind, undefined, 'nor a kind for an entry that is not one')
+
+const freePointer = planImport(carrying, { entryIds: [], presetIds: [] })
+assert.equal(freePointer.ok, true, 'a pack with a pointer fits like any other')
+assert.equal(freePointer.plan.preset.compaction, 'compact-zh', 'and the pointer lands as written when nothing had to move')
+assert.equal(freePointer.plan.entries[1].kind, 'compaction', 'the compaction member is created as one')
+assert.equal(freePointer.plan.compactionDropped, undefined, 'with nothing dropped')
+
+const movedPointer = planImport(carrying, { entryIds: ['compact-zh'], presetIds: [] })
+assert.equal(movedPointer.ok, true, 'a taken id for the instruction is not an error either')
+assert.equal(movedPointer.plan.entries[1].id, 'compact-zh-2', 'the instruction takes a free id')
+assert.equal(
+  movedPointer.plan.preset.compaction,
+  'compact-zh-2',
+  'and the pointer follows it, exactly as a member id does',
+)
+assert.equal(movedPointer.plan.entries[1].renamedFrom, 'compact-zh', 'the rename is recorded as usual')
+assert.deepEqual(movedPointer.plan.renamed, [{ from: 'compact-zh', to: 'compact-zh-2' }], 'and reported')
+
+// The one case an import cannot carry: the pointer named something the pack
+// itself never had. Carrying the id anyway would leave the preset pointing at an
+// entry that does not exist here — reported, and cleared to "the stock one".
+const danglingPointer = planImport(
+  parsePack({
+    format: PACK_FORMAT,
+    version: PACK_VERSION,
+    preset: { id: 'x', name: 'x', entries: ['a'], compaction: 'gone-instruction' },
+    entries: [{ id: 'a', title: 'a', body: 'hello' }],
+  }).pack,
+  { entryIds: [], presetIds: [] },
+)
+assert.equal(danglingPointer.ok, true, 'a pointer to nothing is not a reason to refuse the whole pack')
+assert.equal(danglingPointer.plan.preset.compaction, '', 'the preset is imported naming no instruction')
+assert.equal(danglingPointer.plan.compactionDropped, 'gone-instruction', 'and the report says which one was let go')
 
 // ── writing the bodies ────────────────────────────────────────────────────────
 

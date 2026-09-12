@@ -192,6 +192,9 @@ try {
     },
   }
 
+  /** What the compaction seam reports; `undefined` means the feature is off here. */
+  let compactionStats
+
   installPromptRoutes(ctx, {
     store,
     describe: (id) => {
@@ -228,7 +231,7 @@ try {
         ok: true,
         report: {
           entries: [{ id: 'env', title: '本机环境' }],
-          preset: { id: 'ctf', name: 'ctf', entries: ['env'] },
+          preset: { id: 'ctf', name: 'ctf', entries: ['env'], compaction: '' },
           renamed: [],
           noBody: [],
           sourceDropped: [],
@@ -237,6 +240,7 @@ try {
         },
       }
     },
+    compaction: () => compactionStats,
   })
 
   assert.equal(routes.length, 1, 'the plugin must register exactly one route')
@@ -265,6 +269,29 @@ try {
     status.json().variables,
     { os: 'Windows', node: '24.18.0' },
     'status must report the prompt variables in force, so a deployment can check what the probes measured',
+  )
+  assert.equal(
+    'compaction' in status.json(),
+    false,
+    'a deployment that switched the compaction seam off must report nothing about it, rather than zeros that read as "on"',
+  )
+
+  // Whether a compaction instruction was ever substituted is the one thing the
+  // page cannot work out for itself: the summary simply comes back looking as if
+  // it were written to a different template, and nothing in the session says
+  // otherwise. So the counters are reported here, live, per request.
+  compactionStats = { matches: 3, replacements: 2, lastReplacedAt: '2026-09-12T01:02:03.000Z', characters: 812 }
+  const seam = await call({ url: `${ROUTE_PREFIX}/status` })
+  assert.deepEqual(
+    seam.json().compaction,
+    { matches: 3, replacements: 2, lastReplacedAt: '2026-09-12T01:02:03.000Z', characters: 812 },
+    'status must report what the compaction seam has done since this mount',
+  )
+  compactionStats = undefined
+  assert.equal(
+    'compaction' in (await call({ url: `${ROUTE_PREFIX}/status` })).json(),
+    false,
+    'and the reading must be live: switching it off takes the field away on the next request',
   )
 
   const bodyless = await call({ url: `${ROUTE_PREFIX}/body/nobody` })
@@ -896,6 +923,7 @@ try {
   console.log('  gates       loopback peer + loopback host + same-origin writes only, unusable ids refused')
   console.log('  fencing     409 on absent-or-changed override, 200 on a matching hash')
   console.log('  statuses    400 malformed/oversized, 404 unknown path, 405 wrong method, 422 bad reference')
+  console.log('  health      status reports the compaction seam only when the feature is on')
   console.log(`  presets     preset id allocation, ${String(MAX_PRESETS)} preset cap, blank title refused`)
   console.log('  gates       403 for a rebound host, a foreign origin, and a non-loopback peer')
   console.log('  sources     add / list / check / apply / revert / forget, subscribed bodies read-only')

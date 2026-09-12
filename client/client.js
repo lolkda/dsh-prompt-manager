@@ -109,6 +109,10 @@ window.__ModuleLoader__.load({
 
 /* chip and status dot, as on the model page */
 .dsh-prompt-manager__badge{flex:0 0 auto;padding:1px 6px;border:.5px solid var(--dsw-alias-border-l3);border-radius:4px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary)}
+/* The compaction badge marks a different claim from the subscribed one — the
+   entry is not a system prompt section at all — so it carries its own class and
+   a quieter border rather than the same look twice. */
+.dsh-prompt-manager__badge--compaction{border-style:dashed;color:var(--dsw-alias-label-tertiary)}
 .dsh-prompt-manager__dot{width:6px;height:6px;border-radius:50%;flex:0 0 auto;background:var(--dsw-alias-state-success-primary)}
 .dsh-prompt-manager__dot--idle{background:var(--dsw-alias-label-quaternary)}
 .dsh-prompt-manager__dot--pending{background:var(--dsw-alias-state-warn-primary)}
@@ -140,9 +144,11 @@ window.__ModuleLoader__.load({
 .dsh-prompt-manager__field{display:flex;flex-direction:column;gap:6px;min-width:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
 .dsh-prompt-manager__field--grow{flex:1 1 200px}
 .dsh-prompt-manager__field--order{flex:0 0 96px}
-.dsh-prompt-manager__field input{box-sizing:border-box;width:100%;height:32px;padding:0 10px;border:.5px solid var(--dsw-alias-border-l3);border-radius:8px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px}
-.dsh-prompt-manager__field input:focus{outline:none;border-color:var(--dsw-alias-state-business-primary)}
-.dsh-prompt-manager__field input:disabled{color:var(--dsw-alias-label-quaternary)}
+/* The combo editor's compaction control is a native select, and it should look
+   like the text fields beside it rather than like a browser default. */
+.dsh-prompt-manager__field input,.dsh-prompt-manager__field select{box-sizing:border-box;width:100%;height:32px;padding:0 10px;border:.5px solid var(--dsw-alias-border-l3);border-radius:8px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px}
+.dsh-prompt-manager__field input:focus,.dsh-prompt-manager__field select:focus{outline:none;border-color:var(--dsw-alias-state-business-primary)}
+.dsh-prompt-manager__field input:disabled,.dsh-prompt-manager__field select:disabled{color:var(--dsw-alias-label-quaternary)}
 .dsh-prompt-manager__pane{display:flex;flex-direction:column;gap:6px;min-width:0}
 .dsh-prompt-manager__paneLabel{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
 .dsh-prompt-manager__pane textarea{box-sizing:border-box;width:100%;min-height:300px;resize:vertical;padding:10px 12px;border:.5px solid var(--dsw-alias-border-l3);border-radius:12px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-family:var(--ds-font-family-code,ui-monospace,monospace);font-size:12px;line-height:18px}
@@ -252,6 +258,55 @@ window.__ModuleLoader__.load({
     ].join('\n')
 
     /**
+     * The body a brand-new compaction instruction starts from.
+     *
+     * It is the shape the summary has to end up in, section for section, written
+     * out as the page's own default: the instruction this replaces is not
+     * readable from here, so a person who has never seen it still gets a working
+     * instruction to edit rather than an empty box.
+     */
+    const COMPACTION_TEMPLATE = [
+      '你是本 AI 编程助手的压缩引擎。把上面的对话浓缩成一份检查点，让另一个模型能无损失地接着干活。',
+      '',
+      '严格按下面的 Markdown 结构输出，小节一个都不能少、顺序不能变；用短促的列表项而不是大段散文；某一节为空就写「(无)」，绝不省略该小节。',
+      '',
+      '## 主要诉求与意图',
+      '- [用户的原始目标与后续演进；原话重要时逐字引用]',
+      '',
+      '## 关键技术概念',
+      '- [涉及的技术、框架、模式与约定]',
+      '',
+      '## 文件与代码',
+      '- [精确路径：为什么重要，关键改动或片段]',
+      '',
+      '## 报错与修复',
+      '- [报错原文：如何解决，以及相关的用户反馈]',
+      '',
+      '## 待办事项',
+      '- [用户明确要求但尚未完成的工作]',
+      '',
+      '## 当前进展',
+      '- [检查点此刻正在做的事]',
+      '',
+      '## 下一步',
+      '- [与最近一次诉求直接相关的单个下一步动作，没有就写「(无)」]',
+      '',
+      '## 关键上下文',
+      '- [决策及其理由、约束、用户偏好、未决问题、继续所需的材料]',
+      '',
+      '规则：',
+      '- 用简洁的中文工程语言书写。文件路径、命令、报错字符串、标识符、数值、函数签名、语法片段一律保持原样，不要翻译。',
+      '- 忠实记录用户反馈与明确指令，尤其是纠正性的。',
+      '- 不要提到这次总结请求，也不要提到上下文被压缩过。',
+      '- 只输出检查点正文：不要调用任何工具，也不要执行其它动作。',
+      '- 正文里可以用 {{变量}}：宿主会在发送前把它们换成当前值。',
+      '',
+    ].join('\n')
+
+    /** Title a freshly created compaction entry is given. */
+    const COMPACTION_TITLE = '压缩指令'
+
+    /**
      * Every `{{...}}` a body carries, as written.
      *
      * The inner text is returned whatever it holds, because the point of this
@@ -338,6 +393,10 @@ window.__ModuleLoader__.load({
           entries: Array.isArray(preset.entries)
             ? preset.entries.filter((id) => typeof id === 'string')
             : [],
+          // Kept rather than dropped: every preset record this page rewrites is
+          // built from these normalized ones, so dropping the field here would
+          // clear the compaction choice of every preset the user did not touch.
+          compaction: typeof preset.compaction === 'string' ? preset.compaction : '',
         }))
     }
 
@@ -364,6 +423,9 @@ window.__ModuleLoader__.load({
         const left = before[index]
         const right = after[index]
         if (left.id !== right.id || left.name !== right.name) return true
+        // The compaction choice is part of the preset, so a save that only
+        // changed it is a save, not a no-op.
+        if (left.compaction !== right.compaction) return true
         if (left.entries.length !== right.entries.length) return true
         for (let member = 0; member < left.entries.length; member += 1) {
           if (left.entries[member] !== right.entries[member]) return true
@@ -397,6 +459,34 @@ window.__ModuleLoader__.load({
      */
     function isSubscribed(entry) {
       return typeof entry.source === 'string' && entry.source.length > 0
+    }
+
+    /**
+     * Whether an entry is the compaction instruction rather than a section.
+     *
+     * The field is absent on a section entry by design — writing `kind:
+     * 'section'` back would leave a phantom key in every record of the settings
+     * document — so absence, not the literal value, is what a section means.
+     */
+    function isCompaction(entry) {
+      return entry.kind === 'compaction'
+    }
+
+    /**
+     * One entry, as a section entry: with no `kind` key rather than `kind:
+     * 'section'`.
+     *
+     * The settings document is meant to carry what a record is and nothing else,
+     * and a section entry is what the absence of the field means — writing the
+     * literal would put a phantom key into the store and into every later
+     * rewrite of it.
+     * @param entry - the entry that stops being a compaction instruction.
+     * @returns a copy with the key removed.
+     */
+    function withoutKind(entry) {
+      const plain = { ...entry }
+      delete plain.kind
+      return plain
     }
 
     /** The next free placement for an added entry. */
@@ -693,6 +783,27 @@ window.__ModuleLoader__.load({
       const configured = React.useMemo(() => sourcesOf(snapshot), [snapshot])
       const presets = React.useMemo(() => presetsOf(snapshot), [snapshot])
       const activePreset = React.useMemo(() => activePresetOf(snapshot, presets), [snapshot, presets])
+
+      /**
+       * The compaction entry in force, or `null` when the built-in text is.
+       *
+       * A combo answers this the way it answers which sections inject: its own
+       * field wins even when it points at nothing, because "use the built-in
+       * instruction" is a choice a combo makes rather than the absence of one.
+       * With no combo in force the root field decides — exactly what the Host
+       * reads back for itself.
+       */
+      const compactionId = React.useMemo(() => {
+        if (activePreset !== null) return activePreset.compaction
+        const value = snapshot && snapshot.value
+        return value && typeof value.compaction === 'string' ? value.compaction : NO_PRESET
+      }, [activePreset, snapshot])
+      const compactionEntry = React.useMemo(() => {
+        if (compactionId.length === 0) return null
+        return entries.find((entry) => entry.id === compactionId && isCompaction(entry)) ?? null
+      }, [compactionId, entries])
+      /** Whether a combo, rather than the root field, answers the pointer. */
+      const compactionLocked = activePreset !== null
       const [view, setView] = React.useState('list')
       const [filter, setFilter] = React.useState('all')
       const [selectedId, setSelectedId] = React.useState(null)
@@ -760,6 +871,10 @@ window.__ModuleLoader__.load({
       const subscribedDraft = draft !== null && draft.source === 'subscribed'
       // A built-in body ships with the plugin; editing and saving overrides it.
       const builtinDraft = draft !== null && draft.source === 'builtin'
+      // A compaction instruction is edited in the same page as a section, but
+      // every answer the page gives about it differs: when an edit lands, what
+      // its switch would mean, and how it stops being one.
+      const compactionDraft = draft !== null && draft.kind === 'compaction'
       // The variables in force, and the scripts that supply them, as the Host
       // last reported them. The list is what a body may reference, so it is also
       // what the editor uses to catch a reference that would fail assembly.
@@ -789,6 +904,11 @@ window.__ModuleLoader__.load({
             fileSha1: typeof body.fileSha1 === 'string' ? body.fileSha1 : null,
             isNew: false,
           }
+          // What the entry is decides what the page says about it, and kind is
+          // part of the record rather than of the body: it is read from the index
+          // the page already holds, and set only when it is set — a section entry
+          // carries no such key at all.
+          if (known !== undefined && isCompaction(known)) next.kind = 'compaction'
           setDraft(next)
           setSaved(next)
           setStatus(null)
@@ -854,6 +974,62 @@ window.__ModuleLoader__.load({
         }
       }, [entries, store])
 
+      /**
+       * Create a compaction instruction and put it in force.
+       *
+       * A section can be a draft that only becomes real once it is saved, because
+       * nothing reads the index until a person saves it. A compaction entry cannot
+       * work that way: the pointer has to name something that exists, so the entry
+       * and the pointer are written before the editor opens. What that leaves is an
+       * entry with no body yet — which the Host reads as "use the built-in
+       * instruction" — and the save that follows fills the template in.
+       */
+      const addCompaction = React.useCallback(async () => {
+        const cap = store !== null && typeof store.maxEntries === 'number' ? store.maxEntries : null
+        if (cap !== null && entries.length >= cap) {
+          setStatus({ kind: 'error', text: `最多 ${String(cap)} 条提示词，先删掉一条，再新增压缩指令。` })
+          return
+        }
+        setBusy(true)
+        let placed = false
+        try {
+          const allocated = await request('POST', '/id', { title: COMPACTION_TITLE })
+          const order = nextOrder(entries)
+          await scope.set('entries', [
+            ...entries,
+            { id: allocated.id, title: COMPACTION_TITLE, order, enabled: false, kind: 'compaction' },
+          ])
+          placed = true
+          await scope.set('compaction', allocated.id)
+          const next = {
+            id: allocated.id,
+            title: COMPACTION_TITLE,
+            order,
+            body: COMPACTION_TEMPLATE,
+            source: 'empty',
+            fileSha1: null,
+            isNew: false,
+            kind: 'compaction',
+          }
+          setSelectedId(allocated.id)
+          setDraft(next)
+          setSaved(next)
+          setStatus({ kind: 'info', text: `已新建压缩指令 ${allocated.id} 并设为当前，保存后在下一次压缩生效。` })
+          setView('editor')
+        } catch (error) {
+          // Half a creation is worth naming precisely: the entry is in the index
+          // but nothing points at it, which the row's own action can finish.
+          setStatus({
+            kind: 'error',
+            text: placed
+              ? `条目已经建好，但「设为当前」没写进去：${error.message}（在列表里点它的「设为当前」即可）`
+              : error.message,
+          })
+        } finally {
+          setBusy(false)
+        }
+      }, [entries, store, scope])
+
       const save = React.useCallback(async () => {
         if (draft === null) return
         setBusy(true)
@@ -889,14 +1065,17 @@ window.__ModuleLoader__.load({
               return
             }
           }
-          setStatus({ kind: 'info', text: '已保存，下一个模型步骤生效。' })
+          setStatus({
+            kind: 'info',
+            text: compactionDraft ? '已保存，下一次压缩生效。' : '已保存，下一个模型步骤生效。',
+          })
           await refreshStore()
         } catch (error) {
           setStatus({ kind: 'error', text: error.message })
         } finally {
           setBusy(false)
         }
-      }, [draft, entries, refreshStore, scope])
+      }, [compactionDraft, draft, entries, refreshStore, scope])
 
       // ── presets ──────────────────────────────────────────────────────────────
 
@@ -910,8 +1089,13 @@ window.__ModuleLoader__.load({
        */
       const openPreset = React.useCallback((preset) => {
         setPresetDraft(preset === null
-          ? { id: null, name: '', members: [] }
-          : { id: preset.id, name: preset.name, members: [...preset.entries] })
+          ? { id: null, name: '', members: [], compaction: NO_PRESET }
+          : {
+            id: preset.id,
+            name: preset.name,
+            members: [...preset.entries],
+            compaction: preset.compaction,
+          })
         setStatus(null)
         setView('preset')
       }, [])
@@ -943,11 +1127,26 @@ window.__ModuleLoader__.load({
         try {
           const held = presetDraft.id
           const id = held !== null ? held : (await request('POST', '/preset/id', { title: label })).id
+          // Every record travels through this write, so each one is rebuilt from
+          // the draft only when it is the draft: an untouched combo keeps its own
+          // members and its own compaction instruction.
           const next = held !== null
-            ? presets.map((preset) => (preset.id === held ? { id, name: label, entries: presetDraft.members } : preset))
-            : [...presets, { id, name: label, entries: presetDraft.members }]
+            ? presets.map((preset) => (preset.id === held
+              ? { id, name: label, entries: presetDraft.members, compaction: presetDraft.compaction }
+              : preset))
+            : [...presets, {
+              id,
+              name: label,
+              entries: presetDraft.members,
+              compaction: presetDraft.compaction,
+            }]
           if (presetsDiffer(presets, next)) await scope.set('presets', next)
-          setPresetDraft({ id, name: label, members: presetDraft.members })
+          setPresetDraft({
+            id,
+            name: label,
+            members: presetDraft.members,
+            compaction: presetDraft.compaction,
+          })
           setStatus({ kind: 'info', text: `组合「${label}」已保存。` })
           setView('presets')
         } catch (error) {
@@ -1251,6 +1450,67 @@ window.__ModuleLoader__.load({
           .finally(() => setBusy(false))
       }, [entries, scope])
 
+      /**
+       * Aim the compaction pointer at one entry, or release it again.
+       *
+       * One settings write either way, and the entry that is already current
+       * switches back to the built-in instruction: the same control does both, so
+       * the page never needs a second one to undo the first. It takes effect at
+       * the next compaction, not at the next model step.
+       * @param entry - the compaction entry to aim the pointer at, or the one to release.
+       */
+      const setCompaction = React.useCallback((entry) => {
+        const next = compactionId === entry.id ? NO_PRESET : entry.id
+        setBusy(true)
+        Promise.resolve(scope.set('compaction', next))
+          .then(() => setStatus({
+            kind: 'info',
+            text: next.length === 0
+              ? '已改回 DSH 自带的压缩指令，下一次压缩生效。'
+              : `已把「${entry.title}」设为压缩指令，下一次压缩生效。`,
+          }))
+          .catch((error) => setStatus({ kind: 'error', text: error.message }))
+          .finally(() => setBusy(false))
+      }, [compactionId, scope])
+
+      /**
+       * Change what an entry is: a system prompt section, or the compaction
+       * instruction.
+       *
+       * The body is untouched either way — the same text can be a section today
+       * and an instruction tomorrow — so this is one index write, plus the one
+       * step that a pointer aimed at this entry makes necessary: it may only ever
+       * name a compaction entry, so it has to let go in the same breath. Left
+       * alone, the Host would read a pointer at a section as "no instruction" and
+       * say so in its log, which is a mess to explain from here.
+       * @param compaction - whether the entry should become the compaction instruction.
+       */
+      const setKind = React.useCallback(async (compaction) => {
+        if (draft === null) return
+        setBusy(true)
+        try {
+          const nextEntries = entries.map((entry) => {
+            if (entry.id !== draft.id) return entry
+            return compaction ? { ...entry, kind: 'compaction' } : withoutKind(entry)
+          })
+          await scope.set('entries', nextEntries)
+          if (!compaction && compactionId === draft.id) await scope.set('compaction', NO_PRESET)
+          const next = compaction ? { ...draft, kind: 'compaction' } : withoutKind(draft)
+          setDraft(next)
+          setSaved(next)
+          setStatus({
+            kind: 'info',
+            text: compaction
+              ? '已改成压缩指令。它不再进 system prompt，想让它生效点「设为当前」。'
+              : '已改回普通段落，按开关注入；压缩指令回到 DSH 自带的那段。',
+          })
+        } catch (error) {
+          setStatus({ kind: 'error', text: error.message })
+        } finally {
+          setBusy(false)
+        }
+      }, [compactionId, draft, entries, scope])
+
       const remove = React.useCallback((entry) => {
         if (!window.confirm(`删除「${entry.title}」？它的正文文件也会一起删除。`)) return
         setBusy(true)
@@ -1497,6 +1757,10 @@ window.__ModuleLoader__.load({
                   : (draft.fileSha1 === null ? ' · 还没有正文文件' : ' · 已保存'),
             ].join('')),
           ]),
+          compactionDraft
+            ? h('p', { key: 'role', className: 'dsh-prompt-manager__note' },
+              '这条不是 system prompt 段落，而是压缩时替换 DSH 自带指令的那段文本：保存后在下一次压缩生效（不是下一个模型步骤），正文里同样可以用 {{变量}}。')
+            : null,
           h('div', { key: 'form', className: 'dsh-prompt-manager__surface' }, [
             h('div', { key: 'fields', className: 'dsh-prompt-manager__fields' }, [
               h('label', { key: 'title', className: 'dsh-prompt-manager__field dsh-prompt-manager__field--grow' }, [
@@ -1566,8 +1830,30 @@ window.__ModuleLoader__.load({
           ]),
           ]),
           h('div', { key: 'actions', className: 'dsh-prompt-manager__actions' }, [            h(Button, { key: 'save', variant: 'primary', disabled: !writable || busy || !dirty, onClick: save }, dirty ? '保存修改' : '已保存'),
+            compactionDraft
+              ? h(Button, {
+                key: 'current',
+                disabled: !writable || busy || compactionLocked,
+                onClick: () => { void setCompaction(draft) },
+              }, compactionEntry !== null && compactionEntry.id === draft.id ? '取消当前' : '设为当前')
+              : null,
+            compactionDraft
+              ? h(Button, {
+                key: 'asSection',
+                disabled: !writable || busy,
+                onClick: () => { void setKind(false) },
+              }, '转为普通段落')
+              : h(Button, {
+                key: 'asCompaction',
+                disabled: !writable || busy,
+                onClick: () => { void setKind(true) },
+              }, '转为压缩指令'),
             subscribedDraft
               ? h(Button, { key: 'fork', disabled: !writable || busy, onClick: () => { void forkEntry() } }, 'fork 成本地条目')
+              : null,
+            compactionDraft && compactionLocked
+              ? h('span', { key: 'note', className: 'dsh-prompt-manager__note' },
+                '当前有组合生效，由组合里的「压缩指令」决定用哪条；想单独控制就先取消组合。')
               : null,
             subscribedDraft
               ? h('span', { key: 'note', className: 'dsh-prompt-manager__note' }, '订阅条目的正文来自上游，只能通过「检查更新」改；想自己改就先 fork。')
@@ -1891,6 +2177,21 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * The compaction instruction one id names, as this page says it.
+       *
+       * An empty id is not a missing choice but a real one — the instruction DSH
+       * ships — and an id nothing holds is named rather than passed off as that
+       * built-in text, which is what a bare empty control would do.
+       * @param id - the entry id a combo (or the root field) names.
+       * @returns the text to render.
+       */
+      const compactionTitleOf = (id) => {
+        if (id.length === 0) return 'DSH 自带'
+        const known = entries.find((entry) => entry.id === id && isCompaction(entry))
+        return known !== undefined ? known.title : `（条目不存在：${id}）`
+      }
+
+      /**
        * The preset editor: a name, and the entries this preset selects.
        *
        * The checklist is the whole entry index rather than only the ones switched
@@ -1899,8 +2200,30 @@ window.__ModuleLoader__.load({
        */
       if (view === 'preset' && presetDraft !== null) {
         const members = presetDraft.members
+        // A combo selects sections; the compaction instruction is selected by its
+        // own control, because a combo also names it explicitly. Listing it here
+        // would let one be ticked into a member list that never injects it.
+        const selectable = entries.filter((entry) => !isCompaction(entry))
         const missing = members.filter((id) => !entries.some((entry) => entry.id === id))
-        const rows = entries.map((entry) => {
+        // The other half of what a combo decides. Sorted by the same order the
+        // list page shows, so the two pages cannot disagree about which entry
+        // comes first, and the built-in instruction is a choice like any other
+        // rather than the absence of one.
+        const compactionChoices = [
+          { id: NO_PRESET, label: 'DSH 自带' },
+          ...entries
+            .filter((entry) => isCompaction(entry))
+            .sort((left, right) => (left.order ?? 0) - (right.order ?? 0))
+            .map((entry) => ({ id: entry.id, label: entry.title })),
+        ]
+        if (presetDraft.compaction.length > 0
+          && !compactionChoices.some((choice) => choice.id === presetDraft.compaction)) {
+          compactionChoices.push({
+            id: presetDraft.compaction,
+            label: `（条目不存在：${presetDraft.compaction}）`,
+          })
+        }
+        const rows = selectable.map((entry) => {
           const checked = members.includes(entry.id)
           return h('label', { key: entry.id, className: 'dsh-prompt-manager__member' }, [
             h('input', {
@@ -1945,13 +2268,22 @@ window.__ModuleLoader__.load({
                   onChange: (event) => setPresetDraft({ ...presetDraft, name: event.target.value }),
                 }),
               ]),
+              h('label', { key: 'compaction', className: 'dsh-prompt-manager__field' }, [
+                '压缩指令（这个组合压缩时用哪条）',
+                h('select', {
+                  key: 'select',
+                  value: presetDraft.compaction,
+                  disabled: busy,
+                  onChange: (event) => setPresetDraft({ ...presetDraft, compaction: event.target.value }),
+                }, compactionChoices.map((choice) => h('option', { key: choice.id, value: choice.id }, choice.label))),
+              ]),
             ]),
             h('div', { key: 'actions', className: 'dsh-prompt-manager__actions' }, [
               h(Button, {
                 key: 'all',
                 disabled: busy,
-                onClick: () => setPresetDraft({ ...presetDraft, members: entries.map((entry) => entry.id) }),
-              }, `全选（${String(entries.length)}）`),
+                onClick: () => setPresetDraft({ ...presetDraft, members: selectable.map((entry) => entry.id) }),
+              }, `全选（${String(selectable.length)}）`),
               h(Button, {
                 key: 'none',
                 disabled: busy || members.length === 0,
@@ -1965,8 +2297,8 @@ window.__ModuleLoader__.load({
               }, '保存组合'),
             ]),
           ]),
-          entries.length === 0
-            ? h('div', { key: 'empty', className: 'dsh-prompt-manager__empty' }, '还没有提示词可以选：先在列表页新增一条。')
+          selectable.length === 0
+            ? h('div', { key: 'empty', className: 'dsh-prompt-manager__empty' }, '还没有可勾选的 system prompt 段落：先在列表页「新增提示词」。压缩指令由上面这个选择框决定。')
             : h('div', { key: 'members', className: 'dsh-prompt-manager__members' }, rows),
           missing.length === 0
             ? null
@@ -1989,10 +2321,14 @@ window.__ModuleLoader__.load({
               onClick: () => openPreset(preset),
             }, [
               h('span', { key: 'title', className: 'dsh-prompt-manager__title' }, preset.name),
-              h('span', { key: 'meta', className: 'dsh-prompt-manager__meta' },
+              h('span', { key: 'meta', className: 'dsh-prompt-manager__meta' }, [
                 preset.entries.length === 0
                   ? '没有选中任何条目（启用它等于一条都不注入）'
-                  : `${String(preset.entries.length)} 条 · ${preset.entries.slice(0, 4).map(titleOfEntry).join('、')}${preset.entries.length > 4 ? '…' : ''}`),
+                  : `${String(preset.entries.length)} 条 · ${preset.entries.slice(0, 4).map(titleOfEntry).join('、')}${preset.entries.length > 4 ? '…' : ''}`,
+                // Which compaction instruction the combo would use, on the same
+                // line as its members: both are what enabling it decides.
+                ` · 压缩指令：${compactionTitleOf(preset.compaction)}`,
+              ]),
             ]),
             h('div', { key: 'side', className: 'dsh-prompt-manager__cardSide' }, [
               current ? h('span', { key: 'badge', className: 'dsh-prompt-manager__badge' }, '当前') : null,
@@ -2074,41 +2410,59 @@ window.__ModuleLoader__.load({
         return true
       })
 
+      // The sections, which is what the switches and the enabled summary are
+      // about: a compaction entry never enters the system prompt.
+      const sectionEntries = entries.filter((entry) => !isCompaction(entry))
+
       const rows = visible.map((entry) => {
+        const compaction = isCompaction(entry)
         // What this entry contributes right now. An active preset answers it by
         // itself, so the row's state dot has to follow the preset rather than the
         // switch — otherwise the page would show a prompt as on while the prompt
-        // it describes is not being injected.
-        const injected = activePreset === null
-          ? entry.enabled === true
-          : activePreset.entries.includes(entry.id)
+        // it describes is not being injected. A compaction entry answers a
+        // different question with the same dot: whether the pointer is aimed at it.
+        const injected = compaction
+          ? compactionEntry !== null && compactionEntry.id === entry.id
+          : activePreset === null
+            ? entry.enabled === true
+            : activePreset.entries.includes(entry.id)
         const subscribed = isSubscribed(entry)
         const source = subscribed ? sourceById.get(entry.source) : undefined
         // The metadata line sits outside the row's button so the repository can be
         // a real link: an anchor nested in a button is neither valid markup nor
         // something a click can be trusted to split correctly. Parts are grouped so
         // the label and its link stay adjacent and only the links are underlined.
-        const meta = [
-          subscribed
-            ? source === undefined
-              // The source is gone from the settings document, so the slug is all
-              // that is left of where this body came from — a link would be dead.
-              ? [`订阅 ${entry.source}`]
-              : [
-                '订阅 ',
-                h('a', {
-                  key: 'source',
-                  className: 'dsh-prompt-manager__sourceLink',
-                  href: `https://github.com/${source.repo}`,
-                  target: '_blank',
-                  rel: 'noreferrer',
-                  title: `${source.repo}@${source.ref}（来源 ${source.id}）`,
-                }, source.repo),
-              ]
-            : ['本地'],
-          entry.enabled === true ? [] : ['已关闭'],
-          activePreset === null ? [] : [`组合：${injected ? '注入' : '不注入'}`],
-        ].filter((group) => group.length > 0)
+        //
+        // A compaction entry has no `enabled` state to report (its switch would
+        // mean nothing) and is always local for now, so its line says the two
+        // things that are true of it instead.
+        const meta = compaction
+          ? [
+            ['本地'],
+            [injected ? '当前生效' : '未生效'],
+            activePreset === null ? [] : [`组合：${injected ? '生效' : '不生效'}`],
+          ].filter((group) => group.length > 0)
+          : [
+            subscribed
+              ? source === undefined
+                // The source is gone from the settings document, so the slug is all
+                // that is left of where this body came from — a link would be dead.
+                ? [`订阅 ${entry.source}`]
+                : [
+                  '订阅 ',
+                  h('a', {
+                    key: 'source',
+                    className: 'dsh-prompt-manager__sourceLink',
+                    href: `https://github.com/${source.repo}`,
+                    target: '_blank',
+                    rel: 'noreferrer',
+                    title: `${source.repo}@${source.ref}（来源 ${source.id}）`,
+                  }, source.repo),
+                ]
+              : ['本地'],
+            entry.enabled === true ? [] : ['已关闭'],
+            activePreset === null ? [] : [`组合：${injected ? '注入' : '不注入'}`],
+          ].filter((group) => group.length > 0)
         return h('div', {
           key: entry.id,
           className: 'dsh-prompt-manager__card',
@@ -2129,27 +2483,48 @@ window.__ModuleLoader__.load({
               className: `dsh-prompt-manager__dot${injected ? '' : ' dsh-prompt-manager__dot--idle'}`,
               'aria-hidden': 'true',
             }),
-            isSubscribed(entry) ? h('span', { key: 'badge', className: 'dsh-prompt-manager__badge' }, '订阅') : null,
-            h(Switch, {
-              key: 'switch',
-              checked: entry.enabled === true,
-              label: entry.title,
-              disabled: !writable || busy,
-              onChange: () => toggle(entry, entry.enabled !== true),
-            }),
+            compaction
+              ? h('span', { key: 'badge', className: 'dsh-prompt-manager__badge dsh-prompt-manager__badge--compaction' }, '压缩指令')
+              : isSubscribed(entry)
+                ? h('span', { key: 'badge', className: 'dsh-prompt-manager__badge' }, '订阅')
+                : null,
+            // No injection switch: a compaction entry does not enter the system
+            // prompt, so a switch here would control nothing.
+            compaction
+              ? null
+              : h(Switch, {
+                key: 'switch',
+                checked: entry.enabled === true,
+                label: entry.title,
+                disabled: !writable || busy,
+                onChange: () => toggle(entry, entry.enabled !== true),
+              }),
             h(RowMenu, {
               key: 'menu',
               open: menuFor === entry.id,
               label: `更多操作：${entry.title}`,
-              items: [
-                { id: 'edit', label: '编辑', icon: icon('IconEditOutline16') },
-                { id: 'delete', label: '删除', icon: icon('IconTrashOutline16'), disabled: !writable },
-              ],
+              items: compaction
+                ? [
+                  { id: 'edit', label: '编辑', icon: icon('IconEditOutline16') },
+                  {
+                    id: 'current',
+                    label: injected ? '取消当前' : '设为当前',
+                    // A combo answers the pointer, so offering to write the root
+                    // field here would be an action that changes nothing.
+                    disabled: !writable || busy || compactionLocked,
+                  },
+                  { id: 'delete', label: '删除', icon: icon('IconTrashOutline16'), disabled: !writable },
+                ]
+                : [
+                  { id: 'edit', label: '编辑', icon: icon('IconEditOutline16') },
+                  { id: 'delete', label: '删除', icon: icon('IconTrashOutline16'), disabled: !writable },
+                ],
               onToggle: () => setMenuFor(menuFor === entry.id ? null : entry.id),
               onClose: () => setMenuFor(null),
               onSelect: (id) => {
                 setMenuFor(null)
                 if (id === 'edit') select(entry)
+                else if (id === 'current') { void setCompaction(entry) }
                 else if (id === 'delete') remove(entry)
               },
             }),
@@ -2157,7 +2532,7 @@ window.__ModuleLoader__.load({
         ])
       })
 
-      const enabledCount = entries.filter((entry) => entry.enabled === true).length
+      const enabledCount = sectionEntries.filter((entry) => entry.enabled === true).length
       const ready = snapshot.status === 'ready'
       const note = snapshot.status === 'loading' || snapshot.status === null
         ? '正在读取设置…'
@@ -2165,10 +2540,41 @@ window.__ModuleLoader__.load({
           ? '设置命名空间不可用（非 loopback 页面或 Host 未挂载 settings）：本页只读。'
           : null
 
+      /**
+       * What the Host reports about compaction, in one line.
+       *
+       * The field is absent rather than zero-valued while the feature is off, so
+       * absence is exactly what "off" looks like from here. The two counts are
+       * kept apart on purpose: a compaction that ran while the pointer was
+       * elsewhere is the difference between "not working" and "not used yet", and
+       * a page that merged them would report a number nobody could act on.
+       * @returns the text for the status line under the controls.
+       */
+      const compactionReport = () => {
+        if (store === null || store.compaction === undefined || store.compaction === null) {
+          return '压缩指令：已关闭（配置项 compaction: false）'
+        }
+        const report = store.compaction
+        const matches = typeof report.matches === 'number' ? report.matches : 0
+        const replacements = typeof report.replacements === 'number' ? report.replacements : 0
+        const usage = replacements > 0
+          ? `已替换 ${String(replacements)} 次`
+          : matches > 0
+            ? `已见到 ${String(matches)} 次压缩，尚未替换`
+            : '还没有遇到压缩'
+        return [
+          `压缩指令：${compactionTitleOf(compactionId)}`,
+          usage,
+          typeof report.lastReplacedAt === 'string' && report.lastReplacedAt.length > 0
+            ? `最近 ${stamp(report.lastReplacedAt)}`
+            : '',
+        ].filter((part) => part.length > 0).join(' · ')
+      }
+
       return h('div', { className: 'dsh-prompt-manager' }, [
         h('h1', { key: 'heading', className: 'dsh-prompt-manager__heading' }, '提示词'),
         h('p', { key: 'lede', className: 'dsh-prompt-manager__intro' }, [
-          '每条提示词都是一个独立的 system prompt section；开关、排序、正文改动在下一个模型步骤生效，不需要重启。',
+          '每条提示词要么是一个独立的 system prompt section，要么是压缩时替换 DSH 自带的那段指令（下一次压缩生效）；开关、排序、正文改动在下一个模型步骤生效，不需要重启。',
           '插件仓库地址：',
           h('a', {
             key: 'repo',
@@ -2184,9 +2590,13 @@ window.__ModuleLoader__.load({
           ' 拜托动个小手点颗星星吧。',
         ]),
         h('p', { key: 'dir', className: 'dsh-prompt-manager__note' }, [
-          `已启用 ${String(enabledCount)}/${String(entries.length)}`,
+          `已启用 ${String(enabledCount)}/${String(sectionEntries.length)}`,
           store !== null && typeof store.dir === 'string' ? `正文目录：${store.dir}` : '',
         ].filter((part) => part.length > 0).join(' · ')),
+        // The other half of "what is in force". A compaction instruction is never
+        // a section, so nothing above this line would mention it — and the counts
+        // are the only place a person can see whether it is being used at all.
+        store === null ? null : h('p', { key: 'compaction', className: 'dsh-prompt-manager__note' }, compactionReport()),
         note === null ? null : h('p', { key: 'note', className: 'dsh-prompt-manager__note' }, note),
         activePreset === null
           ? null
@@ -2210,6 +2620,11 @@ window.__ModuleLoader__.load({
             : h('div', { key: 'rows', className: 'dsh-prompt-manager__list' }, rows),
           h('div', { key: 'addRow', className: 'dsh-prompt-manager__addRow' }, [
             h(AddButton, { key: 'add', disabled: !writable || busy, onClick: add }, '新增提示词'),
+            h(AddButton, {
+              key: 'addCompaction',
+              disabled: !writable || busy,
+              onClick: () => { void addCompaction() },
+            }, '新增压缩指令'),
             h(AddButton, {
               key: 'sources',
               icon: 'IconRefreshOutline16',

@@ -64,6 +64,16 @@ export interface PackEntry {
     origin?: PackOrigin | undefined;
     /** Present instead of a body when the entry is a subscription. */
     source?: PackSourceRef | undefined;
+    /**
+     * `compaction` when this entry feeds the compaction instruction rather than
+     * the system prompt, absent for an ordinary section.
+     *
+     * Carried because it cannot be recovered from anything else: the body of a
+     * compaction instruction reads exactly like the body of a section, so an
+     * import that dropped this would silently turn it into a section and inject
+     * the summarizer's template into every model step.
+     */
+    kind?: 'compaction' | undefined;
 }
 /** The preset a pack carries. */
 export interface PackPreset {
@@ -73,6 +83,12 @@ export interface PackPreset {
     name: string;
     /** Member ids, referring to {@link PromptPack.entries}. */
     entries: string[];
+    /**
+     * Id of the compaction instruction the preset put in force, when it named one.
+     * That id refers to {@link PromptPack.entries} like a member does, so an import
+     * has to move it with them.
+     */
+    compaction?: string | undefined;
 }
 /** A pack this build understands. */
 export interface PromptPack {
@@ -120,6 +136,8 @@ export interface PackMember {
     origin?: PackOrigin | undefined;
     /** Subscription origin, when the body belongs to a source. */
     source?: PackSourceRef | undefined;
+    /** `compaction` when this member is the compaction instruction. */
+    kind?: 'compaction' | undefined;
 }
 /** Everything {@link buildPack} needs, all of it already resolved. */
 export interface PackExportInput {
@@ -154,6 +172,8 @@ export interface PackImportEntry {
     source?: string | undefined;
     /** The id this entry had on the exporting machine, when it had to change. */
     renamedFrom?: string | undefined;
+    /** `compaction` when this entry feeds the compaction instruction. */
+    kind?: 'compaction' | undefined;
 }
 /** What an import would do, ready to be checked and then carried out. */
 export interface PackImportPlan {
@@ -176,6 +196,15 @@ export interface PackImportPlan {
     sourceDropped: string[];
     /** Preset members the pack itself could not carry (already gone at export). */
     missingMembers: string[];
+    /**
+     * Id of the compaction instruction the pack named that could not come along,
+     * present only when that happened.
+     *
+     * The pack named an entry it does not carry, so the pointer would address
+     * nothing here. The preset is imported naming no instruction instead, which is
+     * a working state — the stock one — and this is how the page says so.
+     */
+    compactionDropped?: string | undefined;
 }
 /** The result of planning an import. */
 export type PackImportResult = {

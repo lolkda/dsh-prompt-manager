@@ -56,6 +56,18 @@ export interface PromptEntry {
      * somebody wrote here.
      */
     source?: string;
+    /**
+     * What this entry feeds. Absent means a system-prompt section, which is what
+     * every entry was before this field existed; `compaction` means the body
+     * replaces the instruction a context compaction sends to its summarizer, so it
+     * registers no section and only the document's `compaction` pointer puts it in
+     * force.
+     *
+     * Written only when it is `compaction`: a stored `kind: 'section'` on every
+     * entry would be a phantom field on disk, the same reason `source` has no
+     * default.
+     */
+    kind?: 'section' | 'compaction';
 }
 /**
  * One named selection of entries, applied to the whole deployment.
@@ -73,6 +85,13 @@ export interface PromptPreset {
     name: string;
     /** Ids of the entries this preset injects. */
     entries: string[];
+    /**
+     * Id of the compaction instruction this preset puts in force, or `''` for the
+     * one DSH ships. A preset answers "which prompts are in force" as a whole, and
+     * the compaction instruction is one of them, so switching a preset switches
+     * this too rather than leaving half the prompt on the previous set.
+     */
+    compaction: string;
 }
 /** One entry resolved against the store, a subscription, or the package. */
 export interface ResolvedBody {
@@ -183,6 +202,18 @@ export declare function parsePresets(raw: unknown): PromptPreset[];
  * @returns the configured id, or `''` when the deployment runs without a preset.
  */
 export declare function activePresetOf(raw: unknown): string;
+/**
+ * The id of the compaction instruction in force.
+ *
+ * Read exactly like {@link activePresetOf}: an absent, empty, or unusable value
+ * means `''`, which is "the instruction DSH itself ships". A preset's own
+ * pointer overrides this one while that preset is active, so the caller decides
+ * which of the two it is asking about.
+ *
+ * @param raw - the resolved `compaction` field.
+ * @returns the configured entry id, or `''` when the stock instruction stands.
+ */
+export declare function activeCompactionOf(raw: unknown): string;
 /**
  * Build the `prompt-manager` namespace schema.
  *

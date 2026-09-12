@@ -17,7 +17,7 @@ import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import { ESCAPE_MARK, malformedReferences, sanitizeReferences } from '../lib/guard.js'
+import { ESCAPE_MARK, malformedReferences, resolveReferences, sanitizeReferences } from '../lib/guard.js'
 
 /**
  * Import a `@deepseek-ai/*` package, trying this file, the cwd, then `DSH_PACKAGES`.
@@ -145,6 +145,56 @@ assert.equal(
   'the guard must hand a resolvable reference through untouched',
 )
 assert.equal(ESCAPE_MARK.length, 1, 'the escape mark must be a single character, so offsets stay predictable')
+
+// ── a compaction body has no registry pass, so one call substitutes too ──────
+//
+// A section's resolvable references are left for the registry to interpolate.
+// The compaction instruction is not a section: nothing else will render it, so
+// this entry point has to substitute and defuse in the same pass — and agree
+// with `sanitizeReferences` about which references are unusable, because the two
+// must never disagree about what is safe to send.
+
+const substituted = resolveReferences(mixed, variables)
+assert.equal(
+  withoutMarks(substituted.text),
+  'A {{ x }} B {{nope}} C Windows D {{a.b}} E literal {{ brace',
+  'a resolvable reference must be substituted, not handed through',
+)
+assert.deepEqual(
+  substituted.escaped,
+  guarded.escaped,
+  'both entry points must report exactly the same unusable references',
+)
+assert.equal(
+  substituted.text.split(ESCAPE_MARK).length - 1,
+  substituted.escaped.length * 2,
+  'the substituted text must carry the same two marks per defused reference',
+)
+assert.doesNotThrow(
+  () => render(substituted.text, {}),
+  'the substituted text must be safe for a strict pass with no variables at all',
+)
+assert.equal(
+  resolveReferences('a {{ brace', variables).text,
+  'a {{ brace',
+  'a lone opener is literal prose here too',
+)
+assert.deepEqual(
+  resolveReferences('value={{late}}', { late: undefined }).escaped,
+  ['{{late}}'],
+  'a registered name whose provider returned undefined must be defused',
+)
+assert.equal(
+  resolveReferences('v={{brace}}', { brace: 'a {{b}} literal' }).text,
+  'v=a {{b}} literal',
+  'a substituted value must not be rescanned, exactly as the registry does it',
+)
+for (const nasty of ['{{{{nested}}}}', '{{{x}}}}', '{{}}{{{{}}}}', '{{a{{b}}']) {
+  assert.doesNotThrow(
+    () => resolveReferences(nasty, variables),
+    `${JSON.stringify(nasty)} must be defused rather than thrown`,
+  )
+}
 
 // ── save-time listing: only what can never resolve ───────────────────────────
 

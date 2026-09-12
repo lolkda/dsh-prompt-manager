@@ -41,6 +41,7 @@ import { createRequire } from 'node:module'
 import { homedir, hostname, release, userInfo } from 'node:os'
 import { join } from 'node:path'
 import {
+  activeCompactionOf,
   activePresetOf,
   BUILTIN_PROMPTS,
   buildIndexSchema,
@@ -55,6 +56,7 @@ import {
   type ResolvedBody,
   type SchemaFactory,
 } from './entries.js'
+import { installCompactionPrompt, type CompactionPromptStats } from './compaction.js'
 import { installPromptRoutes } from './routes.js'
 import { sanitizeReferences } from './guard.js'
 import {
@@ -195,6 +197,17 @@ export interface Config {
    * set and `~/.dsh` otherwise.
    */
   storeDir?: string
+  /**
+   * Replace the instruction a context compaction sends to its summarizer with
+   * the body of the entry the index puts in force. Defaults to `true`; set
+   * `false` when another row owns that seam, or to keep this plugin strictly to
+   * the system prompt.
+   *
+   * The default changes nothing: with no entry in force — which is every
+   * deployment that never made one — every compaction call goes out exactly as
+   * the engine built it.
+   */
+  compaction?: boolean
 }
 
 /** Where one prompt variable's value came from. */
@@ -384,6 +397,22 @@ function warn(ctx: Context, message: string): void {
  */
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * One named field of a resolved settings document.
+ *
+ * A hand-edited or half-written document can hold anything, so every read of one
+ * goes through here rather than assuming the shape the schema describes.
+ *
+ * @param document - the resolved namespace value.
+ * @param name - the field to read.
+ * @returns the field value, or `undefined` when there is no object to read.
+ */
+function fieldOf(document: unknown, name: string): unknown {
+  return typeof document === 'object' && document !== null && !Array.isArray(document)
+    ? (document as Record<string, unknown>)[name]
+    : undefined
 }
 
 /**
@@ -670,10 +699,9 @@ export function apply(ctx: Context, config: Config = {}): void {
    */
   let writeIndex: ((patch: { entries: PromptEntry[]; presets: PromptPreset[] }) => Promise<void>) | undefined
 
+  /** One field of the index currently in force. */
   function field(name: string): unknown {
-    return typeof resolved === 'object' && resolved !== null && !Array.isArray(resolved)
-      ? (resolved as Record<string, unknown>)[name]
-      : undefined
+    return fieldOf(resolved, name)
   }
 
   function sourcesInForce(): PromptSource[] {
@@ -710,16 +738,80 @@ export function apply(ctx: Context, config: Config = {}): void {
    * @param document - the resolved settings document.
    */
   function setActivePreset(document: unknown): void {
-    const wanted = activePresetOf(
-      typeof document === 'object' && document !== null && !Array.isArray(document)
-        ? (document as Record<string, unknown>)['activePreset']
-        : undefined,
-    )
+    const wanted = activePresetOf(fieldOf(document, 'activePreset'))
     const presets = presetsInForce()
     activePreset = wanted.length === 0 ? undefined : presets.find((preset) => preset.id === wanted)
     if (wanted.length === 0 || activePreset !== undefined || presetReported) return
     presetReported = true
     warn(ctx, `组合 ${wanted} 不存在（可能已被删除）：本次挂载回到每条自己的开关`)
+  }
+
+  /** Reports already made about the compaction pointer, by signature. */
+  let compactionReported = ''
+
+  /**
+   * The compaction instruction in force, or `undefined` to send DSH's own.
+   *
+   * A preset answers "which prompts are in force" as a whole, so while one is
+   * active its pointer decides — including when it points at nothing, which
+   * means the stock instruction rather than falling back to the document's. With
+   * no preset, the document's own pointer decides.
+   *
+   * Every way this can come up empty is reported once and then resolves to the
+   * stock instruction. Sending an empty instruction would be worse than useless:
+   * the summarizer would be asked to do nothing, and the summary that came back
+   * would be whatever the model improvised.
+   *
+   * @returns the entry id and body to send, or `undefined` for the stock one.
+   */
+  function resolveCompaction(): { id: string; text: string } | undefined {
+    const wanted = activePreset !== undefined
+      ? activePreset.compaction
+      : activeCompactionOf(fieldOf(resolved, 'compaction'))
+    if (wanted.length === 0) return undefined
+
+    const entry = byId.get(wanted)
+    if (entry === undefined || entry.kind !== 'compaction') {
+      reportCompaction(
+        `absent:${wanted}`,
+        `压缩指令 ${wanted} 不在索引里（也可能它不是压缩条目）：本轮压缩沿用 DSH 自带指令`,
+      )
+      return undefined
+    }
+    const text = describe(entry.id).text
+    if (text.trim().length === 0) {
+      reportCompaction(`empty:${wanted}`, `压缩指令 ${wanted} 还没有正文：本轮压缩沿用 DSH 自带指令`)
+      return undefined
+    }
+    return { id: entry.id, text }
+  }
+
+  /**
+   * Report one problem with the compaction pointer, once per signature.
+   * @param signature - what changed since the last report.
+   * @param message - what to say.
+   */
+  function reportCompaction(signature: string, message: string): void {
+    if (signature === compactionReported) return
+    compactionReported = signature
+    warn(ctx, message)
+  }
+
+  /**
+   * The names a compaction body may reference.
+   *
+   * The assembly's table when there has been one, and this plugin's own
+   * registrations before that: a body is written against what the deployment
+   * registers, and the registry may not have run yet when the first compaction
+   * happens.
+   *
+   * @returns the table to interpolate against.
+   */
+  function compactionVariables(): Readonly<Record<string, string | undefined>> {
+    if (lastAssemblyVariables !== undefined) return lastAssemblyVariables
+    const own: Record<string, string | undefined> = {}
+    for (const [variable, record] of variables) own[variable] = record.value
+    return own
   }
 
   /** The next free placement for an entry the engine adds. */
@@ -793,12 +885,12 @@ export function apply(ctx: Context, config: Config = {}): void {
     const members: PackMember[] = []
     const missing: string[] = []
     const carried = new Set<string>()
-    for (const id of preset.entries) {
-      if (carried.has(id)) continue
+    const addMember = (id: string): void => {
+      if (carried.has(id)) return
       const entry = byId.get(id)
       if (entry === undefined) {
         missing.push(id)
-        continue
+        return
       }
       carried.add(id)
       const owner = entry.source !== undefined && entry.source.length > 0
@@ -814,18 +906,26 @@ export function apply(ctx: Context, config: Config = {}): void {
         const file = locations.get(id)?.path
         if (file !== undefined) ref.file = file
         members.push({ id, title: entry.title, order: entry.order, enabled: entry.enabled, source: ref })
-        continue
+        return
       }
       const resolved = describe(id)
-      members.push({
+      const member: PackMember = {
         id,
         title: entry.title,
         order: entry.order,
         enabled: entry.enabled,
         body: resolved.text,
         origin: resolved.source === 'builtin' ? 'builtin' : 'local',
-      })
+      }
+      if (entry.kind === 'compaction') member.kind = 'compaction'
+      members.push(member)
     }
+    for (const id of preset.entries) addMember(id)
+    // The compaction instruction is one of this preset's prompts even though it
+    // is not one of its sections, and it is named by a pointer rather than a
+    // membership: a pack that carried the pointer without the body would arrive
+    // at the other machine naming an instruction that machine cannot produce.
+    if (preset.compaction.length > 0) addMember(preset.compaction)
     const own = ownManifest()
     return buildPack({ preset, members, missing, pluginName: own.name, pluginVersion: own.version })
   }
@@ -878,6 +978,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         enabled: entry.enabled,
       }
       if (entry.source !== undefined) record.source = entry.source
+      if (entry.kind === 'compaction') record.kind = 'compaction'
       return record
     })
     await writeIndex({ entries: [...active, ...added], presets: [...presetsInForce(), plan.preset] })
@@ -943,6 +1044,17 @@ export function apply(ctx: Context, config: Config = {}): void {
   /** References already reported, so one bad body cannot flood the log. */
   const reportedReferences = new Set<string>()
 
+  /**
+   * The variable table of the most recent assembly: the whole deployment's, not
+   * just this plugin's.
+   *
+   * A compaction body may reference anything a section may, and that table is
+   * the only place the full set exists — it is built per assembly by the
+   * registry. Until the first one has run, the names this plugin registers
+   * itself are all that can resolve.
+   */
+  let lastAssemblyVariables: Readonly<Record<string, string | undefined>> | undefined
+
   // The text this plugin serves is interpolated by the registry, strictly: a
   // reference it cannot resolve, or one whose shape is not a variable name,
   // makes that assembly throw — and one throwing section fails the whole
@@ -953,6 +1065,10 @@ export function apply(ctx: Context, config: Config = {}): void {
   // registry would refuse, leaving every resolvable reference alone.
   ctx.effect(() => ctx.on('system-prompt/assemble', async (assembly, _context, next) => {
     const out = await next()
+    // Remembered on the way past: a compaction may happen before this plugin's
+    // own sections are assembled, and this is the only view of the whole
+    // deployment's variable table.
+    lastAssemblyVariables = out.variables ?? {}
     const sections = out.sections.map((section) => {
       if (!section.name.startsWith(USER_SECTION_PREFIX)) return section
       const guarded = sanitizeReferences(section.text, out.variables ?? {})
@@ -977,17 +1093,26 @@ export function apply(ctx: Context, config: Config = {}): void {
    * or placement moved is re-registered, because both are fixed when the
    * section is declared; adding, removing, enabling, and disabling need no
    * other bookkeeping because section text is resolved per assembly.
+   *
+   * A compaction entry is skipped in both directions: it never registers a
+   * section, and an entry that *became* one has its section withdrawn rather
+   * than left behind pointing at a body that no longer feeds the prompt.
    */
   function reconcile(entries: readonly PromptEntry[]): void {
     byId.clear()
     for (const entry of entries) byId.set(entry.id, entry)
     for (const [id, registered] of [...sections]) {
       const entry = byId.get(id)
-      if (entry !== undefined && registered.name === sectionNameFor(entry) && registered.order === entry.order) continue
+      const keep = entry !== undefined
+        && entry.kind !== 'compaction'
+        && registered.name === sectionNameFor(entry)
+        && registered.order === entry.order
+      if (keep) continue
       registered.disposer()
       sections.delete(id)
     }
     for (const entry of entries) {
+      if (entry.kind === 'compaction') continue
       if (sections.has(entry.id)) continue
       const section = sectionNameFor(entry)
       const entryOrder = entry.order
@@ -1002,27 +1127,42 @@ export function apply(ctx: Context, config: Config = {}): void {
   }
 
   /**
-   * Report a preset that names entries this machine does not have.
+   * Report a preset that names entries which will not inject.
    *
    * This is the failure nobody notices by itself: the preset still switches, the
-   * remaining members still inject, and the missing ones simply stop appearing —
+   * members that do resolve still inject, and the rest simply stop appearing —
    * the usual cause being an upstream rename, or a source whose subscription has
-   * not been applied yet. Reporting is keyed on the *set* of missing ids so a
-   * change to which entries are missing is reported again, while a preset left
-   * broken for a week says so once.
+   * not been applied yet. Reporting is keyed on the *set* of such ids so a
+   * change to which ones they are is reported again, while a preset left broken
+   * for a week says so once.
+   *
+   * Two kinds of member land here. One the index does not carry at all. And one
+   * that is in the index but is a compaction instruction — the page's own type
+   * switch creates that, leaving a preset still listing an id it used to inject
+   * as a section, and it costs exactly one prompt from the set.
    */
   function reportDanglingMembers(): void {
-    const missing = activePreset === undefined
-      ? []
-      : activePreset.entries.filter((id) => !byId.has(id))
-    const signature = `${activePreset?.id ?? ''}:${missing.join(',')}`
-    if (missing.length === 0 || signature === danglingReported) return
+    const named = activePreset === undefined ? [] : activePreset.entries
+    const missing = named.filter((id) => !byId.has(id))
+    const misplaced = named.filter((id) => byId.get(id)?.kind === 'compaction')
+    const signature = `${activePreset?.id ?? ''}:${missing.join(',')}:${misplaced.join(',')}`
+    if ((missing.length === 0 && misplaced.length === 0) || signature === danglingReported) return
     danglingReported = signature
-    warn(
-      ctx,
-      `组合 ${activePreset?.id ?? ''} 里有 ${String(missing.length)} 条不在索引里：${missing.join('、')}`
-      + '（订阅没拉回来，或上游改了文件名）。这些条目这一轮不注入。',
-    )
+    const presetId = activePreset?.id ?? ''
+    if (missing.length > 0) {
+      warn(
+        ctx,
+        `组合 ${presetId} 里有 ${String(missing.length)} 条不在索引里：${missing.join('、')}`
+        + '（订阅没拉回来，或上游改了文件名）。这些条目这一轮不注入。',
+      )
+    }
+    if (misplaced.length > 0) {
+      warn(
+        ctx,
+        `组合 ${presetId} 里有 ${String(misplaced.length)} 条是压缩指令：${misplaced.join('、')}`
+        + '。压缩指令不进 system prompt，所以这几条不会注入 —— 把它们从组合成员里去掉，或改回普通段落。',
+      )
+    }
   }
 
   /** Ids a new entry may not take: the index, every stored body, and the built-ins. */
@@ -1085,6 +1225,23 @@ export function apply(ctx: Context, config: Config = {}): void {
       .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
   }
 
+  // The compaction instruction is a second seam, not a second prompt: it reaches
+  // the summarizer instead of the system prompt, and only when the index puts one
+  // in force. Installed after the sections so a body can reference the variables
+  // this mount just registered.
+  const compactionPrompt = config.compaction === false
+    ? undefined
+    : installCompactionPrompt(ctx, {
+        resolve: resolveCompaction,
+        variables: compactionVariables,
+        warn: (message) => warn(ctx, message),
+      })
+
+  /** What the settings page reports about the compaction instruction. */
+  function compactionStats(): CompactionPromptStats | undefined {
+    return compactionPrompt?.stats()
+  }
+
   installPromptRoutes(ctx, {
     store,
     describe,
@@ -1096,6 +1253,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     variables: () => variableViews(),
     packFor,
     importPack,
+    compaction: compactionStats,
   })
 
   /** Whether the cap has already been reported for this mount. */
@@ -1114,9 +1272,7 @@ export function apply(ctx: Context, config: Config = {}): void {
    */
   function reportTruncation(document: unknown, kept: number): void {
     if (truncationReported) return
-    const raw = typeof document === 'object' && document !== null && !Array.isArray(document)
-      ? (document as Record<string, unknown>)['entries']
-      : undefined
+    const raw = fieldOf(document, 'entries')
     if (!Array.isArray(raw) || raw.length <= kept) return
     truncationReported = true
     warn(
