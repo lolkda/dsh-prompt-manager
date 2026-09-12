@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import { MAX_PROBES, SETTINGS_NAMESPACE, apply, environmentFacts, inject, name, resolveHarnessHome } from '../lib/index.js'
+import { MAX_PROBES, ROUTE_PREFIX, SETTINGS_NAMESPACE, apply, environmentFacts, inject, name, resolveHarnessHome } from '../lib/index.js'
 import { activePresetOf, buildIndexSchema, parsePresets } from '../lib/entries.js'
 import { ESCAPE_MARK } from '../lib/guard.js'
 import { bodyHash } from '../lib/store.js'
@@ -698,7 +698,7 @@ try {
   }
   const saveScript = (name, rust, fence = null) => call({
     method: 'PUT',
-    url: `/prompt-manager/script/${name}`,
+    url: `${ROUTE_PREFIX}/script/${name}`,
     origin: 'http://127.0.0.1:3080',
     body: JSON.stringify({ source: `console.log(JSON.stringify({ rust: "${rust}" }))`, fileSha1: fence }),
   })
@@ -711,7 +711,7 @@ try {
     'and the values it registered reach the prompt without a restart',
   )
 
-  const listed = await call({ url: '/prompt-manager/variables' })
+  const listed = await call({ url: `${ROUTE_PREFIX}/variables` })
   const rust = listed.json().variables.find((variable) => variable.name === 'rust')
   assert.equal(rust.source, 'script', 'the variable list says which layer supplied a value')
   assert.equal(rust.detail, 'toolchain', 'and which script owns it')
@@ -729,7 +729,7 @@ try {
   assert.equal(clash.json().code, 'conflict', 'and the refusal says it was a conflict')
 
   // Deleting freezes the values...
-  const removed = await call({ method: 'DELETE', url: '/prompt-manager/script/toolchain', origin: 'http://127.0.0.1:3080' })
+  const removed = await call({ method: 'DELETE', url: `${ROUTE_PREFIX}/script/toolchain`, origin: 'http://127.0.0.1:3080' })
   assert.equal(removed.json().removed, true, 'deleting removes the file')
   assert.equal((await mounted.read()).prompt, 'rust=1.0.0', 'and the prompt keeps rendering what it last measured')
 
@@ -738,15 +738,15 @@ try {
   // exactly what makes a deleted script look impossible to get rid of.
   const orphan = await call({
     method: 'PUT',
-    url: '/prompt-manager/script/orphan',
+    url: `${ROUTE_PREFIX}/script/orphan`,
     origin: 'http://127.0.0.1:3080',
     body: JSON.stringify({ source: 'console.log(JSON.stringify({ go: "1.22.0" }))', fileSha1: null }),
   })
   assert.equal(orphan.state.status, 200, `a second script must save, got ${orphan.state.body}`)
-  const withOrphan = (await call({ url: '/prompt-manager/variables' })).json().variables
+  const withOrphan = (await call({ url: `${ROUTE_PREFIX}/variables` })).json().variables
   assert.equal(withOrphan.some((variable) => variable.name === 'go'), true, 'and its variable is listed')
-  await call({ method: 'DELETE', url: '/prompt-manager/script/orphan', origin: 'http://127.0.0.1:3080' })
-  const withoutOrphan = (await call({ url: '/prompt-manager/variables' })).json().variables
+  await call({ method: 'DELETE', url: `${ROUTE_PREFIX}/script/orphan`, origin: 'http://127.0.0.1:3080' })
+  const withoutOrphan = (await call({ url: `${ROUTE_PREFIX}/variables` })).json().variables
   assert.equal(
     withoutOrphan.some((variable) => variable.name === 'go'),
     false,
@@ -797,7 +797,7 @@ try {
   }
   routeSettings.state.watcher()
 
-  const exported = await call({ url: '/prompt-manager/pack/export?preset=ctf' })
+  const exported = await call({ url: `${ROUTE_PREFIX}/pack/export?preset=ctf` })
   assert.equal(exported.state.status, 200, `the export must answer 200, got ${exported.state.body}`)
   const carried = exported.json()
   assert.equal(carried.version, 1, 'the pack names the format version it was written in')
@@ -825,7 +825,7 @@ try {
   }
   const imported = await call({
     method: 'POST',
-    url: '/prompt-manager/pack/import',
+    url: `${ROUTE_PREFIX}/pack/import`,
     origin: 'http://127.0.0.1:3080',
     body: JSON.stringify(incoming),
   })
@@ -869,7 +869,7 @@ try {
   const entriesBefore = JSON.stringify(routeSettings.state.value.entries)
   const refused = await call({
     method: 'POST',
-    url: '/prompt-manager/pack/import',
+    url: `${ROUTE_PREFIX}/pack/import`,
     origin: 'http://127.0.0.1:3080',
     body: JSON.stringify({ format: 'dsh-prompt-manager-pack', version: 1, preset: { name: 'x', entries: [] }, entries: [{ id: 'y', title: '' }] }),
   })

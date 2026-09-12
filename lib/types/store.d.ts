@@ -7,7 +7,7 @@
  * land through a temporary file plus a rename, so a crashed or interrupted
  * write cannot leave a half-written body in the prompt.
  *
- * @module dsh-prompt-manager/store
+ * @module @lolkda/dsh-prompt-manager/store
  */
 /** Why a store operation was refused. */
 export type PromptStoreErrorCode = 'invalid-id' | 'too-large' | 'conflict' | 'unwritable' | 'unreadable';

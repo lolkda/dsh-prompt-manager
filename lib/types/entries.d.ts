@@ -17,7 +17,7 @@
  * the built-in machine-environment prompt, and anything a person writes or
  * subscribes overrides it.
  *
- * @module dsh-prompt-manager/entries
+ * @module @lolkda/dsh-prompt-manager/entries
  */
 /** Order handed to the first entry a person adds; later additions sort after it. */
 export declare const USER_ORDER_START = 30;

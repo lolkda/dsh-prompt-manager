@@ -14,7 +14,7 @@
  * only fills the gaps that transport leaves: an id nobody holds, a body file, a
  * script on disk, a source's upstream check.
  *
- * @module dsh-prompt-manager/routes
+ * @module @lolkda/dsh-prompt-manager/routes
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { ResolvedBody } from './entries.js';
@@ -24,7 +24,7 @@ import { type PackApplyResult, type PromptPack } from './pack.js';
 import type { Subscriptions } from './subscriptions.js';
 import type { VariableView } from './index.js';
 /** The single prefix every route below lives under. */
-export declare const ROUTE_PREFIX = "/prompt-manager";
+export declare const ROUTE_PREFIX = "/dsh-prompt-manager";
 /** What the route needs from the plugin that owns the index. */
 export interface PromptRouteHost {
     /** Body files. */

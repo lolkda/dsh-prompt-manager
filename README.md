@@ -17,6 +17,22 @@
 
 插件**只内置一条**提示词：机器环境（系统 / shell / 工具链版本，值由变量在挂载时探测填充）。其余提示词自己写，或从可订阅的仓库拉（见下节）。一份现成的提示词包在 [lolkda/dsh-prompt-pack](https://github.com/lolkda/dsh-prompt-pack)，里面是 CTF 作业契约和 FastCtx 工具路由两份。
 
+## 从 2.x 升级（3.0.0）
+
+3.0.0 只换**对外身份**，不动数据面：
+
+| 变了 | 2.x | 3.0.0 |
+|---|---|---|
+| npm 包名 | `dsh-prompt-manager` —— 这个名字在 npm 与 DSH 商城上已被另一个插件占用 | `@lolkda/dsh-prompt-manager` |
+| 客户端插件 id | `dsh-prompt-manager` | `@lolkda/dsh-prompt-manager`（必须等于包名） |
+| cordis 插件名 / 挂载行 id | `prompt-manager` | `dsh-prompt-manager` |
+| HTTP 路由前缀 | `/prompt-manager` | `/dsh-prompt-manager` |
+| 安装方式 | 手改 profile 的 patch | `dsh plugin --profile web add github:lolkda/dsh-prompt-manager` 一条命令 |
+
+**没变的（所以不用迁移）**：settings 命名空间 `prompt-manager:`、正文目录 `$DSH_HOME/prompt-manager/`、section 名 `user:prompt-manager:*`、组合包格式 `dsh-prompt-manager-pack`。
+
+按你的装法做一件事就行：手写挂载的把 patch 行的 `id` 改成 `dsh-prompt-manager`（`name` 不用动）；装包的用新包名重装一次。然后重启 profile、刷新页面。旧路由前缀不再响应 —— 只有自己写的脚本或书签直连它时才会注意到。
+
 ## 从 1.x 升级（2.0.0）
 
 2.0.0 把插件从「CTF 契约注入器」改名成通用的提示词管理器，插件名与仓库名一起从 `dsh-ctf-prompt` 换成了 `dsh-prompt-manager`（GitHub 上旧地址会 301 跳转），身份字符串也跟着换了：包名 / 插件名 `dsh-prompt-manager`、settings 命名空间 `prompt-manager`、正文目录 `$DSH_HOME/prompt-manager/sections`、section 名 `user:prompt-manager:*`（原来 `user:ctf-contract` / `user:fastctx-routing`）。升级要动三处：
@@ -42,42 +58,64 @@ DSH 里两种注入方式落在不同的通道：
 
 ## 安装
 
-### 方式 A：按相对路径挂载（不用发布、不用装包）
+三种装法，选一种。`lib/`、`client/`、`environment.md` 都随包发布，所以装完不需要本地工具链。
 
-把仓库放到 profile 目录下，例如：
+### 方式 A：`dsh plugin` 一条命令（推荐）
+
+```bash
+dsh plugin --profile web add github:lolkda/dsh-prompt-manager
+```
+
+这个命令把剩下的参数转给 profile 目录里的 pnpm（`dsh plugin --profile web remove <包名>` 同理），装完 DSH 会发现这个包的清单里声明了 `dsh.bundle.patch`，**自动把它加进 `dsh.profile.bundles`** 并应用包内那份 `cordis.patch.yml` —— profile 自己的 `cordis.patch.yml` 一个字都不用写。装完重启一次 profile。
+
+发布到 npm 之后，同一条命令还可以写成包名：
+
+```bash
+dsh plugin --profile web add @lolkda/dsh-prompt-manager
+```
+
+### 方式 B：相对路径挂载（离线 / 开发用，不装包）
 
 ```bash
 git clone https://github.com/lolkda/dsh-prompt-manager "$DSH_HOME/profiles/web/vendor/dsh-prompt-manager"
 ```
 
-`lib/` 与 `client/` 都已随仓库提交，所以不装依赖也能直接挂载；只有改过 `src/` 或 `client/` 才需要重新构建。
-
 然后在 `$DSH_HOME/profiles/web/cordis.patch.yml` 末尾追加：
 
 ```yaml
 - insert:
-    - id: prompt-manager
+    - id: dsh-prompt-manager
       name: './vendor/dsh-prompt-manager/lib/index.js'
-      config:
-        environment: true
 ```
 
 loader 用 `new URL(name, ctx.baseUrl)` 解析前导 `./`，而 `ctx.baseUrl` 就是 profile 目录，所以这个路径指向 `$DSH_HOME/profiles/web/vendor/dsh-prompt-manager/lib/index.js`。
 
-### 方式 B：按包名挂载
+**两种方式二选一**：既装包又留这一行，插件会被挂载两次。不写 `config` 也可以 —— `environment` 默认就是开的，要关就在你自己的 patch 层里覆盖。
+
+### 卸载
 
 ```bash
-cd "$DSH_HOME/profiles/web"
-pnpm add github:lolkda/dsh-prompt-manager
+dsh plugin --profile web remove @lolkda/dsh-prompt-manager
 ```
 
-```yaml
-- insert:
-    - id: prompt-manager
-      name: 'dsh-prompt-manager'
-      config:
-        environment: true
+删掉依赖后，DSH 下次启动会把它的层从 `dsh.profile.bundles` 里摘掉，重启 profile 生效。手写挂载（方式 B）删掉那一行、再删 vendor 目录即可。删包不动你的条目：正文在 `$DSH_HOME/prompt-manager/`，索引在 settings 里，都不属于这个包。
+
+### 装完怎么确认
+
+```bash
+dsh --profile web --dump-config        # 组合出来的树里应该有一行 id: dsh-prompt-manager
+curl -s http://127.0.0.1:3080/dsh-prompt-manager/status | head -c 200
 ```
+
+再打开 **设置 → 提示词**，列表里应该有你已有的条目（或内置的「本机环境」那条）。
+
+## 这个包读写什么、会起什么进程
+
+- **读**：`$DSH_HOME/settings.yaml` 的 `prompt-manager:` 段（条目索引与组合）、`$DSH_HOME/prompt-manager/`（正文、脚本、订阅快照）、订阅源的仓库（可选镜像）。
+- **写**：只管上面这两处。settings 段由页面通过 `scope.update` 写；正文与脚本先写临时文件再 `rename`，不留半截文件。
+- **起进程**：按你 settings 里的配置跑**探测命令**（默认 `pwsh`/`git`/`node`/`python`，挂载时各跑一次）和**变量脚本**（`node <脚本文件>`，保存时 / 挂载时 / 你点「重新测量」时各跑一次）。命令与参数都来自这份配置，插件自己不带任何可执行文件，也不联网下载。
+- **出网**：只有订阅源会出网（`fetch`，可配 https 镜像）。
+- **HTTP**：注册一条 `/dsh-prompt-manager` 前缀路由，**仅 loopback 对端**可用，写操作另加 same-origin（见「插件路由」）。它不是认证：同机其它进程照样能调，边界是"别家网页进不来"。
 
 ## 设置页
 
@@ -405,30 +443,30 @@ Shell: {{shell}}.
 
 ## 插件路由
 
-浏览器不能写 settings 之外的通道，所以正文和订阅源另走插件自己注册的一条 prefix 路由 `/prompt-manager`：
+浏览器不能写 settings 之外的通道，所以正文和订阅源另走插件自己注册的一条 prefix 路由 `/dsh-prompt-manager`：
 
 | 方法 + 路径 | 作用 | 网关 |
 |---|---|---|
-| `GET /prompt-manager/status` | `{ dir, writable, ids, variables, maxEntries }` | 仅 loopback 对端 |
-| `GET /prompt-manager/body/<id>` | `{ body, source, sha1, fileSha1 }` | 仅 loopback 对端 |
-| `PUT /prompt-manager/body/<id>` | 写入正文，body 是 `{ body, fileSha1 }`，上限 256 KiB；写法不成立的 `{{...}}` 报 422 | loopback + same-origin |
-| `DELETE /prompt-manager/body/<id>` | 删除覆盖文件（= 恢复默认） | loopback + same-origin |
-| `POST /prompt-manager/id` | 为新标题分配一个未占用的 id | loopback + same-origin |
-| `POST /prompt-manager/preset/id` | 为新组合分配一个未占用的 id；已到 20 个时 409 | loopback + same-origin |
-| `GET /prompt-manager/pack/export?preset=<id>` | 导出这个组合的组合包（JSON，带 `Content-Disposition` 附件名）；没有这个组合 404 | 仅 loopback 对端 |
-| `POST /prompt-manager/pack/import` | 导入一个组合包：先全量校验，再写正文，最后一次性写索引与组合；返回导入报告 | loopback + same-origin |
-| `GET /prompt-manager/sources` | 列出配置的来源及其磁盘状态 | 仅 loopback 对端 |
-| `POST /prompt-manager/sources` | `{ repo, ref?, mirror? }` → `{ id, repo, ref, mirror }` | loopback + same-origin |
-| `POST /prompt-manager/sources/<slug>/check` | 探测上游、把变更取进暂存区 | loopback + same-origin |
-| `POST /prompt-manager/sources/<slug>/apply` | 应用，body 可带 `{ files: [...] }` 只应用子集 | loopback + same-origin |
-| `POST /prompt-manager/sources/<slug>/revert` | 还原上一次应用 | loopback + same-origin |
-| `DELETE /prompt-manager/sources/<slug>` | 删除来源，它导入的条目一起移除 | loopback + same-origin |
-| `GET /prompt-manager/variables` | 变量清单（值 / 来源 / 引用它的提示词）+ 脚本清单 + 脚本目录 | 仅 loopback 对端 |
-| `POST /prompt-manager/variables/run` | 测试运行：`{ name }` 跑已保存的脚本，`{ name, source }` 把草稿写进临时文件跑 | loopback + same-origin |
-| `POST /prompt-manager/variables/refresh` | 重跑全部脚本并刷新值 | loopback + same-origin |
-| `GET /prompt-manager/script/<name>` | `{ source, sha1 }` | 仅 loopback 对端 |
-| `PUT /prompt-manager/script/<name>` | 校验 → 跑 → 落盘 → 注册；body 是 `{ source, fileSha1 }` | loopback + same-origin |
-| `DELETE /prompt-manager/script/<name>` | 删除脚本：没人引用的变量一起删，还被引用的冻结在最后一次的值上 | loopback + same-origin |
+| `GET /dsh-prompt-manager/status` | `{ dir, writable, ids, variables, maxEntries }` | 仅 loopback 对端 |
+| `GET /dsh-prompt-manager/body/<id>` | `{ body, source, sha1, fileSha1 }` | 仅 loopback 对端 |
+| `PUT /dsh-prompt-manager/body/<id>` | 写入正文，body 是 `{ body, fileSha1 }`，上限 256 KiB；写法不成立的 `{{...}}` 报 422 | loopback + same-origin |
+| `DELETE /dsh-prompt-manager/body/<id>` | 删除覆盖文件（= 恢复默认） | loopback + same-origin |
+| `POST /dsh-prompt-manager/id` | 为新标题分配一个未占用的 id | loopback + same-origin |
+| `POST /dsh-prompt-manager/preset/id` | 为新组合分配一个未占用的 id；已到 20 个时 409 | loopback + same-origin |
+| `GET /dsh-prompt-manager/pack/export?preset=<id>` | 导出这个组合的组合包（JSON，带 `Content-Disposition` 附件名）；没有这个组合 404 | 仅 loopback 对端 |
+| `POST /dsh-prompt-manager/pack/import` | 导入一个组合包：先全量校验，再写正文，最后一次性写索引与组合；返回导入报告 | loopback + same-origin |
+| `GET /dsh-prompt-manager/sources` | 列出配置的来源及其磁盘状态 | 仅 loopback 对端 |
+| `POST /dsh-prompt-manager/sources` | `{ repo, ref?, mirror? }` → `{ id, repo, ref, mirror }` | loopback + same-origin |
+| `POST /dsh-prompt-manager/sources/<slug>/check` | 探测上游、把变更取进暂存区 | loopback + same-origin |
+| `POST /dsh-prompt-manager/sources/<slug>/apply` | 应用，body 可带 `{ files: [...] }` 只应用子集 | loopback + same-origin |
+| `POST /dsh-prompt-manager/sources/<slug>/revert` | 还原上一次应用 | loopback + same-origin |
+| `DELETE /dsh-prompt-manager/sources/<slug>` | 删除来源，它导入的条目一起移除 | loopback + same-origin |
+| `GET /dsh-prompt-manager/variables` | 变量清单（值 / 来源 / 引用它的提示词）+ 脚本清单 + 脚本目录 | 仅 loopback 对端 |
+| `POST /dsh-prompt-manager/variables/run` | 测试运行：`{ name }` 跑已保存的脚本，`{ name, source }` 把草稿写进临时文件跑 | loopback + same-origin |
+| `POST /dsh-prompt-manager/variables/refresh` | 重跑全部脚本并刷新值 | loopback + same-origin |
+| `GET /dsh-prompt-manager/script/<name>` | `{ source, sha1 }` | 仅 loopback 对端 |
+| `PUT /dsh-prompt-manager/script/<name>` | 校验 → 跑 → 落盘 → 注册；body 是 `{ source, fileSha1 }` | loopback + same-origin |
+| `DELETE /dsh-prompt-manager/script/<name>` | 删除脚本：没人引用的变量一起删，还被引用的冻结在最后一次的值上 | loopback + same-origin |
 
 - **网关是两道**：对端必须是 loopback（`127.0.0.0/8` / `::1`），**并且 `Host` 头必须解析成 loopback 主机名**。第二道挡的是 DNS rebinding：`evil.example` 解析到 `127.0.0.1` 时对端地址是 loopback，只有 `Host` 才能说明这请求本来是冲谁来的。两类拒绝都返回 403 并说明是哪一道拒的。
   写操作再加一道 same-origin：`Origin` 与 `Host` 必须同时存在且同源。命令行工具（`curl` 之流）不带 `Origin`，所以写路由对它们是关的 —— 页面在写，脚本不该能远程改。
@@ -452,7 +490,7 @@ Shell: {{shell}}.
 dsh --profile web --dump-config
 ```
 
-仓库自带十一个测试，跑的是构建产物：
+仓库自带十二个测试，跑的是构建产物：
 
 ```bash
 DSH_PACKAGES="$DSH_HOME/profiles/node_modules/@deepseek-ai" npm test
@@ -479,7 +517,7 @@ DSH_PACKAGES="$DSH_HOME/profiles/node_modules/@deepseek-ai" npm test
 
 - **条目正文里可以写 `{{变量}}`**，但引用的名字要已注册。没注册的引用不会炸掉组装（插件会把它转义成字面量并记一条警告，见「未注册的引用按字面量渲染」），但**别把它当兜底**：那一段注入的就真是 `{{名字}}` 原文，模型看到的是一句带大括号的话，而不是你要的机器事实。
 - **section 名是派生出来的**：每条固定注册为 `user:prompt-manager:<id>`，所以只要 id 不重复就不会和 `deployment:persona`、`harness:identity`、`app:web-surface` 这类已注册的 section 撞名。变量名撞上别的行时，这一项被跳过并记一条警告，挂载照常进行 —— 正文里那个 `{{名字}}` 于是变成字面量（同样有一条警告），等于这一行没提供它，所以看到警告要么给自己的变量改名，要么把引用删掉。
-- **`package.json` 里的 `dsh.client` 和 `client/client.js` 必须同时存在**：只声明浏览器半边而没有 bundle，浏览器插件表在挂载时会直接报错。两者的包名必须都叫 `dsh-prompt-manager`。
+- **`package.json` 里的 `dsh.client`、`exports["./client"]` 和 `client/client.js` 必须同时在位**：只声明浏览器半边而没有 bundle，浏览器插件表在挂载时会直接报错（`declares dsh.client but exports no "./client" bundle`）。而且 **bundle 工厂的 `id` 必须等于包名** —— 客户端模块系统就是按包名把 bundle 和它的 Loader 行对起来的，所以现在这个 id 是 `@lolkda/dsh-prompt-manager`（3.0.0 之前是 `dsh-prompt-manager`）。
 - **浏览器半边占两个插槽**：设置页在 `settings.section`（`client-ui-settings` 声明的），输入栏的组合芯片在 `conversation.input.right`（`client-ui-conversation` 声明的，工具行右侧、模型选择器左边）。所以 `dsh.client.inject` 里同时列了这两个包 —— 它决定的是加载顺序（让插槽的声明方先到），而这份元数据是**启动时快照**：新增或改动 inject 列表要重启 profile，只改 `client/client.js` 的内容仍然靠 HMR 原地重载。
 - **改 `cordis.patch.yml` 会热加载**：`patchReload: live` 时 HMR 会为这个 patch 文件单独起一个精确 watcher，所以增删 row 不用重启。
 - **改插件代码要重启，改浏览器半边不用**：DSH 不监听插件模块文件，而 loader 按 URL 缓存 ESM 模块，所以改完 `lib/` 必须重启 profile。
@@ -504,7 +542,7 @@ src/net.ts                  唯一出网口径：代理 dispatcher 与条件 GET
 src/sync.ts                 源的三槽轮转：检查、应用、还原、state.json
 src/subscriptions.ts        订阅引擎：源列表、检查/应用/还原、索引同步
 src/pack.ts                 组合包格式：校验、导入计划、正文写入与回滚
-src/routes.ts               /prompt-manager 路由与网关
+src/routes.ts               /dsh-prompt-manager 路由与网关
 client/client.js            浏览器半边（设置页 + 输入栏的组合芯片），手写的懒加载 CJS 工厂 bundle
 lib/                        构建产物，loader 实际加载的文件
 test/smoke.mjs              宿主行为冒烟测试（跑的是构建产物）
@@ -520,7 +558,8 @@ test/pack.mjs               组合包测试（格式校验、导入计划、正�
 test/scripts.mjs            变量脚本测试（注入 runner，末尾真脚本与真超时）
 test/client.mjs             浏览器 bundle 测试
 tools/check-build.mjs       提交前核对 lib/ 是不是 src/ 的新构建
-examples/cordis.patch.yml   可直接抄进 profile 的 patch 行
+examples/cordis.patch.yml   可直接抄进 profile 的 patch 行（装了包就不需要写）
+cordis.patch.yml            包自带的 bundle patch：装成依赖后 DSH 自动应用的那一层
 environment.md              内置的机器环境条目正文（随包发布，可被本机正文覆盖）
 tsconfig.json               构建与类型检查配置
 ```
@@ -530,14 +569,32 @@ tsconfig.json               构建与类型检查配置
 源码是 TypeScript，`lib/` 由 `tsc` 生成；浏览器半边是手写的 JS bundle，`npm run build` 只做语法检查（`node --check`），不需要打包器，因为它只 `require` 平台模块表里已有的 `react` 与 UI primitives：
 
 ```bash
-npm install          # 装 typescript 与 DSH 类型包；prepare 会自动构建一次
+npm install          # 只装开发依赖：typescript 与 DSH 类型包
 npm run build        # src/*.ts -> lib/*.js + lib/types/*.d.ts，并检查 client/client.js
 npm run typecheck    # tsc --noEmit
-npm test             # 先构建，再跑十一个测试
+npm test             # 先构建，再跑十二个测试
 npm run check:build  # 构建后核对 lib/ 没有未提交的改动（提交前跑）
 ```
 
-`lib/` 与 `client/` 都提交进仓库，所以克隆下来就能按相对路径挂载，不需要本地工具链 —— 这正是 `check:build` 存在的原因：**`lib/` 与 `src/` 必须同一个提交**，否则克隆出来挂载的是一份和源码对不上的代码（多出一个 `lib/foo.js` 而没被 `git add` 时尤其隐蔽，挂载会直接 `ERR_MODULE_NOT_FOUND`）。改完源码：`npm run build && npm test && npm run check:build && git add src lib client test README.md && git commit`。
+清单里**没有生命周期脚本**（`prepare` 已换成 `prepublishOnly`）：`npm install` 不构建、git 安装也不构建，因为 `lib/`/`client/` 就是构建产物本身；`prepublishOnly` 只在 `npm publish` 时构建一次。这不是洁癖 —— pnpm 12 会拒绝执行 git 依赖的构建脚本（`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`），留着 `prepare` 等于让每个用 `dsh plugin add github:…` 装的人都撞一次墙。
+
+### 包清单契约（照着做就能被 `dsh plugin` 装、被商城收录）
+
+| 字段 | 本仓库的值 | 为什么 |
+|---|---|---|
+| `dsh.bundle.patch` | `./cordis.patch.yml` | DSH 靠它认「这是个 profile bundle」：装成依赖后**自动**进 `dsh.profile.bundles` 并应用这一层；商城没有它直接判 `SUBMISSION_BUNDLE_MISSING` |
+| `dsh.client` | `{platform: 'web', inject: [...]}` + `exports["./client"]` | 浏览器半边；工厂 `id` 必须等于包名 |
+| `dsh.compatibility.dshReleases` | 对官方最新三个版本逐版本写 `compatible`/`incompatible`/`unknown` | 商城上下架依据：三个版本里至少要有一个精确的 `compatible`，全 `unknown` 会被转 `unlisted` |
+| `engines.node` | `>=22` | 商城会记录成兼容范围 |
+| `publishConfig.access` | `public` | scoped 包默认私有，不写就发成私有包 |
+| `files` | 必须含 `lib`、`client`、`cordis.patch.yml`、`environment.md` | 装出来的包要自洽 |
+| 生命周期脚本 | 无 | 见上 |
+
+包内 `cordis.patch.yml` 只 `insert` 自己这一行，`id` 用插件自有、不与别家条目撞的 id（商城会拿它和所有既有条目的 `entryIds` 比对），并且**不允许**出现 `name: '@deepseek-ai/…'` 这种冒充官方组件的行。
+
+`lib/` 与 `client/` 都提交进仓库，所以克隆下来就能按相对路径挂载，不需要本地工具链 —— 这正是 `check:build` 存在的原因：**`lib/` 与 `src/` 必须同一个提交**，否则克隆出来挂载的是一份和源码对不上的代码（多出一个 `lib/foo.js` 而没被 `git add` 时尤其隐蔽，挂载会直接 `ERR_MODULE_NOT_FOUND`）。改完源码：`npm run build && npm test && npm run check:build && git add src lib client test README.md package.json package-lock.json && git commit`。
+
+装成包来验证（不碰你自己的 profile）：`dsh plugin --profile pmcheck add git+file:///D:/path/to/checkout`，然后 `dsh --profile pmcheck --dump-config` 应该能看到 `id: dsh-prompt-manager` 那一行 —— 它是包内 `cordis.patch.yml` 自己插进去的，`pmcheck` 这个 profile 的 patch 文件从头到尾没动过。看完 `dsh plugin --profile pmcheck remove @lolkda/dsh-prompt-manager`，删掉 `$DSH_HOME/profiles/pmcheck` 即可。
 
 在 profile 里用相对路径挂载时，`vendor/dsh-prompt-manager/` 是**另一份拷贝**，仓库里的改动不会自动过去：`npm run build` 之后要把 `lib/`（以及 `client/`、`environment.md` 这些随包发布的东西）同步过去，并重启 profile（宿主半边不热加载）。
 

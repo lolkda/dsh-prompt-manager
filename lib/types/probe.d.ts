@@ -10,7 +10,7 @@
  * to `undefined` makes every section referencing it fail to render — one missing
  * tool would cost the whole system prompt.
  *
- * @module dsh-prompt-manager/probe
+ * @module @lolkda/dsh-prompt-manager/probe
  */
 /** Largest number of probes one configuration may declare. */
 export declare const MAX_PROBES = 64;

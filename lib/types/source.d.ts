@@ -6,7 +6,7 @@
  * lives in `net.ts`, the files and their history live in `sync.ts`, and the two
  * are joined by the engine in `subscriptions.ts`.
  *
- * @module dsh-prompt-manager/source
+ * @module @lolkda/dsh-prompt-manager/source
  */
 /** Manifest every subscribed repository must carry at its root. */
 export declare const MANIFEST_FILE = "prompt-manager.json";

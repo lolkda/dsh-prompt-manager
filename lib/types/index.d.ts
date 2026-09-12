@@ -29,7 +29,7 @@
  * chip in the browser switches the set with one write and the next model step
  * sees it.
  *
- * @module dsh-prompt-manager
+ * @module @lolkda/dsh-prompt-manager
  */
 import type { Context } from '@deepseek-ai/cordis';
 import { type ProbeSpec, type ProbeTexts } from './probe.js';
@@ -40,8 +40,8 @@ export { ROUTE_PREFIX } from './routes.js';
 export { MAX_PROBES } from './probe.js';
 export { BUILTIN_PROMPTS } from './entries.js';
 export { MAX_SCRIPTS, MAX_SCRIPT_BYTES, SCRIPTS_DIR_NAME } from './scripts.js';
-/** Cordis plugin name. */
-export declare const name = "prompt-manager";
+/** Cordis plugin name. Distinct from the bare `prompt-manager` an unrelated package uses. */
+export declare const name = "dsh-prompt-manager";
 /** The prompt registry this row contributes to. */
 export declare const inject: string[];
 /** Section-name prefix of every entry this plugin registers. */

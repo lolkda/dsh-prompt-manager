@@ -19,7 +19,7 @@
  * `VARIABLE_NAME` constants). When that implementation changes shape, this one
  * has to follow.
  *
- * @module dsh-prompt-manager/guard
+ * @module @lolkda/dsh-prompt-manager/guard
  */
 /**
  * Zero-width space, inserted after each brace of a reference that must not

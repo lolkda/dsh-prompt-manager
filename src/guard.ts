@@ -19,7 +19,7 @@
  * `VARIABLE_NAME` constants). When that implementation changes shape, this one
  * has to follow.
  *
- * @module dsh-prompt-manager/guard
+ * @module @lolkda/dsh-prompt-manager/guard
  */
 
 /** A complete `{{...}}` group at the scan position, as the registry reads it. */

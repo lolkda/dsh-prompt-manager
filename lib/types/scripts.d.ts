@@ -17,7 +17,7 @@
  * last: the cache is read synchronously at mount, and changed scripts are
  * picked up by a refresh that runs behind the mount.
  *
- * @module dsh-prompt-manager/scripts
+ * @module @lolkda/dsh-prompt-manager/scripts
  */
 import { type ProbeRun, type ProbeTexts } from './probe.js';
 /** Directory name, under the plugin's storage root, holding the scripts. */

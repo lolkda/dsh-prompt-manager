@@ -17,7 +17,7 @@
  * - {@link planImport} works out which ids the entries will take on this machine
  *   and rewrites the preset's membership to match, without touching anything.
  *
- * @module prompt-manager/pack
+ * @module @lolkda/dsh-prompt-manager/pack
  */
 import { type PromptPreset } from './entries.js';
 /** Marker every pack carries, so a foreign JSON file is refused by name. */
@@ -129,6 +129,8 @@ export interface PackExportInput {
     members: PackMember[];
     /** Member ids the preset names that this machine cannot resolve. */
     missing?: string[] | undefined;
+    /** This plugin's package name, recorded in the pack's header. */
+    pluginName: string;
     /** This plugin's version, recorded in the pack's header. */
     pluginVersion: string;
     /** Clock, for tests; defaults to now. */

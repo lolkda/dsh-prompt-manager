@@ -12,7 +12,7 @@
  * `github.com` stays direct: that host is reachable from this deployment and a
  * mirror's routing table is not ours to assume.
  *
- * @module dsh-prompt-manager/net
+ * @module @lolkda/dsh-prompt-manager/net
  */
 /** Default per-request timeout, in milliseconds. */
 export declare const DEFAULT_TIMEOUT_MS = 10000;

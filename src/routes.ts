@@ -14,7 +14,7 @@
  * only fills the gaps that transport leaves: an id nobody holds, a body file, a
  * script on disk, a source's upstream check.
  *
- * @module dsh-prompt-manager/routes
+ * @module @lolkda/dsh-prompt-manager/routes
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -39,7 +39,7 @@ import type { Subscriptions } from './subscriptions.js'
 import type { VariableView } from './index.js'
 
 /** The single prefix every route below lives under. */
-export const ROUTE_PREFIX = '/prompt-manager'
+export const ROUTE_PREFIX = '/dsh-prompt-manager'
 
 /** Slack over a body limit, for JSON escaping and envelope overhead. */
 const JSON_SLACK = 8192
@@ -122,7 +122,7 @@ export function installPromptRoutes(ctx: Context, host: PromptRouteHost): void {
     if (webServer === undefined) return
     try {
       const off = webServer.register({ kind: 'prefix', path: ROUTE_PREFIX, handler: createHandler(host) })
-      ctx.effect(() => off, 'prompt-manager: prompt store route')
+      ctx.effect(() => off, 'dsh-prompt-manager: prompt store route')
     } catch (error) {
       host.warn(`cannot register ${ROUTE_PREFIX}: ${messageOf(error)}`)
     }

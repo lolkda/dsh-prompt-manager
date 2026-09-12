@@ -6,7 +6,7 @@
  * lives in `net.ts`, the files and their history live in `sync.ts`, and the two
  * are joined by the engine in `subscriptions.ts`.
  *
- * @module dsh-prompt-manager/source
+ * @module @lolkda/dsh-prompt-manager/source
  */
 
 import { MAX_ID_LENGTH } from './entries.js'

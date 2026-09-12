@@ -12,7 +12,7 @@
  * `github.com` stays direct: that host is reachable from this deployment and a
  * mirror's routing table is not ours to assume.
  *
- * @module dsh-prompt-manager/net
+ * @module @lolkda/dsh-prompt-manager/net
  */
 
 import { createRequire } from 'node:module'
@@ -189,7 +189,7 @@ export function createFetcher(config: { proxy: ProxyConfig; mirror: string }): F
     async get(url, options = {}) {
       if (failure !== undefined) throw failure
       const target = mirrorable(url) ? withMirror(config.mirror, url) : url
-      const headers: Record<string, string> = { 'user-agent': 'dsh-prompt-manager' }
+      const headers: Record<string, string> = { 'user-agent': '@lolkda/dsh-prompt-manager' }
       if (options.etag !== undefined && options.etag.length > 0) headers['if-none-match'] = options.etag
       const undici = dispatcher === undefined ? undefined : loadUndici()
       const init: Record<string, unknown> = {

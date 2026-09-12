@@ -17,8 +17,24 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
+import { ROUTE_PREFIX } from '../lib/routes.js'
+
 /** The built browser bundle under test. */
 const BUNDLE = fileURLToPath(new URL('../client/client.js', import.meta.url))
+
+/**
+ * Route prefix the Host serves this plugin under.
+ *
+ * The bundle carries its own copy of this constant, so taking the expected
+ * request URLs from the Host's is what keeps the two halves from drifting apart
+ * unnoticed — a prefix change on one side fails here.
+ */
+const ROUTE = ROUTE_PREFIX
+
+/** This package's own name. The client factory id must equal it. */
+const PACKAGE_NAME = JSON.parse(
+  readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'),
+).name
 
 /** Index the fake settings scope serves. */
 const ENTRIES = [
@@ -45,7 +61,7 @@ const PACK_JSON = {
   format: 'dsh-prompt-manager-pack',
   version: 1,
   exportedAt: '2026-09-12T00:00:00.000Z',
-  generator: { plugin: 'dsh-prompt-manager', pluginVersion: '9.9.9' },
+  generator: { plugin: '@lolkda/dsh-prompt-manager', pluginVersion: '9.9.9' },
   preset: { id: 'ctf', name: 'CTF 作业', entries: ['alpha'] },
   entries: [{ id: 'alpha', title: '第一条', order: 10, enabled: true, origin: 'local', body: '# First Entry\n\nbody' }],
   missing: [],
@@ -481,10 +497,10 @@ function materialize(React) {
     },
   )
   assert.ok(captured !== undefined, 'the bundle must register a factory with the module loader')
-  assert.equal(captured.id, 'dsh-prompt-manager', 'the factory id must be the package name')
+  assert.equal(captured.id, PACKAGE_NAME, 'the factory id must be the package name')
 
   const exports = captured.factory(requireStub)
-  assert.equal(exports.name, 'prompt-manager', 'the client plugin must expose its cordis name')
+  assert.equal(exports.name, 'dsh-prompt-manager', 'the client plugin must expose its cordis name')
   assert.ok(exports.inject.includes('slots'), 'the client plugin must inject the slot service')
   assert.ok(exports.inject.includes('settingsScope'), 'the client plugin must inject the settings scope service')
   assert.equal(typeof exports.apply, 'function', 'the client plugin must expose apply')
@@ -653,7 +669,7 @@ assert.ok(editor.text.includes('已保存'), 'a freshly opened entry has nothing
 assert.ok(!editor.text.includes('新增提示词'), 'the editor page must replace the list, not sit beside it')
 assert.equal(inspect(renderer.tree, MARKDOWN).nodes.length, 1, 'the preview must render through the shell renderer')
 assert.ok(
-  requests.some((request) => request.method === 'GET' && request.url === '/prompt-manager/body/alpha'),
+  requests.some((request) => request.method === 'GET' && request.url === `${ROUTE}/body/alpha`),
   'entering the editor must read the body from the Host route',
 )
 
@@ -670,7 +686,7 @@ assert.ok(saveButton !== undefined, 'an edited body must enable saving')
 saveButton.props.onClick()
 await renderer.settle()
 assert.ok(
-  requests.some((request) => request.method === 'PUT' && request.url === '/prompt-manager/body/alpha'
+  requests.some((request) => request.method === 'PUT' && request.url === `${ROUTE}/body/alpha`
     && JSON.parse(request.body).body === 'EDITED BODY'),
   'saving must write the body through the Host route',
 )
@@ -705,7 +721,7 @@ const addSource = button(renderer.tree, '添加来源')
 addSource.props.onClick()
 await renderer.settle()
 assert.ok(
-  requests.some((request) => request.method === 'POST' && request.url === '/prompt-manager/sources'),
+  requests.some((request) => request.method === 'POST' && request.url === `${ROUTE}/sources`),
   'adding a source asks the Host for a slug',
 )
 assert.ok(
@@ -713,7 +729,7 @@ assert.ok(
   'the new source is written into settings',
 )
 assert.ok(
-  requests.some((request) => request.method === 'POST' && request.url === '/prompt-manager/sources/o-r/check'),
+  requests.some((request) => request.method === 'POST' && request.url === `${ROUTE}/sources/o-r/check`),
   'a fresh source is checked straight away',
 )
 assert.ok(inspect(renderer.tree).text.includes('prompts/a.md'), 'the change list names the file that moved')
@@ -772,7 +788,7 @@ const requestsBefore = requests.length
 forkButton.props.onClick()
 await renderer.settle()
 assert.ok(
-  requests.some((request) => request.method === 'PUT' && request.url === '/prompt-manager/body/new-note'
+  requests.some((request) => request.method === 'PUT' && request.url === `${ROUTE}/body/new-note`
     && JSON.parse(request.body).body === 'SUBSCRIBED BODY'),
   'forking copies the subscribed body into a local file',
 )
@@ -782,7 +798,7 @@ assert.ok(
   'and adds a local entry with no source',
 )
 assert.equal(
-  JSON.parse(requests.slice(requestsBefore).find((request) => request.method === 'PUT' && request.url === '/prompt-manager/body/new-note').body).fileSha1,
+  JSON.parse(requests.slice(requestsBefore).find((request) => request.method === 'PUT' && request.url === `${ROUTE}/body/new-note`).body).fileSha1,
   null,
   'the fork writes the body under the "no file yet" fence',
 )
@@ -791,7 +807,7 @@ assert.equal(
 // hash. Holding `null` made the next save look like a create, and the store
 // refused it — a forked entry could not be saved until it was reopened.
 const fencedSave = requests.slice(requestsBefore)
-  .filter((request) => request.method === 'PUT' && request.url === '/prompt-manager/body/new-note')
+  .filter((request) => request.method === 'PUT' && request.url === `${ROUTE}/body/new-note`)
 assert.equal(fencedSave.length, 1, 'the fork writes the body exactly once')
 
 const forkedField = inspect(renderer.tree, 'textarea').nodes[0]
@@ -803,7 +819,7 @@ await renderer.settle()
 const entriesBeforeSave = writes.length
 button(renderer.tree, '保存修改').props.onClick()
 await renderer.settle()
-const edits = requests.filter((request) => request.method === 'PUT' && request.url === '/prompt-manager/body/new-note')
+const edits = requests.filter((request) => request.method === 'PUT' && request.url === `${ROUTE}/body/new-note`)
 const savedEdit = edits.at(-1)
 assert.equal(
   JSON.parse(savedEdit.body).fileSha1,
@@ -886,12 +902,12 @@ await renderer.settle()
 inspect(renderer.tree, 'textarea').nodes[0].props.onChange({ target: { value: 'console.log(JSON.stringify({ fresh: "ok" }))' } })
 await renderer.settle()
 
-const runsBefore = requests.filter((request) => request.url === '/prompt-manager/variables/run').length
+const runsBefore = requests.filter((request) => request.url === `${ROUTE}/variables/run`).length
 const settingsWritesBeforeRun = writes.length
 button(renderer.tree, '运行一次（测试）').props.onClick()
 await renderer.settle()
-const testRun = requests.filter((request) => request.url === '/prompt-manager/variables/run').at(-1)
-assert.equal(requests.filter((request) => request.url === '/prompt-manager/variables/run').length, runsBefore + 1, 'a test run goes to the Host')
+const testRun = requests.filter((request) => request.url === `${ROUTE}/variables/run`).at(-1)
+assert.equal(requests.filter((request) => request.url === `${ROUTE}/variables/run`).length, runsBefore + 1, 'a test run goes to the Host')
 assert.deepEqual(
   JSON.parse(testRun.body),
   { name: 'fresh', source: 'console.log(JSON.stringify({ fresh: "ok" }))' },
@@ -903,7 +919,7 @@ assert.ok(inspect(renderer.tree).text.includes('这次会提供 1 个变量'), '
 button(renderer.tree, '保存并启用').props.onClick()
 await renderer.settle()
 assert.ok(
-  requests.some((request) => request.method === 'PUT' && request.url === '/prompt-manager/script/fresh'),
+  requests.some((request) => request.method === 'PUT' && request.url === `${ROUTE}/script/fresh`),
   'saving writes the script through the Host',
 )
 const savedPage = inspect(renderer.tree)
@@ -916,7 +932,7 @@ assert.ok(savedPage.text.includes('下一个模型步骤生效'), 'and when they
 button(renderer.tree, '运行一次（测试）').props.onClick()
 await renderer.settle()
 assert.deepEqual(
-  JSON.parse(requests.filter((request) => request.url === '/prompt-manager/variables/run').at(-1).body),
+  JSON.parse(requests.filter((request) => request.url === `${ROUTE}/variables/run`).at(-1).body),
   { name: 'fresh', source: 'console.log(JSON.stringify({ fresh: "ok" }))' },
   'even a saved script is tested from the editor copy, so a test run never registers',
 )
@@ -995,11 +1011,11 @@ const cappedRenderer = createRenderer()
 const cappedSection = materialize(cappedRenderer.React).registrations[0].component
 cappedRenderer.mount(cappedSection, { scope })
 await cappedRenderer.settle()
-const addsBefore = requests.filter((request) => request.url === '/prompt-manager/id').length
+const addsBefore = requests.filter((request) => request.url === `${ROUTE}/id`).length
 button(cappedRenderer.tree, '新增提示词').props.onClick()
 await cappedRenderer.settle()
 assert.equal(
-  requests.filter((request) => request.url === '/prompt-manager/id').length,
+  requests.filter((request) => request.url === `${ROUTE}/id`).length,
   addsBefore,
   'at the cap, no id may be allocated for an entry the registry would never inject',
 )
@@ -1224,7 +1240,7 @@ assert.equal(requests.length, jsonBefore, 'a file that is not JSON never reaches
 assert.ok(presetText().includes('notes.txt 不是 JSON 文件'), 'and the page says which file it was')
 
 console.log('client ok')
-console.log('  bundle      factory id dsh-prompt-manager, materialized and driven against stub modules')
+console.log(`  bundle      factory id ${PACKAGE_NAME}, materialized and driven against stub modules`)
 console.log(`  section     settings.section id=prompt-manager order=${String(meta.order)}`)
 console.log(`  chip        ${chipMeta.name} id=prompt-manager, switches the preset with one settings write`)
 console.log(`  list        ${String(ENTRIES.length)} rows, switches, kebab menus, the plugin's own repo link, add control refused at the cap`)

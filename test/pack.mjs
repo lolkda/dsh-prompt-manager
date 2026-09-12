@@ -43,6 +43,7 @@ const pack = buildPack({
   preset: { id: 'ctf', name: 'ctf', entries: ['env', 'lolkda-dsh-prompt-pack-ctf', 'gone-entry'] },
   members: [local, subscribed],
   missing: ['gone-entry'],
+  pluginName: '@lolkda/dsh-prompt-manager',
   pluginVersion: '9.9.9',
   now: new Date('2026-09-12T00:00:00.000Z'),
 })
@@ -50,7 +51,7 @@ const pack = buildPack({
 assert.equal(pack.format, PACK_FORMAT, 'a pack names its format')
 assert.equal(pack.version, PACK_VERSION, 'and its version')
 assert.equal(pack.exportedAt, '2026-09-12T00:00:00.000Z', 'the header records when it was written')
-assert.deepEqual(pack.generator, { plugin: 'dsh-prompt-manager', pluginVersion: '9.9.9' }, 'and by what')
+assert.deepEqual(pack.generator, { plugin: '@lolkda/dsh-prompt-manager', pluginVersion: '9.9.9' }, 'and by what')
 assert.deepEqual(pack.preset.entries, ['env', 'lolkda-dsh-prompt-pack-ctf', 'gone-entry'], 'membership is carried as written')
 assert.deepEqual(pack.missing, ['gone-entry'], 'a member that no longer exists is reported, not dropped in silence')
 assert.equal(pack.entries[0].body, local.body, 'a local member carries its body')
@@ -67,6 +68,7 @@ assert.deepEqual(
 const bare = buildPack({
   preset: { id: 'p', name: 'p', entries: ['x'] },
   members: [{ id: 'x', title: '空条目', order: 0, enabled: false }],
+  pluginName: '@lolkda/dsh-prompt-manager',
   pluginVersion: '9.9.9',
 })
 assert.deepEqual(bare.entries, [{ id: 'x', title: '空条目', order: 0, enabled: false }], 'a bodyless member round-trips')
@@ -227,7 +229,8 @@ const doubled = planImport(
       { id: 'dup', title: '第一份', order: 1, enabled: true, body: 'a' },
       { id: 'dup', title: '第二份', order: 2, enabled: true, body: 'b' },
     ],
-    pluginVersion: '9.9.9',
+    pluginName: '@lolkda/dsh-prompt-manager',
+  pluginVersion: '9.9.9',
   }),
   { entryIds: [], presetIds: [] },
 )
@@ -248,7 +251,8 @@ const unusable = planImport(
   buildPack({
     preset: { id: 'p', name: 'p', entries: [] },
     members: [{ id: 'Not An Id', title: '中文标题', order: 1, enabled: true, body: 'x' }],
-    pluginVersion: '9.9.9',
+    pluginName: '@lolkda/dsh-prompt-manager',
+  pluginVersion: '9.9.9',
   }),
   { entryIds: [], presetIds: [] },
 )

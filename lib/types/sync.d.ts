@@ -9,7 +9,7 @@
  * entry each file became, and the hashes and validators that make the next check
  * cheap.
  *
- * @module dsh-prompt-manager/sync
+ * @module @lolkda/dsh-prompt-manager/sync
  */
 import { type Fetcher } from './net.js';
 import { type ManifestPrompt, type PromptSource } from './source.js';

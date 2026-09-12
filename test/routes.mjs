@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Route test: the `/prompt-manager` prefix route the settings page edits bodies
- * through.
+ * Route test: the `/dsh-prompt-manager` prefix route the settings page edits
+ * bodies through.
  *
  * The handler is driven directly with fake request and response objects, so the
  * test covers what the browser cannot be trusted to decide: the loopback gate,

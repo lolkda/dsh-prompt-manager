@@ -17,7 +17,7 @@
  * - {@link planImport} works out which ids the entries will take on this machine
  *   and rewrites the preset's membership to match, without touching anything.
  *
- * @module prompt-manager/pack
+ * @module @lolkda/dsh-prompt-manager/pack
  */
 import {
   entryIdFor,
@@ -155,6 +155,8 @@ export interface PackExportInput {
   members: PackMember[]
   /** Member ids the preset names that this machine cannot resolve. */
   missing?: string[] | undefined
+  /** This plugin's package name, recorded in the pack's header. */
+  pluginName: string
   /** This plugin's version, recorded in the pack's header. */
   pluginVersion: string
   /** Clock, for tests; defaults to now. */
@@ -261,7 +263,7 @@ export function buildPack(input: PackExportInput): PromptPack {
     format: PACK_FORMAT,
     version: PACK_VERSION,
     exportedAt: (input.now ?? new Date()).toISOString(),
-    generator: { plugin: 'dsh-prompt-manager', pluginVersion: input.pluginVersion },
+    generator: { plugin: input.pluginName, pluginVersion: input.pluginVersion },
     preset: {
       id: input.preset.id,
       name: input.preset.name,

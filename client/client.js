@@ -1,5 +1,5 @@
 /**
- * Browser half of dsh-prompt-manager: the「提示词」settings section.
+ * Browser half of @lolkda/dsh-prompt-manager: the「提示词」settings section.
  *
  * The section has two views. The landing view lists the prompt entries: each row
  * is a title, an injection switch, and a kebab menu carrying that row's actions
@@ -8,18 +8,19 @@
  * panel's narrow column is spent on one thing at a time.
  *
  * The index (title, order, enabled) rides the shared settings transport through
- * `ctx.settingsScope`; the bodies ride the plugin's own `/prompt-manager` route,
- * because they are markdown files on disk.
+ * `ctx.settingsScope`; the bodies ride the plugin's own `/dsh-prompt-manager`
+ * route, because they are markdown files on disk.
  *
  * Built in the client module system's lazy-CJS factory format by hand, so the
  * package needs no bundler: the factory only requests modules the shell's
  * platform table already carries (`react` and the UI primitives).
  *
  * Registered as `exports.name` / `exports.inject` / `exports.apply`, the same
- * shape every other client bundle exports.
+ * shape every other client bundle exports. The factory id is the package name —
+ * that is how the client module system ties this bundle to its Loader row.
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-prompt-manager',
+  id: '@lolkda/dsh-prompt-manager',
   factory: (require) => {
     const React = require('react')
     const primitives = require('@deepseek-ai/dsh-client-ui-primitives')
@@ -30,7 +31,7 @@ window.__ModuleLoader__.load({
     const NAMESPACE = 'prompt-manager'
 
     /** Prefix of the Host route serving the body files. */
-    const ROUTE = '/prompt-manager'
+    const ROUTE = '/dsh-prompt-manager'
 
     /** Placement the section claims in the settings navigation. */
     const SECTION_ORDER = 60
@@ -2272,14 +2273,14 @@ window.__ModuleLoader__.load({
       const existing = document.querySelector(`style[data-plugin-css=${JSON.stringify(STYLE_ID)}]`)
       if (existing !== null) return null
       const tag = document.createElement('style')
-      tag.dataset.plugin = 'prompt-manager'
+      tag.dataset.plugin = 'dsh-prompt-manager'
       tag.dataset.pluginCss = STYLE_ID
       tag.textContent = CSS
       document.head.appendChild(tag)
       return tag
     }
 
-    const name = 'prompt-manager'
+    const name = 'dsh-prompt-manager'
 
     // `settingsScope` is a hard requirement: this section is nothing but the
     // index it serves, so a host without the settings domain mounts nothing

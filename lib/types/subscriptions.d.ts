@@ -8,7 +8,7 @@
  * is handed back to the plugin through {@link SubscriptionHost.setEntries}, so
  * the plugin stays the only writer of its own namespace.
  *
- * @module dsh-prompt-manager/subscriptions
+ * @module @lolkda/dsh-prompt-manager/subscriptions
  */
 import { type ProxyConfig } from './net.js';
 import { type PromptSource } from './source.js';
