@@ -338,7 +338,18 @@ npm run build        # src/*.ts -> lib/*.js + lib/types/*.d.ts，并检查 clien
 npm run typecheck    # tsc --noEmit
 npm test             # 先构建，再跑十二个测试（test/*.mjs，各自文件头有说明）
 npm run check:build  # 核对 lib/ 没有未提交的改动（提交前跑）
+npm run check:pack   # 核对 npm 会打包的内容里有 bundle patch、浏览器半边、构建产物
 ```
+
+**发布由 tag 触发**。`.github/workflows/ci.yml` 在每次 push / PR 上跑构建、测试、`check:build`、`check:pack`（ubuntu + windows 两个平台）；`.github/workflows/release.yml` 只在 `v*` tag 上发布 —— 先校验 tag 与 `package.json` 版本一致，再跑同一套门禁，然后 `npm publish --provenance --access public` 并开一个 GitHub Release。发一版就三行：
+
+```bash
+npm version patch --no-git-tag-version   # 或手改 package.json
+git add -A && git commit -m "chore: 3.0.2"
+git tag v3.0.2 && git push origin main --follow-tags
+```
+
+认证走 npm 的 **Trusted Publisher（OIDC）**，仓库里不放任何 npm token —— npm 正在淘汰"绕过 2FA、长期有效"的发布 token，而 OIDC 换来的凭证只活这一次运行，并顺带生成 provenance（包页面上会标出它是从哪个 commit 的哪次运行构建的）。首次要在 npm 包页 Settings → Trusted Publisher 里填 `lolkda` / `dsh-prompt-manager` / `release.yml`。
 
 `lib/` 与 `client/` 都提交进仓库，所以克隆下来就能按相对路径挂载，不需要工具链 —— 这正是 `check:build` 存在的原因：**`lib/` 与 `src/` 必须同一个提交**，否则挂载的是一份和源码对不上的代码（多出一个 `lib/foo.js` 而没 `git add` 时尤其隐蔽，挂载会直接 `ERR_MODULE_NOT_FOUND`）。改完源码：`npm run build && npm test && npm run check:build && git add -A && git commit`。
 
