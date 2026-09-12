@@ -802,6 +802,18 @@ window.__ModuleLoader__.load({
         if (compactionId.length === 0) return null
         return entries.find((entry) => entry.id === compactionId && isCompaction(entry)) ?? null
       }, [compactionId, entries])
+      /**
+       * The document's own compaction pointer, whatever a combo may be overriding.
+       *
+       * Only this field may be written when an entry stops being an instruction: a
+       * combo's pointer belongs to the combo page. Releasing "the pointer that named
+       * it" against the combo-aware id above would clear the document's field whenever
+       * a combo happened to name that entry, dropping a root pointer aimed elsewhere.
+       */
+      const rootCompactionId = React.useMemo(() => {
+        const value = snapshot && snapshot.value
+        return value && typeof value.compaction === 'string' ? value.compaction : NO_PRESET
+      }, [snapshot])
       /** Whether a combo, rather than the root field, answers the pointer. */
       const compactionLocked = activePreset !== null
       const [view, setView] = React.useState('list')
@@ -929,7 +941,11 @@ window.__ModuleLoader__.load({
 
       /** Leave the editor page, keeping nothing unsaved. */
       const back = React.useCallback(() => {
-        if (draft !== null && dirty && !window.confirm(draft.isNew ? '放弃这条新提示词？' : '放弃未保存的修改？')) return
+        if (draft !== null && dirty && !window.confirm(draft.isNew
+          // A draft is named for what it is: the instruction being thrown away is
+          // not a prompt entry, and the question should not call it one.
+          ? (isCompaction(draft) ? '放弃这条新压缩指令？' : '放弃这条新提示词？')
+          : '放弃未保存的修改？')) return
         if (draft !== null && draft.isNew) {
           setDraft(null)
           setSaved(null)
@@ -975,14 +991,14 @@ window.__ModuleLoader__.load({
       }, [entries, store])
 
       /**
-       * Create a compaction instruction and put it in force.
+       * Create a compaction instruction, as a draft, and put it in force on save.
        *
-       * A section can be a draft that only becomes real once it is saved, because
-       * nothing reads the index until a person saves it. A compaction entry cannot
-       * work that way: the pointer has to name something that exists, so the entry
-       * and the pointer are written before the editor opens. What that leaves is an
-       * entry with no body yet — which the Host reads as "use the built-in
-       * instruction" — and the save that follows fills the template in.
+       * A compaction entry is the one thing the pointer may name, so the record and
+       * the pointer that names it are written together, at save time, in the only
+       * order that works: body, record, pointer. Writing them here instead — which
+       * is what this page used to do, because a pointer has to name something that
+       * exists — left a blank instruction in the list behind every visit somebody
+       * abandoned, and aimed the pointer at it while it was still blank.
        */
       const addCompaction = React.useCallback(async () => {
         const cap = store !== null && typeof store.maxEntries === 'number' ? store.maxEntries : null
@@ -991,44 +1007,32 @@ window.__ModuleLoader__.load({
           return
         }
         setBusy(true)
-        let placed = false
         try {
           const allocated = await request('POST', '/id', { title: COMPACTION_TITLE })
-          const order = nextOrder(entries)
-          await scope.set('entries', [
-            ...entries,
-            { id: allocated.id, title: COMPACTION_TITLE, order, enabled: false, kind: 'compaction' },
-          ])
-          placed = true
-          await scope.set('compaction', allocated.id)
           const next = {
             id: allocated.id,
             title: COMPACTION_TITLE,
-            order,
+            order: nextOrder(entries),
             body: COMPACTION_TEMPLATE,
             source: 'empty',
             fileSha1: null,
-            isNew: false,
+            isNew: true,
             kind: 'compaction',
           }
           setSelectedId(allocated.id)
           setDraft(next)
-          setSaved(next)
-          setStatus({ kind: 'info', text: `已新建压缩指令 ${allocated.id} 并设为当前，保存后在下一次压缩生效。` })
+          setSaved(null)
+          setStatus({
+            kind: 'info',
+            text: `已分配 id ${allocated.id}，保存后它才会成为压缩指令（下一次压缩生效）。`,
+          })
           setView('editor')
         } catch (error) {
-          // Half a creation is worth naming precisely: the entry is in the index
-          // but nothing points at it, which the row's own action can finish.
-          setStatus({
-            kind: 'error',
-            text: placed
-              ? `条目已经建好，但「设为当前」没写进去：${error.message}（在列表里点它的「设为当前」即可）`
-              : error.message,
-          })
+          setStatus({ kind: 'error', text: error.message })
         } finally {
           setBusy(false)
         }
-      }, [entries, store, scope])
+      }, [entries, store])
 
       const save = React.useCallback(async () => {
         if (draft === null) return
@@ -1050,7 +1054,12 @@ window.__ModuleLoader__.load({
           setDraft(next)
           setSaved(next)
           const nextEntries = draft.isNew
-            ? [...entries, { id: draft.id, title: draft.title, order: draft.order, enabled: true }]
+            ? [...entries, compactionDraft
+              // A new compaction record carries the switch a section would have,
+              // switched off, because `enabled` decides nothing for it: the pointer
+              // is what makes it live.
+              ? { id: draft.id, title: draft.title, order: draft.order, enabled: false, kind: 'compaction' }
+              : { id: draft.id, title: draft.title, order: draft.order, enabled: true }]
             : entries.map((entry) => entry.id === draft.id
               ? { ...entry, title: draft.title, order: draft.order }
               : entry)
@@ -1065,9 +1074,28 @@ window.__ModuleLoader__.load({
               return
             }
           }
+          // A brand-new instruction is the one save that aims the pointer, and it
+          // does so only while the document's own pointer is what decides: with a
+          // combo in force this write would be inert now and would silently take
+          // over the day that combo is dropped. Creating the entry is still right —
+          // the combo's own selector is where it becomes current.
+          if (compactionDraft && draft.isNew && !compactionLocked && compactionId !== draft.id) {
+            try {
+              await scope.set('compaction', draft.id)
+            } catch (error) {
+              // The entry exists, so the row's own action can finish the job.
+              setStatus({ kind: 'error', text: `正文和索引都写好了，但「设为当前」没写进去：${error.message}（在列表里点它的「设为当前」即可）` })
+              await refreshStore()
+              return
+            }
+          }
           setStatus({
             kind: 'info',
-            text: compactionDraft ? '已保存，下一次压缩生效。' : '已保存，下一个模型步骤生效。',
+            text: compactionDraft
+              ? (compactionLocked
+                ? '已保存。当前有组合生效，由组合里的「压缩指令」决定用哪条；这条还不会生效。'
+                : '已保存，下一次压缩生效。')
+              : '已保存，下一个模型步骤生效。',
           })
           await refreshStore()
         } catch (error) {
@@ -1075,7 +1103,7 @@ window.__ModuleLoader__.load({
         } finally {
           setBusy(false)
         }
-      }, [compactionDraft, draft, entries, refreshStore, scope])
+      }, [compactionDraft, compactionId, compactionLocked, draft, entries, refreshStore, scope])
 
       // ── presets ──────────────────────────────────────────────────────────────
 
@@ -1489,27 +1517,37 @@ window.__ModuleLoader__.load({
         if (draft === null) return
         setBusy(true)
         try {
-          const nextEntries = entries.map((entry) => {
-            if (entry.id !== draft.id) return entry
-            return compaction ? { ...entry, kind: 'compaction' } : withoutKind(entry)
-          })
-          await scope.set('entries', nextEntries)
-          if (!compaction && compactionId === draft.id) await scope.set('compaction', NO_PRESET)
           const next = compaction ? { ...draft, kind: 'compaction' } : withoutKind(draft)
+          // A draft has written nothing yet, so there is no record to rewrite and no
+          // pointer to release: flipping it only changes what the save will write.
+          if (!draft.isNew) {
+            const nextEntries = entries.map((entry) => {
+              if (entry.id !== draft.id) return entry
+              return compaction ? { ...entry, kind: 'compaction' } : withoutKind(entry)
+            })
+            await scope.set('entries', nextEntries)
+            if (!compaction && rootCompactionId === draft.id) await scope.set('compaction', NO_PRESET)
+          }
           setDraft(next)
-          setSaved(next)
+          // A draft stays a draft: marking it saved here would turn the save button
+          // into "已保存" on an entry that exists nowhere but this page.
+          setSaved(draft.isNew ? null : next)
           setStatus({
             kind: 'info',
             text: compaction
-              ? '已改成压缩指令。它不再进 system prompt，想让它生效点「设为当前」。'
-              : '已改回普通段落，按开关注入；压缩指令回到 DSH 自带的那段。',
+              ? (draft.isNew
+                ? '已改成压缩指令；保存后它才进索引，想让它生效再点「设为当前」。'
+                : '已改成压缩指令。它不再进 system prompt，想让它生效点「设为当前」。')
+              : (draft.isNew
+                ? '已改回普通段落；保存后它才进索引，按开关注入。'
+                : '已改回普通段落，按开关注入；压缩指令回到 DSH 自带的那段。'),
           })
         } catch (error) {
           setStatus({ kind: 'error', text: error.message })
         } finally {
           setBusy(false)
         }
-      }, [compactionId, draft, entries, scope])
+      }, [draft, entries, rootCompactionId, scope])
 
       const remove = React.useCallback((entry) => {
         if (!window.confirm(`删除「${entry.title}」？它的正文文件也会一起删除。`)) return
@@ -1519,6 +1557,10 @@ window.__ModuleLoader__.load({
         // a file the page no longer shows.
         request('DELETE', `/body/${encodeURIComponent(entry.id)}`)
           .then(() => scope.set('entries', entries.filter((candidate) => candidate.id !== entry.id)))
+          // The pointer may only ever name a compaction entry, so deleting the one it
+          // names has to let it go in the same breath: left alone, the Host would read
+          // a pointer at nothing and say so in its log at every compaction.
+          .then(() => (rootCompactionId === entry.id ? scope.set('compaction', NO_PRESET) : undefined))
           .then(async () => {
             if (selectedId === entry.id) {
               setDraft(null)
@@ -1530,7 +1572,7 @@ window.__ModuleLoader__.load({
           })
           .catch((error) => setStatus({ kind: 'error', text: error.message }))
           .finally(() => setBusy(false))
-      }, [entries, refreshStore, scope, selectedId])
+      }, [entries, refreshStore, rootCompactionId, scope, selectedId])
 
       // ── variables and scripts ────────────────────────────────────────────────
 
@@ -1833,7 +1875,9 @@ window.__ModuleLoader__.load({
             compactionDraft
               ? h(Button, {
                 key: 'current',
-                disabled: !writable || busy || compactionLocked,
+                // A draft cannot be put in force: the pointer may only name an entry
+                // the index holds, and this one is not written yet.
+                disabled: !writable || busy || compactionLocked || draft.isNew,
                 onClick: () => { void setCompaction(draft) },
               }, compactionEntry !== null && compactionEntry.id === draft.id ? '取消当前' : '设为当前')
               : null,

@@ -1391,9 +1391,19 @@ scope.state = { ...scope.state, value: { ...scope.state.value, compaction: '', a
 
 // ── adding a compaction instruction ───────────────────────────────────────────
 
-// Unlike a new section, a new compaction entry is not a draft: the pointer has to
-// name it before anything changes, so the index is written and the pointer aimed
-// before the editor opens — and the body is saved from that editor like any other.
+// The renderer keeps its hook slots across mounts, so a case that ends inside the
+// editor leaves the next one there: this is the way back to the list.
+const toList = async () => {
+  const leave = button(compactRenderer.tree, '← 返回')
+  if (leave !== undefined) leave.props.onClick()
+  await compactRenderer.settle()
+}
+
+// A new compaction instruction is a draft, exactly like a new section: an id is
+// taken and the editor opens on it, but nothing reaches the index until the person
+// saves. The entry does have to exist before the pointer can name it, so those two
+// writes happen together at save time — which is also what keeps "never mind" from
+// leaving a blank instruction in the list for the pointer to aim at.
 const addCompactWrites = writes.length
 const addCompactRequests = requests.length
 const addCompactButton = button(compactRenderer.tree, '新增压缩指令')
@@ -1404,26 +1414,11 @@ await compactRenderer.settle()
 const compactAllocation = requests.slice(addCompactRequests).find((request) => request.url === `${ROUTE}/id`)
 assert.ok(compactAllocation !== undefined, 'a new compaction instruction takes an id from the Host')
 assert.equal(JSON.parse(compactAllocation.body).title, '压缩指令', 'allocated for the title the person is about to see')
-
-const addedWrites = writes.slice(addCompactWrites)
-const addedIndex = addedWrites.filter((write) => write.field === 'entries')
-const addedPointer = addedWrites.find((write) => write.field === 'compaction')
-assert.equal(addedIndex.length, 1, 'the index is written exactly once')
-assert.ok(addedPointer !== undefined, 'and the pointer is aimed at the new entry in the same breath')
-assert.equal(addedPointer.value, 'new-note', 'naming the id the Host allocated')
-assert.ok(
-  compactAllocation.seq < addedIndex[0].seq && addedIndex[0].seq < addedPointer.seq,
-  'the id exists first, then the index entry, then the pointer that names it',
-)
-
-const freshEntry = addedIndex[0].value.find((entry) => entry.id === 'new-note')
-assert.equal(freshEntry.kind, 'compaction', 'the new entry is marked as a compaction instruction')
-assert.equal(freshEntry.enabled, false, 'and keeps the switch a section would have, switched off')
-assert.ok(freshEntry.order > 90, 'placed after the entries that already exist')
+assert.equal(writes.length, addCompactWrites, 'and nothing is written to the index before that draft is saved')
 
 // The editor opens on it holding the template, so the body is written from here:
 // one flow for a new entry rather than an index record nobody can reach.
-assert.ok(compactText().includes('编辑「压缩指令」'), 'and the editor opens on the entry that was just made')
+assert.ok(compactText().includes('编辑「压缩指令」'), 'and the editor opens on the draft the id was taken for')
 const freshBody = inspect(compactRenderer.tree, 'textarea').nodes[0]
 assert.equal(
   (freshBody.props.value.match(/^## /gm) ?? []).length,
@@ -1431,6 +1426,116 @@ assert.equal(
   'the template carries the eight sections the instruction asks the summarizer to fill',
 )
 assert.ok(freshBody.props.value.includes('检查点'), 'and says what the model is being asked to write')
+
+// The pointer may only ever name an entry that exists, so the one control that aims
+// it has to refuse while the entry is still only a draft on this page.
+const draftAim = button(compactRenderer.tree, '设为当前')
+assert.ok(draftAim !== undefined, 'the editor still offers the control that puts an instruction in force')
+assert.equal(draftAim.props.disabled, true, 'and it refuses while the entry is only a draft on this page')
+
+// Backing out is the whole point of a draft: it must leave the index and the pointer
+// exactly as they were, and say which draft it is throwing away.
+const discards = []
+windowStub.confirm = (message) => { discards.push(message); return true }
+const discardWrites = writes.length
+button(compactRenderer.tree, '← 返回').props.onClick()
+await compactRenderer.settle()
+assert.deepEqual(discards, ['放弃这条新压缩指令？'], 'a new instruction asks before it is dropped, naming what it is')
+assert.equal(writes.length, discardWrites, 'and dropping it writes nothing at all')
+assert.equal(compactionBadges(compactRenderer.tree).length, 1, 'so no blank instruction is left behind in the list')
+windowStub.confirm = () => true
+
+// Saving is what makes it real, in the one order that works: the body lands, then
+// the record the pointer may name, then the pointer itself.
+scope.state = { ...scope.state, value: { entries: ENTRIES, presets: PRESETS, activePreset: '', compaction: '' } }
+compactRenderer.mount(compactSection, { scope })
+await compactRenderer.settle()
+const saveRequests = requests.length
+const saveWrites = writes.length
+button(compactRenderer.tree, '新增压缩指令').props.onClick()
+await compactRenderer.settle()
+button(compactRenderer.tree, '保存修改').props.onClick()
+await compactRenderer.settle()
+
+const savedBody = requests.slice(saveRequests)
+  .find((request) => request.method === 'PUT' && request.url === `${ROUTE}/body/new-note`)
+assert.ok(savedBody !== undefined, 'saving writes the body to the id the Host allocated')
+const savedWrites = writes.slice(saveWrites)
+const savedIndex = savedWrites.find((write) => write.field === 'entries')
+const savedPointer = savedWrites.find((write) => write.field === 'compaction')
+assert.ok(savedIndex !== undefined, 'and then the index gains the record the pointer can name')
+const freshEntry = savedIndex.value.find((entry) => entry.id === 'new-note')
+assert.equal(freshEntry.kind, 'compaction', 'marked as a compaction instruction')
+assert.equal(freshEntry.enabled, false, 'and keeps the switch a section would have, switched off')
+assert.ok(freshEntry.order > 90, 'placed after the entries that already exist')
+assert.ok(savedPointer !== undefined, 'and the pointer is aimed at it in the same breath')
+assert.equal(savedPointer.value, 'new-note', 'naming the id the Host allocated')
+assert.ok(
+  savedBody.seq < savedIndex.seq && savedIndex.seq < savedPointer.seq,
+  'the body exists first, then the index entry, then the pointer that names it',
+)
+assert.ok(compactText().includes('已保存，下一次压缩生效。'), 'and the page says when that lands')
+assert.ok(!compactText().includes('尚未保存'), 'so the editor is no longer holding a draft')
+await toList()
+
+// A combo answers which instruction is in force, so aiming the document's own
+// pointer from here would be a write that decides nothing now and everything later:
+// the entry is still created, and the combo page is where it becomes current.
+scope.state = {
+  ...scope.state,
+  value: { entries: ENTRIES, presets: PRESETS, activePreset: 'ctf', compaction: '' },
+}
+compactRenderer.mount(compactSection, { scope })
+await compactRenderer.settle()
+const comboWrites = writes.length
+button(compactRenderer.tree, '新增压缩指令').props.onClick()
+await compactRenderer.settle()
+button(compactRenderer.tree, '保存修改').props.onClick()
+await compactRenderer.settle()
+const underCombo = writes.slice(comboWrites)
+assert.ok(
+  underCombo.some((write) => write.field === 'entries'
+    && write.value.some((entry) => entry.id === 'new-note' && entry.kind === 'compaction')),
+  'the instruction is created whether or not a combo is in force',
+)
+assert.equal(
+  underCombo.some((write) => write.field === 'compaction'),
+  false,
+  'but the document pointer stays where it is while a combo decides',
+)
+assert.ok(compactText().includes('这条还不会生效'), 'and the page says so instead of promising the next compaction')
+await toList()
+
+// Turning that draft into a section follows the same rule — nothing is written
+// before the save — and the flip must not mark it as saved, or the page would leave
+// the person holding a draft with the save button already reading "已保存".
+scope.state = { ...scope.state, value: { entries: ENTRIES, presets: PRESETS, activePreset: '', compaction: '' } }
+compactRenderer.mount(compactSection, { scope })
+await compactRenderer.settle()
+const flipWrites = writes.length
+button(compactRenderer.tree, '新增压缩指令').props.onClick()
+await compactRenderer.settle()
+button(compactRenderer.tree, '转为普通段落').props.onClick()
+await compactRenderer.settle()
+assert.equal(writes.length, flipWrites, 'flipping an unsaved draft writes nothing either')
+const afterFlip = button(compactRenderer.tree, '保存修改')
+assert.ok(afterFlip !== undefined, 'and the draft it left behind still offers to be saved')
+assert.equal(afterFlip.props.disabled, false, 'because the flip did not mark a draft nobody wrote as saved')
+afterFlip.props.onClick()
+await compactRenderer.settle()
+const sectionWrites = writes.slice(flipWrites)
+const sectionEntry = sectionWrites.find((write) => write.field === 'entries')
+  .value.find((entry) => entry.id === 'new-note')
+assert.equal('kind' in sectionEntry, false, 'saving then writes it as the section it has become')
+assert.equal(sectionEntry.enabled, true, 'switched on, the way a new section is')
+assert.equal(
+  sectionWrites.some((write) => write.field === 'compaction'),
+  false,
+  'and no pointer is aimed at a section, which could never answer it',
+)
+scope.state = { ...scope.state, value: { entries: ENTRIES, presets: PRESETS, activePreset: '', compaction: '' } }
+compactRenderer.mount(compactSection, { scope })
+await compactRenderer.settle()
 
 // Compaction entries occupy the same 50-entry cap the sections do, so the refusal
 // has to happen here too — and it has to happen before an id is taken. The cap
@@ -1534,6 +1639,76 @@ assert.equal(demoted.enabled, false, 'including the switch it already had')
 assert.ok(
   kindWrites.some((write) => write.field === 'compaction' && write.value === ''),
   'and the pointer is released in the same step, since it may only name a compaction entry',
+)
+
+// Deleting the instruction the pointer names has to let it go in the same breath, for
+// the same reason the kind flip does: the pointer may only ever name a compaction
+// entry, and a dangling one makes the Host fall back to the built-in instruction and
+// complain in its log at every compaction.
+scope.state = {
+  ...scope.state,
+  value: { entries: ENTRIES, presets: PRESETS, activePreset: '', compaction: 'compact-zh' },
+}
+compactRenderer.mount(compactSection, { scope })
+await compactRenderer.settle()
+// The kind flip above happened inside the editor, so the list has to come back
+// before a row menu exists to click.
+await toList()
+const dropBefore = writes.length
+rowMenuOf(rowFor(compactRenderer.tree, '压缩指令')).props.onSelect('delete')
+await compactRenderer.settle()
+const dropWrites = writes.slice(dropBefore)
+const dropIndex = dropWrites.find((write) => write.field === 'entries')
+assert.ok(dropIndex !== undefined, 'deleting the instruction takes it out of the index')
+assert.equal(
+  dropIndex.value.some((entry) => entry.id === 'compact-zh'),
+  false,
+  'and it is the instruction that went',
+)
+assert.ok(
+  dropWrites.some((write) => write.field === 'compaction' && write.value === ''),
+  'while the pointer that named it is released in the same step',
+)
+
+// A combo's own pointer is the combo page's to fix, and the document's field must not
+// be written in its place: that would silently drop a root pointer aimed elsewhere.
+scope.state = {
+  ...scope.state,
+  value: { entries: ENTRIES, presets: PRESETS, activePreset: 'ctf', compaction: 'beta' },
+}
+compactRenderer.mount(compactSection, { scope })
+await compactRenderer.settle()
+const comboDropBefore = writes.length
+rowMenuOf(rowFor(compactRenderer.tree, '压缩指令')).props.onSelect('delete')
+await compactRenderer.settle()
+assert.equal(
+  writes.slice(comboDropBefore).some((write) => write.field === 'compaction'),
+  false,
+  'deleting an entry a combo names leaves the document pointer alone',
+)
+
+// The same rule for the other release: demoting an entry a combo names must not write
+// the document pointer either, for the very same reason.
+scope.state = {
+  ...scope.state,
+  value: { entries: ENTRIES, presets: PRESETS, activePreset: 'ctf', compaction: 'beta' },
+}
+compactRenderer.mount(compactSection, { scope })
+await compactRenderer.settle()
+openRow(compactRenderer.tree, '压缩指令').props.onClick()
+await compactRenderer.settle()
+const comboFlipBefore = writes.length
+button(compactRenderer.tree, '转为普通段落').props.onClick()
+await compactRenderer.settle()
+const comboFlipWrites = writes.slice(comboFlipBefore)
+assert.ok(
+  comboFlipWrites.some((write) => write.field === 'entries'),
+  'the kind flip still rewrites the index',
+)
+assert.equal(
+  comboFlipWrites.some((write) => write.field === 'compaction'),
+  false,
+  'but not the document pointer that a combo is overriding',
 )
 
 // And back the other way, which must mark it again.
@@ -1721,7 +1896,7 @@ console.log(`  chip        ${chipMeta.name} id=prompt-manager, switches the pres
 console.log(`  list        ${String(ENTRIES.length)} rows, switches, kebab menus, the plugin's own repo link, add control refused at the cap`)
 console.log('  views       row menu -> editor page -> save -> back to the list')
 console.log('  compaction  a row of its own kind: badge, no switch, the pointer action, and a combo overriding it')
-console.log('  kind        new from the template (8 sections), aimed, saved at the next compaction, switched back to a section')
+console.log('  kind        a draft from the template (8 sections), written only on save, aimed, flipped to a section, dropped with its pointer')
 console.log('  combos      a combo picks one compaction instruction, and saving it leaves the other combos alone')
 console.log('  report      replacements and matches told apart, local time, and the feature switched off')
 console.log('  presets     list, editor, member checklist, id from the Host, delete clears the selection')
