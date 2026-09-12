@@ -1,5 +1,7 @@
 # dsh-prompt-manager
 
+[![ci](https://github.com/lolkda/dsh-prompt-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/lolkda/dsh-prompt-manager/actions/workflows/ci.yml)
+
 把提示词作为 **system prompt section** 注入 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH），并在 Web GUI 的 **设置 → 提示词** 里管理它们：开关、排序、新增、删除、改正文（markdown）。
 
 正文里可以引用 `{{变量}}`。变量来自三类：插件注册的机器事实、挂载时跑的探测命令、你自己写的脚本（打印一个 JSON 对象，键就是变量名）。
