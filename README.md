@@ -584,6 +584,7 @@ npm run check:build  # 构建后核对 lib/ 没有未提交的改动（提交前
 |---|---|---|
 | `dsh.bundle.patch` | `./cordis.patch.yml` | DSH 靠它认「这是个 profile bundle」：装成依赖后**自动**进 `dsh.profile.bundles` 并应用这一层；商城没有它直接判 `SUBMISSION_BUNDLE_MISSING` |
 | `dsh.client` | `{platform: 'web', inject: [...]}` + `exports["./client"]` | 浏览器半边；工厂 `id` 必须等于包名 |
+| `dsh.compatibility.dsh` | `>=0.1.5-rc.1 <0.2.0` | 瞄准的 DSH 线。**不写这一项不是"留空"，而是被推断**：校验脚本会拿唯一的 `@deepseek-ai/dsh-*` peer 范围顶上，那是个依赖服务的范围（`>=0.0.1-rc.1`），读起来像"任何 DSH 都行"，是没测过的过度声明 |
 | `dsh.compatibility.dshReleases` | 对官方最新三个版本逐版本写 `compatible`/`incompatible`/`unknown` | 商城上下架依据：三个版本里至少要有一个精确的 `compatible`，全 `unknown` 会被转 `unlisted` |
 | `engines.node` | `>=22` | 商城会记录成兼容范围 |
 | `publishConfig.access` | `public` | scoped 包默认私有，不写就发成私有包 |

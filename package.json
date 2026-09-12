@@ -62,6 +62,7 @@
       ]
     },
     "compatibility": {
+      "dsh": ">=0.1.5-rc.1 <0.2.0",
       "dshReleases": {
         "0.1.5-alpha.2": "unknown",
         "0.1.5-rc.1": "compatible",
