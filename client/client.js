@@ -2456,13 +2456,13 @@ window.__ModuleLoader__.load({
         // something a click can be trusted to split correctly. Parts are grouped so
         // the label and its link stay adjacent and only the links are underlined.
         //
-        // A compaction entry has no `enabled` state to report (its switch would
-        // mean nothing) and is always local for now, so its line says the two
-        // things that are true of it instead.
+        // A compaction entry's switch answers the pointer, so its line does not
+        // restate that state: "当前生效" beside the switch would say one thing twice.
+        // What is left is where the body came from, and — while a combo is in force —
+        // the fact that the combo, not the root pointer, is what answers for it.
         const meta = compaction
           ? [
             ['本地'],
-            [injected ? '当前生效' : '未生效'],
             activePreset === null ? [] : [`组合：${injected ? '生效' : '不生效'}`],
           ].filter((group) => group.length > 0)
           : [
@@ -2510,17 +2510,23 @@ window.__ModuleLoader__.load({
               : isSubscribed(entry)
                 ? h('span', { key: 'badge', className: 'dsh-prompt-manager__badge' }, '订阅')
                 : null,
-            // No injection switch: a compaction entry does not enter the system
-            // prompt, so a switch here would control nothing.
-            compaction
-              ? null
-              : h(Switch, {
-                key: 'switch',
-                checked: entry.enabled === true,
-                label: entry.title,
-                disabled: !writable || busy,
-                onChange: () => toggle(entry, entry.enabled !== true),
-              }),
+            // A section's switch answers `enabled`; a compaction entry's answers the
+            // pointer. A compaction entry has no system-prompt section to switch —
+            // `reconcile()` never gives it one — so its `enabled` flag decides nothing,
+            // while the pointer is exactly what makes it live. "On" therefore means
+            // "this is the entry DSH's instruction is replaced with", which is true of
+            // at most one entry at a time; and a combo answers the pointer by itself, so
+            // the switch is refused while one is in force, the same rule the … menu uses.
+            h(Switch, {
+              key: 'switch',
+              checked: compaction ? injected : entry.enabled === true,
+              label: entry.title,
+              disabled: !writable || busy || (compaction && compactionLocked),
+              onChange: () => {
+                if (compaction) void setCompaction(entry)
+                else toggle(entry, entry.enabled !== true)
+              },
+            }),
             h(RowMenu, {
               key: 'menu',
               open: menuFor === entry.id,

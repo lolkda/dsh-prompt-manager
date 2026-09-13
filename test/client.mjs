@@ -682,8 +682,8 @@ await renderer.settle()
 const switches = inspect(tree, SWITCH).nodes
 assert.equal(
   switches.length,
-  SECTION_ENTRIES.length,
-  'every section entry must carry one switch, and the compaction entry — whose switch would mean nothing — must not',
+  ENTRIES.length,
+  'every entry must carry one switch, the compaction entry included',
 )
 assert.equal(switches[0].props.checked, true, 'the first switch must mirror the index')
 assert.equal(switches[1].props.checked, false, 'a disabled entry must render an unchecked switch')
@@ -1330,9 +1330,9 @@ assert.ok(presetText().includes('notes.txt 不是 JSON 文件'), 'and the page s
 // ── the compaction entry is a row of its own kind ─────────────────────────────
 
 // The compaction instruction lives in the same index as every section, but it is
-// not one: its `enabled` flag decides nothing, so it must not offer an injection
-// switch, and its state dot answers a different question — whether the compaction
-// pointer is aimed at it right now.
+// not one: its `enabled` flag decides nothing, so its switch is bound to the pointer
+// instead — and its state dot answers the same question the switch does, whether the
+// compaction pointer is aimed at it right now.
 scope.state = {
   ...scope.state,
   value: { entries: ENTRIES, presets: PRESETS, activePreset: '', compaction: '' },
@@ -1370,7 +1370,9 @@ assert.ok(
 
 const compactRow = rowFor(compactRenderer.tree, '压缩指令')
 assert.ok(compactRow !== undefined, 'the compaction entry must be listed like every other entry')
-assert.equal(inspect(compactRow, SWITCH).nodes.length, 0, 'a compaction entry must not offer an injection switch')
+const compactSwitch = inspect(compactRow, SWITCH).nodes[0]
+assert.ok(compactSwitch !== undefined, 'and it must offer a switch like every other row')
+assert.equal(compactSwitch.props.checked, false, 'unchecked while no pointer is aimed at it')
 assert.ok(dotClass(compactRenderer.tree, '压缩指令').includes('--idle'), 'with no pointer aimed at it the compaction row is not in force')
 assert.ok(!dotClass(compactRenderer.tree, '第一条').includes('--idle'), 'while a switched-on section still reads as in force')
 
@@ -1410,6 +1412,28 @@ const released = writes.slice(pointerClearBefore).find((write) => write.field ==
 assert.ok(released !== undefined, '取消当前 must write the compaction pointer')
 assert.equal(released.value, '', 'as the empty pointer, which means the built-in instruction')
 
+// The row's own switch does the same thing, so the control a person reaches for first is
+// the one every other row has. It is bound to the pointer rather than to `enabled` —
+// which decides nothing here, because `reconcile()` never gives a compaction entry a
+// system-prompt section — so "on" means "this is the one DSH's instruction is replaced
+// with", and it holds for exactly one entry at a time.
+const switchAimBefore = writes.length
+inspect(rowFor(compactRenderer.tree, '压缩指令'), SWITCH).nodes[0].props.onChange()
+await compactRenderer.settle()
+const aimedBySwitch = writes.slice(switchAimBefore).find((write) => write.field === 'compaction')
+assert.ok(aimedBySwitch !== undefined, 'flipping the row switch on must write the compaction pointer')
+assert.equal(aimedBySwitch.value, 'compact-zh', 'naming the entry the switch belongs to')
+compactRenderer.mount(compactSection, { scope })
+await compactRenderer.settle()
+const aimedRowSwitch = inspect(rowFor(compactRenderer.tree, '压缩指令'), SWITCH).nodes[0]
+assert.equal(aimedRowSwitch.props.checked, true, 'and the switch then reads on, straight from the namespace')
+const switchClearBefore = writes.length
+aimedRowSwitch.props.onChange()
+await compactRenderer.settle()
+const releasedBySwitch = writes.slice(switchClearBefore).find((write) => write.field === 'compaction')
+assert.ok(releasedBySwitch !== undefined, 'flipping it back off releases the pointer')
+assert.equal(releasedBySwitch.value, '', 'as the empty pointer, which means the built-in instruction')
+
 // A preset in force answers the pointer by itself — the same rule the sections
 // follow, so the row cannot claim a compaction instruction the prompt is not using.
 scope.state = { ...scope.state, value: { ...scope.state.value, activePreset: 'ctf' } }
@@ -1421,11 +1445,22 @@ assert.ok(
 )
 // The root pointer is not what decides while a preset is on, so the row must not
 // offer to write it: an action that silently changes nothing is worse than none.
+// The switch and the … menu item are the same action, so both refuse together.
 assert.ok(compactText().includes('组合：生效'), 'the row says the combo is what put it in force')
 assert.equal(
   item(rowMenuOf(rowFor(compactRenderer.tree, '压缩指令')), 'current').disabled,
   true,
   'and the pointer action is refused while the combo answers that question',
+)
+assert.equal(
+  inspect(rowFor(compactRenderer.tree, '压缩指令'), SWITCH).nodes[0].props.disabled,
+  true,
+  'the row switch refuses with it, so neither control writes a field nothing reads',
+)
+assert.equal(
+  inspect(rowFor(compactRenderer.tree, '压缩指令'), SWITCH).nodes[0].props.checked,
+  true,
+  'while still reading the state the combo put it in',
 )
 
 // And the preset wins even when it points at the built-in instruction: falling
