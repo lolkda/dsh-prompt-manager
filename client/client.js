@@ -44,6 +44,13 @@ window.__ModuleLoader__.load({
     const PRESET_SLOT = 'conversation.input.right'
 
     /**
+     * The id the compaction chip claims in that row. The row is a list, so the two chips
+     * share its slot name but not their id — a slot keyed by id would otherwise treat
+     * the second registration as a replacement for the first.
+     */
+    const COMPACTION_CHIP_ID = `${NAMESPACE}-compaction`
+
+    /**
      * `activePreset` value meaning "no preset": each entry's own switch decides.
      * Mirrors the Host, which reads an empty or unknown id the same way.
      */
@@ -186,13 +193,13 @@ window.__ModuleLoader__.load({
 .dsh-prompt-manager__memberId{flex:0 0 auto;font-family:var(--ds-font-family-code,ui-monospace,monospace);font-size:11px;color:var(--dsw-alias-label-tertiary)}
 
 /* the composer chip: one compact control in the tool row below the input box */
-.dsh-prompt-manager__presetChip{box-sizing:border-box;max-width:240px;height:28px;padding:0 10px;display:inline-flex;align-items:center;gap:6px;border:0;border-radius:14px;background:0 0;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;line-height:1;white-space:nowrap;overflow:hidden;cursor:pointer}
-.dsh-prompt-manager__presetChip:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
-.dsh-prompt-manager__presetChip--on{color:var(--dsw-alias-label-primary)}
-.dsh-prompt-manager__presetChipLabel{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsh-prompt-manager__composerChip{box-sizing:border-box;max-width:240px;height:28px;padding:0 10px;display:inline-flex;align-items:center;gap:6px;border:0;border-radius:14px;background:0 0;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;line-height:1;white-space:nowrap;overflow:hidden;cursor:pointer}
+.dsh-prompt-manager__composerChip:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.dsh-prompt-manager__composerChip--on{color:var(--dsw-alias-label-primary)}
+.dsh-prompt-manager__composerChipLabel{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* the shell marks keyboard focus with a 2px business-colour ring; keep that */
-.dsh-prompt-manager__tab:focus-visible,.dsh-prompt-manager__button:focus-visible,.dsh-prompt-manager__addButton:focus-visible,.dsh-prompt-manager__cardMain:focus-visible,.dsh-prompt-manager__iconButton:focus-visible,.dsh-prompt-manager__presetChip:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
+.dsh-prompt-manager__tab:focus-visible,.dsh-prompt-manager__button:focus-visible,.dsh-prompt-manager__addButton:focus-visible,.dsh-prompt-manager__cardMain:focus-visible,.dsh-prompt-manager__iconButton:focus-visible,.dsh-prompt-manager__composerChip:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
 `.trim()
 
     /**
@@ -723,8 +730,8 @@ window.__ModuleLoader__.load({
         anchor: h('button', {
           type: 'button',
           className: active === null
-            ? 'dsh-prompt-manager__presetChip'
-            : 'dsh-prompt-manager__presetChip dsh-prompt-manager__presetChip--on',
+            ? 'dsh-prompt-manager__composerChip'
+            : 'dsh-prompt-manager__composerChip dsh-prompt-manager__composerChip--on',
           'aria-label': '切换提示词组合',
           'aria-haspopup': 'menu',
           'aria-expanded': open,
@@ -734,8 +741,110 @@ window.__ModuleLoader__.load({
               ? '切换提示词组合（下一个模型步骤生效）'
               : '这个页面是只读的：局域网地址打开时设置通道退化为内存模式',
           onClick: () => setOpen((wasOpen) => !wasOpen),
-        }, h('span', { className: 'dsh-prompt-manager__presetChipLabel' },
+        }, h('span', { className: 'dsh-prompt-manager__composerChipLabel' },
           failed !== null ? '提示词 · 切换失败' : `提示词 · ${active === null ? '按开关' : active.name}`)),
+      })
+    }
+
+    /**
+     * The compaction chip: which compaction instruction runs, and the control that
+     * switches it.
+     *
+     * The twin of the preset chip beside it — same namespace, same row, same one-write
+     * shape — answering the other half of the question. That chip decides which sections
+     * go into the prompt; this one decides which instruction replaces DSH's own when a
+     * context compaction summarises the conversation.
+     *
+     * It writes the field that actually decides. With no combo in force that is the root
+     * `compaction` pointer; with one in force the Host reads the combo's own field and
+     * never looks at the root, so this writes the combo instead. The settings row refuses
+     * while a combo is in force — right for a row you can walk away from, wrong here: a
+     * composer control that dies whenever a combo is on would be dead most of the time.
+     * @param props - composed slot props carrying the bound settings scope.
+     * @returns the chip element tree.
+     */
+    function CompactionChip(props) {
+      const scope = props.scope
+      const subscribe = React.useCallback((listener) => scope.subscribe(listener), [scope])
+      const getSnapshot = React.useCallback(() => scope.getSnapshot(), [scope])
+      const snapshot = React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+      const entries = React.useMemo(() => entriesOf(snapshot), [snapshot])
+      const presets = React.useMemo(() => presetsOf(snapshot), [snapshot])
+      const active = React.useMemo(() => activePresetOf(snapshot, presets), [snapshot, presets])
+      const [open, setOpen] = React.useState(false)
+      const [failed, setFailed] = React.useState(null)
+
+      // Nothing to say until the namespace has answered, and nothing to offer on a host
+      // that does not serve it at all.
+      if (snapshot.status !== 'ready') return null
+
+      const writable = snapshot.writable !== false && snapshot.mode !== 'memory'
+      const choices = entries.filter((entry) => isCompaction(entry))
+      const root = snapshot.value && typeof snapshot.value.compaction === 'string'
+        ? snapshot.value.compaction
+        : NO_PRESET
+      // What the Host will actually use: the combo's own choice while one is in force,
+      // the root pointer otherwise. An id that names nothing — a section, or an entry
+      // that has since been deleted — reads as no instruction at all, which is exactly
+      // what `resolveCompaction` does with it, so the chip can never claim an
+      // instruction the next compaction will not send.
+      const current = active !== null ? active.compaction : root
+      const chosen = choices.find((entry) => entry.id === current) ?? null
+      const items = choices.length === 0
+        ? [{ id: 'no-entries', label: '还没有压缩指令：设置 → 提示词 → 新增压缩指令', disabled: true }]
+        : [
+          { id: NO_PRESET, label: `不用：DSH 自带的压缩指令${current === NO_PRESET ? '（当前）' : ''}` },
+          ...choices.map((entry) => ({
+            id: entry.id,
+            label: `${entry.title}${current === entry.id ? '（当前）' : ''}`,
+            disabled: !writable,
+          })),
+        ]
+
+      const choose = (id) => {
+        setOpen(false)
+        if (id === current || id === 'no-entries') return
+        // One write either way, the same one the settings page makes. The preset list
+        // travels whole when a combo answers, because that field is replaced rather
+        // than patched — the same shape the page's own preset editor writes.
+        const write = active === null
+          ? scope.set('compaction', id)
+          : scope.set('presets', presets.map((preset) => (
+            preset.id === active.id ? { ...preset, compaction: id } : preset
+          )))
+        // The chip keeps showing the namespace's own answer, so a refused write leaves
+        // the old instruction in place rather than a selection that never reached the
+        // Host.
+        Promise.resolve(write)
+          .then(() => { setFailed(null) })
+          .catch((error) => {
+            setFailed(error && error.message ? error.message : String(error))
+          })
+      }
+
+      return h(SlotMenu, {
+        open,
+        items,
+        onClose: () => setOpen(false),
+        onSelect: choose,
+        anchor: h('button', {
+          type: 'button',
+          className: chosen === null
+            ? 'dsh-prompt-manager__composerChip'
+            : 'dsh-prompt-manager__composerChip dsh-prompt-manager__composerChip--on',
+          'aria-label': '切换压缩指令',
+          'aria-haspopup': 'menu',
+          'aria-expanded': open,
+          title: failed !== null
+            ? `切换失败：${failed}`
+            : !writable
+              ? '这个页面是只读的：局域网地址打开时设置通道退化为内存模式'
+              : active === null
+                ? '切换压缩指令（下一次压缩生效）'
+                : `切换组合「${active.name}」的压缩指令：组合生效时由它决定，这一选改动的是那个组合（下一次压缩生效）`,
+          onClick: () => setOpen((wasOpen) => !wasOpen),
+        }, h('span', { className: 'dsh-prompt-manager__composerChipLabel' },
+          failed !== null ? '压缩 · 切换失败' : `压缩 · ${chosen === null ? 'DSH 原文' : chosen.title}`)),
       })
     }
 
@@ -2751,11 +2860,20 @@ window.__ModuleLoader__.load({
         label: () => '提示词',
         inject: () => ({ scope }),
       }, (props) => h(Boundary, null, h(PromptSection, props))))
-      ctx.slots.inject(PRESET_SLOT, () => ctx.slots.register({
-        name: PRESET_SLOT,
-        id: NAMESPACE,
-        order: 10,
-      }, (props) => h(Boundary, { label: '提示词组合' }, h(PresetChip, { ...props, scope }))))
+      // One injection, two entries: the row is a list, and the effect an `inject`
+      // callback returns may be the iterable of disposers both registrations hand back.
+      ctx.slots.inject(PRESET_SLOT, () => [
+        ctx.slots.register({
+          name: PRESET_SLOT,
+          id: NAMESPACE,
+          order: 10,
+        }, (props) => h(Boundary, { label: '提示词组合' }, h(PresetChip, { ...props, scope }))),
+        ctx.slots.register({
+          name: PRESET_SLOT,
+          id: COMPACTION_CHIP_ID,
+          order: 11,
+        }, (props) => h(Boundary, { label: '压缩指令' }, h(CompactionChip, { ...props, scope }))),
+      ])
     }
 
     return { name, inject, apply }

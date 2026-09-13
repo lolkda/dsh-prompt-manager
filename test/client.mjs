@@ -612,17 +612,22 @@ const { registrations, injections } = materialize(renderer.React)
 assert.deepEqual(
   injections,
   ['settings.section', 'conversation.input.right'],
-  'the bundle must contribute the settings section and the composer chip',
+  'the bundle must contribute the settings section and both composer controls',
 )
-assert.equal(registrations.length, 2, 'exactly one settings section and one composer chip must be registered')
+assert.equal(registrations.length, 3, 'exactly one settings section and two composer controls must be registered')
 const { meta, component } = registrations[0]
 assert.equal(meta.name, 'settings.section', 'the registration must name its slot')
 assert.equal(meta.id, 'prompt-manager', 'the section id must be the namespace')
 assert.equal(meta.order, 60, 'the section must sit after the shipped settings sections')
 assert.equal(meta.label(), '提示词', 'the navigation label must be the Chinese one')
 const { meta: chipMeta } = registrations[1]
-assert.equal(chipMeta.name, 'conversation.input.right', 'the chip must sit in the composer tool row')
+assert.equal(chipMeta.name, 'conversation.input.right', 'the preset chip must sit in the composer tool row')
 assert.equal(chipMeta.id, 'prompt-manager', 'the chip id must be the namespace')
+assert.equal(chipMeta.order, 10, 'and come first of the two that share that row')
+const { meta: compactionChipMeta } = registrations[2]
+assert.equal(compactionChipMeta.name, 'conversation.input.right', 'the compaction chip rides the same row')
+assert.equal(compactionChipMeta.id, 'prompt-manager-compaction', 'under an id of its own, since a slot lists both')
+assert.equal(compactionChipMeta.order, 11, 'right after the preset chip it sits beside')
 
 // ── the list page ─────────────────────────────────────────────────────────────
 
@@ -1181,6 +1186,109 @@ assert.ok(
   'with no presets the chip must point at the settings page',
 )
 assert.equal(chipMenu().props.items[0].disabled, true, 'and that hint must not be selectable')
+
+// ── the compaction chip ───────────────────────────────────────────────────────
+
+// The second control in that row: the preset chip answers "which sections this
+// conversation works with", this one answers "which compaction instruction". A
+// component of its own, so it is driven through a renderer of its own — two
+// components cannot share one hook-slot table.
+const compactionChipRenderer = createRenderer()
+const compactionChipRegistration = materialize(compactionChipRenderer.React).registrations
+  .find((registration) => registration.meta.id === 'prompt-manager-compaction')
+assert.ok(compactionChipRegistration !== undefined, 'the composer row must also carry the compaction chip')
+
+const compactionChipMenu = () => inspect(compactionChipRenderer.tree, MENU).nodes[0]
+const compactionChipText = () => textOf(compactionChipMenu().props.anchor)
+
+scope.state = {
+  ...scope.state,
+  mode: 'host',
+  writable: true,
+  value: { ...scope.state.value, entries: ENTRIES, presets: PRESETS, activePreset: '', compaction: '' },
+}
+compactionChipRenderer.mount(compactionChipRegistration.component, { scope })
+await compactionChipRenderer.settle()
+assert.ok(
+  compactionChipText().includes('DSH'),
+  `with no pointer aimed anywhere the chip must say the built-in instruction is what runs, got ${compactionChipText()}`,
+)
+
+// Only the compaction entries belong in this menu. Offering a section would promise
+// to make it the compaction instruction, which is a different thing — and offering
+// the whole index would bury the two entries this control is actually about.
+assert.deepEqual(
+  compactionChipMenu().props.items.map((entry) => entry.id),
+  ['', 'compact-zh'],
+  'the menu must offer the built-in instruction plus every compaction entry',
+)
+assert.ok(item(compactionChipMenu(), 'compact-zh').label.includes('压缩指令（中文版）'), 'naming the entry it offers')
+assert.ok(item(compactionChipMenu(), '').label.includes('（当前）'), 'and marking what is in force right now')
+
+const compactionWritesBefore = writes.length
+compactionChipMenu().props.onSelect('compact-zh')
+await compactionChipRenderer.settle()
+const aimedByChip = writes.slice(compactionWritesBefore).find((write) => write.field === 'compaction')
+assert.ok(aimedByChip !== undefined, 'choosing an entry must write the compaction pointer')
+assert.equal(aimedByChip.value, 'compact-zh', 'with the id that was chosen')
+assert.equal(writes.slice(compactionWritesBefore).length, 1, 'and it must not touch any other settings field')
+
+compactionChipRenderer.mount(compactionChipRegistration.component, { scope })
+await compactionChipRenderer.settle()
+assert.ok(compactionChipText().includes('压缩指令（中文版）'), 'the chip follows the namespace it writes, like the preset chip')
+
+// A combo answers the pointer by itself, so the chip must write the field that
+// actually decides — the combo's own — instead of one nothing reads. This is the
+// one way it differs from the settings row, which refuses while a combo is in force:
+// a composer control that dies whenever a combo is on would be dead most of the time.
+scope.state = { ...scope.state, value: { ...scope.state.value, activePreset: 'ctf', compaction: '' } }
+compactionChipRenderer.mount(compactionChipRegistration.component, { scope })
+await compactionChipRenderer.settle()
+assert.ok(compactionChipText().includes('压缩指令（中文版）'), 'the chip shows what the combo put in force')
+
+const throughComboBefore = writes.length
+compactionChipMenu().props.onSelect('')
+await compactionChipRenderer.settle()
+const chipComboWrites = writes.slice(throughComboBefore)
+assert.equal(
+  chipComboWrites.filter((write) => write.field === 'compaction').length,
+  0,
+  'while a combo is in force the root pointer is not what decides, so writing it would change nothing',
+)
+const presetWrite = chipComboWrites.find((write) => write.field === 'presets')
+assert.ok(presetWrite !== undefined, 'choosing must write the combo that answers instead')
+assert.deepEqual(
+  presetWrite.value.map((preset) => ({
+    id: preset.id, name: preset.name, entries: preset.entries, compaction: preset.compaction,
+  })),
+  [
+    { id: 'ctf', name: 'CTF 作业', entries: ['alpha', 'beta'], compaction: '' },
+    { id: 'plain', name: '日常', entries: [], compaction: '' },
+  ],
+  'clearing the chosen combo and rewriting no other record',
+)
+
+// A page whose settings channel is process-local can show the choice but not make one —
+// the same refusal the preset chip makes, because it is the same kind of write.
+scope.state = { ...scope.state, mode: 'memory', writable: false }
+compactionChipRenderer.mount(compactionChipRegistration.component, { scope })
+await compactionChipRenderer.settle()
+assert.equal(
+  item(compactionChipMenu(), 'compact-zh').disabled,
+  true,
+  'a memory-mode page must refuse to switch the compaction instruction',
+)
+scope.state = { ...scope.state, mode: 'host', writable: true }
+
+// A deployment with no compaction entries still renders: the chip says where to make one.
+scope.state = {
+  ...scope.state,
+  value: { ...scope.state.value, entries: SECTION_ENTRIES, presets: [], activePreset: '', compaction: '' },
+}
+compactionChipRenderer.mount(compactionChipRegistration.component, { scope })
+await compactionChipRenderer.settle()
+assert.deepEqual(compactionChipMenu().props.items.map((entry) => entry.id), ['no-entries'], 'with none there is one hint')
+assert.equal(compactionChipMenu().props.items[0].disabled, true, 'and it is not selectable')
 
 // ── the presets page ─────────────────────────────────────────────────────────
 
