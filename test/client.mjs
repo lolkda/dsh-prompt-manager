@@ -118,6 +118,8 @@ const primitivesStub = {
   IconEllipsisOutline16: (props) => ({ type: 'stub-icon', props: props ?? {}, children: [] }),
   IconEditOutline16: (props) => ({ type: 'stub-icon', props: props ?? {}, children: [] }),
   IconTrashOutline16: (props) => ({ type: 'stub-icon', props: props ?? {}, children: [] }),
+  IconCheckOutline16: (props) => ({ type: 'stub-icon', props: props ?? {}, children: [] }),
+  IconCloseOutline16: (props) => ({ type: 'stub-icon', props: props ?? {}, children: [] }),
 }
 
 /** `document` stub good enough for style injection. */
@@ -1490,6 +1492,15 @@ assert.deepEqual(
   ['编辑', '设为当前', '删除'],
   'the compaction row offers its pointer action beside the shared row actions',
 )
+// Every action in a row menu carries an icon, and this one did not: without it the
+// pointer action read as a different kind of entry from the two beside it. The icon
+// follows the label — a check to make this the instruction, a cross to hand the next
+// compaction back to DSH.
+assert.deepEqual(
+  compactMenu.props.items.map((candidate) => candidate.icon && candidate.icon.type),
+  [primitivesStub.IconEditOutline16, primitivesStub.IconCheckOutline16, primitivesStub.IconTrashOutline16],
+  'every action must carry an icon, and 设为当前 the one that says what it does',
+)
 assert.equal(item(compactMenu, 'current').disabled, false, 'and it can be made current right away')
 assert.deepEqual(
   rowMenuOf(rowFor(compactRenderer.tree, '第一条')).props.items.map((candidate) => candidate.label),
@@ -1513,6 +1524,11 @@ await compactRenderer.settle()
 assert.ok(!dotClass(compactRenderer.tree, '压缩指令').includes('--idle'), 'the entry the pointer names reads as in force')
 const currentMenu = rowMenuOf(rowFor(compactRenderer.tree, '压缩指令'))
 assert.equal(item(currentMenu, 'current').label, '取消当前', 'and the action turns into the way out of it')
+assert.equal(
+  item(currentMenu, 'current').icon.type,
+  primitivesStub.IconCloseOutline16,
+  'with the icon that matches the label it turned into',
+)
 const pointerClearBefore = writes.length
 currentMenu.props.onSelect('current')
 await compactRenderer.settle()

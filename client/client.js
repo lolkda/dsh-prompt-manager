@@ -2646,6 +2646,11 @@ window.__ModuleLoader__.load({
                   {
                     id: 'current',
                     label: injected ? '取消当前' : '设为当前',
+                    // The icon follows the label: a check for the action that makes this
+                    // the instruction, a cross for the one that hands the next compaction
+                    // back to DSH. Without it this row read as an entry of a different
+                    // kind from the two beside it.
+                    icon: icon(injected ? 'IconCloseOutline16' : 'IconCheckOutline16'),
                     // A combo answers the pointer, so offering to write the root
                     // field here would be an action that changes nothing.
                     disabled: !writable || busy || compactionLocked,
