@@ -124,18 +124,36 @@ const primitivesStub = {
 /** Files the page asked the browser to download, in order. */
 const downloads = []
 
+/**
+ * The stylesheet the page injected, as text.
+ *
+ * This suite drives a tree of React elements, so nothing here lays out and no
+ * case can measure a box. The one property of the sheet a case can still hold to
+ * is the shape its rules give — which is exactly what the add row's stability
+ * rests on, so it is worth pinning rather than leaving to the eye.
+ */
+const injectedCss = []
+
 const documentStub = {
   querySelector: () => null,
-  createElement: (tag) => (tag === 'a'
-    ? {
-      dataset: {},
-      textContent: '',
-      href: '',
-      download: '',
-      click() { downloads.push({ name: this.download, href: this.href }) },
-      remove() {},
+  createElement: (tag) => {
+    if (tag === 'a') {
+      return {
+        dataset: {},
+        textContent: '',
+        href: '',
+        download: '',
+        click() { downloads.push({ name: this.download, href: this.href }) },
+        remove() {},
+      }
     }
-    : { dataset: {}, textContent: '', appendChild() {}, remove() {} }),
+    const node = { dataset: {}, appendChild() {}, remove() {} }
+    Object.defineProperty(node, 'textContent', {
+      get: () => '',
+      set: (value) => { injectedCss.push(String(value)) },
+    })
+    return node
+  },
   head: { appendChild: () => {} },
   body: { appendChild: () => {} },
 }
@@ -1416,16 +1434,17 @@ assert.ok(compactAllocation !== undefined, 'a new compaction instruction takes a
 assert.equal(JSON.parse(compactAllocation.body).title, '压缩指令', 'allocated for the title the person is about to see')
 assert.equal(writes.length, addCompactWrites, 'and nothing is written to the index before that draft is saved')
 
-// The editor opens on it holding the template, so the body is written from here:
-// one flow for a new entry rather than an index record nobody can reach.
+// The editor opens on it holding an empty body: the instruction this replaces is
+// DSH's own text and is not readable from here, so the page does not invent a
+// starting point that would go stale behind it. An empty body is also inert —
+// the pointer keeps falling back to DSH's instruction until one is written.
 assert.ok(compactText().includes('编辑「压缩指令」'), 'and the editor opens on the draft the id was taken for')
 const freshBody = inspect(compactRenderer.tree, 'textarea').nodes[0]
 assert.equal(
-  (freshBody.props.value.match(/^## /gm) ?? []).length,
-  8,
-  'the template carries the eight sections the instruction asks the summarizer to fill',
+  freshBody.props.value,
+  '',
+  'a new compaction instruction starts empty rather than from a template this page made up',
 )
-assert.ok(freshBody.props.value.includes('检查点'), 'and says what the model is being asked to write')
 
 // The pointer may only ever name an entry that exists, so the one control that aims
 // it has to refuse while the entry is still only a draft on this page.
@@ -1460,6 +1479,11 @@ await compactRenderer.settle()
 const savedBody = requests.slice(saveRequests)
   .find((request) => request.method === 'PUT' && request.url === `${ROUTE}/body/new-note`)
 assert.ok(savedBody !== undefined, 'saving writes the body to the id the Host allocated')
+assert.equal(
+  JSON.parse(savedBody.body).body,
+  '',
+  'and the body it writes is the empty one the draft started with, not a filled-in template',
+)
 const savedWrites = writes.slice(saveWrites)
 const savedIndex = savedWrites.find((write) => write.field === 'entries')
 const savedPointer = savedWrites.find((write) => write.field === 'compaction')
@@ -1889,6 +1913,33 @@ assert.ok(idleText.includes('压缩指令：DSH 自带'), 'with nothing pointed 
 assert.ok(idleText.includes('还没有遇到压缩'), 'and that no compaction has happened yet')
 STATUS = { ...STATUS, compaction: heldCompaction }
 
+// ── the add row must not re-flow when the panel's width shifts ────────────────
+// A wrapping row of minimum-width controls has a column count that follows the
+// available width. The three-across threshold of the shape this used to have
+// (3 x 180px + 2 x 10px = 560px) sat within a few pixels of this panel's own
+// width, so the very same page offered three controls on one line in one visit
+// and two in the next. A fixed track count cannot do that, whatever the shell
+// does with its scrollbar.
+const addRowRules = [...new Set(injectedCss
+  .flatMap((css) => [...css.matchAll(/\.dsh-prompt-manager__addRow\{([^}]*)\}/g)])
+  .map((match) => match[1]))]
+assert.equal(addRowRules.length, 1, `the sheet must style the add row exactly once, got ${String(addRowRules.length)}`)
+assert.ok(addRowRules[0].includes('display:grid'), 'the add row is a grid, so the sheet decides what fits on a line')
+assert.equal(
+  addRowRules[0].includes('flex-wrap'),
+  false,
+  'and never a wrapping row, whose line breaks would follow the panel width',
+)
+const addButtonRules = [...new Set(injectedCss
+  .flatMap((css) => [...css.matchAll(/\.dsh-prompt-manager__addButton\{([^}]*)\}/g)])
+  .map((match) => match[1]))]
+assert.equal(addButtonRules.length, 1, `the sheet must style the add control exactly once, got ${String(addButtonRules.length)}`)
+assert.equal(
+  addButtonRules[0].includes('min-width'),
+  false,
+  'and it carries no minimum width for a wrap threshold to key off',
+)
+
 console.log('client ok')
 console.log(`  bundle      factory id ${PACKAGE_NAME}, materialized and driven against stub modules`)
 console.log(`  section     settings.section id=prompt-manager order=${String(meta.order)}`)
@@ -1896,7 +1947,7 @@ console.log(`  chip        ${chipMeta.name} id=prompt-manager, switches the pres
 console.log(`  list        ${String(ENTRIES.length)} rows, switches, kebab menus, the plugin's own repo link, add control refused at the cap`)
 console.log('  views       row menu -> editor page -> save -> back to the list')
 console.log('  compaction  a row of its own kind: badge, no switch, the pointer action, and a combo overriding it')
-console.log('  kind        a draft from the template (8 sections), written only on save, aimed, flipped to a section, dropped with its pointer')
+console.log('  kind        a draft that starts empty, written only on save, aimed, flipped to a section, dropped with its pointer')
 console.log('  combos      a combo picks one compaction instruction, and saving it leaves the other combos alone')
 console.log('  report      replacements and matches told apart, local time, and the feature switched off')
 console.log('  presets     list, editor, member checklist, id from the Host, delete clears the selection')
@@ -1906,3 +1957,4 @@ console.log('  order       a body file is deleted before the index drops it, and
 console.log('  subscribe   sources page, add/fork, read-only subscribed bodies, a row that links to its repository')
 console.log('  variables   list with provenance, copy-reference, new script from template, no insert into another body')
 console.log('  scripts     save and enable, test run stays a draft, the editor inserts a reference at the caret')
+console.log('  addrow      a fixed two-column grid, so the controls cannot re-flow when the panel width shifts')

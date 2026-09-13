@@ -128,8 +128,15 @@ window.__ModuleLoader__.load({
 .dsh-prompt-manager__button--danger{color:var(--dsw-alias-state-error-primary)}
 .dsh-prompt-manager__button--danger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-danger)}
 .dsh-prompt-manager__button--ghost{border-color:transparent;color:var(--dsw-alias-label-secondary)}
-.dsh-prompt-manager__addRow{display:flex;flex-wrap:wrap;gap:10px}
-.dsh-prompt-manager__addButton{flex:1 1 0;min-width:180px;height:44px;display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px dashed var(--dsw-alias-border-l3);border-radius:16px;background:0 0;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;cursor:pointer}
+/* A fixed two-column grid rather than flex-wrap with a min-width. That layout's
+   wrap threshold (3 x 180px + 2 x 10px = 560px) sat within a few pixels of this
+   panel's own width, so a scrollbar or a window a few pixels narrower re-flowed
+   the row: the same page offered three controls per line in one visit and two in
+   the next. A fixed track count depends on nothing. */
+.dsh-prompt-manager__addRow{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+/* A last control with no partner takes the whole width instead of the left half. */
+.dsh-prompt-manager__addRow>:last-child:nth-child(odd){grid-column:1/-1}
+.dsh-prompt-manager__addButton{height:44px;display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px dashed var(--dsw-alias-border-l3);border-radius:16px;background:0 0;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;cursor:pointer}
 .dsh-prompt-manager__addButton:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
 .dsh-prompt-manager__addButton:disabled{color:var(--dsw-alias-label-quaternary);cursor:default}
 /* The import control is a real file input behind the same dashed pill, so the
@@ -257,51 +264,16 @@ window.__ModuleLoader__.load({
       '',
     ].join('\n')
 
-    /**
-     * The body a brand-new compaction instruction starts from.
-     *
-     * It is the shape the summary has to end up in, section for section, written
-     * out as the page's own default: the instruction this replaces is not
-     * readable from here, so a person who has never seen it still gets a working
-     * instruction to edit rather than an empty box.
-     */
-    const COMPACTION_TEMPLATE = [
-      '你是本 AI 编程助手的压缩引擎。把上面的对话浓缩成一份检查点，让另一个模型能无损失地接着干活。',
-      '',
-      '严格按下面的 Markdown 结构输出，小节一个都不能少、顺序不能变；用短促的列表项而不是大段散文；某一节为空就写「(无)」，绝不省略该小节。',
-      '',
-      '## 主要诉求与意图',
-      '- [用户的原始目标与后续演进；原话重要时逐字引用]',
-      '',
-      '## 关键技术概念',
-      '- [涉及的技术、框架、模式与约定]',
-      '',
-      '## 文件与代码',
-      '- [精确路径：为什么重要，关键改动或片段]',
-      '',
-      '## 报错与修复',
-      '- [报错原文：如何解决，以及相关的用户反馈]',
-      '',
-      '## 待办事项',
-      '- [用户明确要求但尚未完成的工作]',
-      '',
-      '## 当前进展',
-      '- [检查点此刻正在做的事]',
-      '',
-      '## 下一步',
-      '- [与最近一次诉求直接相关的单个下一步动作，没有就写「(无)」]',
-      '',
-      '## 关键上下文',
-      '- [决策及其理由、约束、用户偏好、未决问题、继续所需的材料]',
-      '',
-      '规则：',
-      '- 用简洁的中文工程语言书写。文件路径、命令、报错字符串、标识符、数值、函数签名、语法片段一律保持原样，不要翻译。',
-      '- 忠实记录用户反馈与明确指令，尤其是纠正性的。',
-      '- 不要提到这次总结请求，也不要提到上下文被压缩过。',
-      '- 只输出检查点正文：不要调用任何工具，也不要执行其它动作。',
-      '- 正文里可以用 {{变量}}：宿主会在发送前把它们换成当前值。',
-      '',
-    ].join('\n')
+    // A brand-new compaction instruction starts empty, on purpose.
+    //
+    // The instruction it replaces is DSH's own, and that text is not readable from
+    // here; any copy shipped as a starting point would be this page guessing at
+    // another package's wording, and would rot the moment that package changed it.
+    // (It also cannot round-trip: a reference-shaped literal in such a copy is
+    // refused by the same validator a body goes through.) Empty is the honest
+    // state as well — with no body the pointer falls back to DSH's own
+    // instruction, so a draft that says nothing cannot change what the summarizer
+    // is told.
 
     /** Title a freshly created compaction entry is given. */
     const COMPACTION_TITLE = '压缩指令'
@@ -1013,7 +985,7 @@ window.__ModuleLoader__.load({
             id: allocated.id,
             title: COMPACTION_TITLE,
             order: nextOrder(entries),
-            body: COMPACTION_TEMPLATE,
+            body: '',
             source: 'empty',
             fileSha1: null,
             isNew: true,
