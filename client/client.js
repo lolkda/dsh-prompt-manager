@@ -171,6 +171,7 @@ window.__ModuleLoader__.load({
 /* one card per subscription source */
 .dsh-prompt-manager__source{display:flex;flex-direction:column;gap:12px;padding:12px 14px;border:.5px solid var(--dsw-alias-border-l4);border-radius:16px;min-width:0}
 .dsh-prompt-manager__sourceHead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0}
+.dsh-prompt-manager__sourceFoot{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0}
 .dsh-prompt-manager__sourceRepo{font-size:14px;font-weight:500;line-height:22px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsh-prompt-manager__sourceActions{display:inline-flex;align-items:center;gap:4px;margin-left:auto}
 .dsh-prompt-manager__changes{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border-radius:12px;background:var(--dsw-alias-bg-module-platform);min-width:0}
@@ -1983,7 +1984,17 @@ window.__ModuleLoader__.load({
                 : null,
               h('span', { key: 'meta', className: 'dsh-prompt-manager__meta' }, [
                 `${String(source.files)} 个文件`,
-                source.appliedAt !== undefined ? `上次应用 ${source.appliedAt}` : '还没应用过',
+                source.appliedAt !== undefined ? `上次应用 ${stamp(source.appliedAt)}` : '还没应用过',
+              ].join(' · ')),
+            ]),
+            // The note and the controls share one row. They used to be rows of their own
+            // in the column under the head, and the head — identity, stats and all three
+            // buttons in one wrapping row — did not fit a 555px panel: the buttons broke
+            // onto a line of their own and the note was left alone on a third.
+            h('div', { key: 'foot', className: 'dsh-prompt-manager__sourceFoot' }, [
+              h('span', { key: 'note', className: 'dsh-prompt-manager__note' }, [
+                source.headSha !== undefined ? `远端 ${source.headSha.slice(0, 7)}` : '还没检查过远端',
+                source.mirror.length > 0 ? `经 ${source.mirror}` : '直连',
               ].join(' · ')),
               h('span', { key: 'spacer', className: 'dsh-prompt-manager__headSpacer' }),
               h('div', { key: 'actions', className: 'dsh-prompt-manager__sourceActions' }, [
@@ -1992,10 +2003,6 @@ window.__ModuleLoader__.load({
                 h(Button, { key: 'remove', variant: 'danger', disabled: busy, onClick: () => { void removeSource(source.id) } }, '删除来源'),
               ]),
             ]),
-            h('span', { key: 'note', className: 'dsh-prompt-manager__note' }, [
-              source.headSha !== undefined ? `远端 ${source.headSha.slice(0, 7)}` : '还没检查过远端',
-              source.mirror.length > 0 ? `经 ${source.mirror}` : '直连',
-            ].join(' · ')),
             active && report.changes.length > 0
               ? h('div', { key: 'changes', className: 'dsh-prompt-manager__changes' }, [
                 ...report.changes.map((change) => h('label', { key: change.path, className: 'dsh-prompt-manager__change' }, [

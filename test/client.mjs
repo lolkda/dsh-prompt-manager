@@ -775,6 +775,29 @@ assert.ok(sourcesPage.text.includes('订阅来源'), 'the sources page must say 
 assert.ok(sourcesPage.text.includes('o/r@main'), 'a configured source is listed')
 assert.ok(sourcesPage.text.includes('prompt-manager.json'), 'the page must explain the manifest requirement')
 
+// The note and the controls share one row. They used to be separate rows of the card's
+// column, and the head — identity, stats and all three buttons in one wrapping row — did
+// not fit the settings panel: the buttons broke onto a line of their own and the note was
+// left alone on a third, which read as an orphan.
+const sourceCard = inspect(renderer.tree, 'div').nodes.find(
+  (node) => String(node.props.className ?? '') === 'dsh-prompt-manager__source',
+)
+assert.ok(sourceCard !== undefined, 'a configured source must render as a card')
+const cardRow = (className) => inspect(sourceCard, 'div').nodes.find(
+  (node) => String(node.props.className ?? '') === className,
+)
+const sourceHeadRow = cardRow('dsh-prompt-manager__sourceHead')
+const sourceFootRow = cardRow('dsh-prompt-manager__sourceFoot')
+assert.ok(sourceHeadRow !== undefined, 'the card opens with a row that says what the source is')
+assert.ok(sourceFootRow !== undefined, 'and a second row that pairs the note with the controls')
+assert.ok(textOf(sourceHeadRow).includes('o/r@main'), 'the first row names the source and its ref')
+assert.ok(textOf(sourceFootRow).includes('远端'), 'the second row carries the note about the remote')
+assert.ok(
+  inspect(sourceFootRow, 'button').nodes.some((node) => textOf(node) === '检查更新'),
+  'and the controls sit on that row, rather than on one of their own',
+)
+assert.equal(inspect(sourceHeadRow, 'button').nodes.length, 0, 'so no control is left behind above them')
+
 const repoField = inspect(renderer.tree, 'input').nodes.find((node) => node.props.placeholder === 'owner/repo')
 repoField.props.onChange({ target: { value: 'o/r' } })
 await renderer.settle()
