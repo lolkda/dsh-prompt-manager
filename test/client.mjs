@@ -688,6 +688,19 @@ assert.equal(
 assert.equal(switches[0].props.checked, true, 'the first switch must mirror the index')
 assert.equal(switches[1].props.checked, false, 'a disabled entry must render an unchecked switch')
 
+// The switch is the control that says whether an entry is injected, so the row's meta
+// line does not say it again: "订阅 <repo> · 已关闭" stated one fact twice, and the copy
+// the reader is actually looking at is the toggle beside it.
+const cardFor = (title) => inspect(renderer.tree, 'div').nodes.find((node) => String(node.props.className ?? '') === 'dsh-prompt-manager__card' && textOf(node).includes(title))
+const disabledRow = cardFor('第二条')
+assert.ok(disabledRow !== undefined, 'the disabled entry must be listed like every other one')
+assert.ok(textOf(disabledRow).includes('本地'), 'its meta line still names where the body comes from')
+assert.equal(
+  textOf(disabledRow).includes('已关闭'),
+  false,
+  'and it does not restate the switch, which already shows the off position',
+)
+
 const menus = inspect(tree, MENU).nodes
 assert.equal(menus.length, ENTRIES.length, 'every entry must carry a kebab menu')
 assert.deepEqual(menus[0].props.items.map((candidate) => candidate.label), ['编辑', '删除'], 'the menu must carry the row actions')

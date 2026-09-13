@@ -2476,7 +2476,6 @@ window.__ModuleLoader__.load({
                   }, source.repo),
                 ]
               : ['本地'],
-            entry.enabled === true ? [] : ['已关闭'],
             activePreset === null ? [] : [`组合：${injected ? '注入' : '不注入'}`],
           ].filter((group) => group.length > 0)
         return h('div', {
