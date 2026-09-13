@@ -72,12 +72,21 @@ curl -s http://127.0.0.1:3080/dsh-prompt-manager/status | head -c 200
 
 ## 这个包读写什么、会起什么进程
 
-- **读**：`$DSH_HOME/settings.yaml` 的 `prompt-manager:` 段（条目索引与组合）、`$DSH_HOME/prompt-manager/`（正文、脚本、订阅快照）、订阅源的仓库（可选镜像）。
-- **写**：只管上面这两处。settings 段由页面通过 `scope.update` 写；正文与脚本先写临时文件再 `rename`，不留半截文件。
-- **起进程**：按你 settings 里的配置跑**探测命令**（默认 `pwsh`/`bash`/`git`/`node`/`python`，挂载时各跑一次）和**变量脚本**（`node <脚本文件>`，保存时 / 挂载时 / 你点「重新测量」时各跑一次）。命令与参数都来自这份配置，插件自己不带任何可执行文件。
-- **出网**：只有订阅源会出网（`fetch`，可配 https 镜像）。
+按 DSH STORE 的四项访问轴逐项说明。汇总权限等级是 **`high`** —— 按商店的定义，"可访问任意网络、任意 Shell"即属此级，本插件两条都沾（下详）；这不是自谦也不是自夸，是照它的判定口径填的。**本插件不访问任何凭据**，理由见「凭据」一条。
+
+- **文件（`files`）**：读 `$DSH_HOME/settings.yaml` 的 `prompt-manager:` 段（条目索引与组合）、`$DSH_HOME/prompt-manager/`（正文、脚本、订阅快照）；写也只有这两处 —— settings 段由页面通过 `scope.update` 写，正文与脚本先写临时文件再 `rename`，不留半截文件。**不写 `$DSH_HOME` 之外的任何路径**，不读环境变量的敏感项，不碰会话文件（会话内容不经本插件）。
+- **网络（`network`）**：只有订阅源会出网（`fetch` 拉 `prompt-manager.json` 与正文，可配 https 镜像）。探测命令与变量脚本可能自行出网，那是**你配置的命令**在做，不是插件在做。不开监听端口，不做任何回连或遥测。
+- **命令（`commands`）**：按你 settings 里的配置跑**探测命令**（默认 `pwsh`/`bash`/`git`/`node`/`python`，挂载时各跑一次）和**变量脚本**（`node <脚本文件>`，保存时 / 挂载时 / 你点「重新测量」时各跑一次）。命令、参数、脚本全部来自这份配置，**插件自己不带任何可执行文件**；删掉配置就没有任何进程被起。它们以 DSH 进程的权限运行，你怎么审自己写的脚本，就怎么审这里的配置。
+- **凭据（`credentials`）**：**不读取、不存储、不转发任何凭据。** 具体地：不读环境变量里的 token/key、不读 git 凭据助手、不读 `~/.npmrc` 之类凭据文件、不发带认证头的请求。仓库里出现 `token`/`credential`/`password` 字样的地方只有两类，都不是凭据访问：`client/client.js` 里的 "token" 指**变量占位符**（`{{名字}}` 这种东西，与 React 的 key）和 README 发布章节里"**不放**任何 npm token（改走 OIDC）"的说明；`src/source.ts` 与 `src/routes.ts` 各有一处**守卫**，作用是**拒绝**带凭据的镜像 URL（`url.username`/`url.password` 非空即报错）。换句话说，凭据相关代码在这里是**拒收**逻辑，不是采集逻辑。
 - **改请求**：只碰**压缩**那一次调用（见「压缩指令」一节）。监听 `llm/stream`，只在 `purpose === 'compaction'` 时把最后那条指令消息换成本插件里配置的正文；**普通对话请求一个字节都不动**。没配压缩指令时不注册任何替换动作。可以整体关掉：`compaction: false`。
 - **HTTP**：注册一条 `/dsh-prompt-manager` 前缀路由，**仅 loopback 对端**（`127.0.0.0/8` / `::1`，且 `Host` 头也必须是 loopback 主机名 —— 挡 DNS rebinding）可用，写操作再加 same-origin。端点清单见 `src/routes.ts`。**它不是认证**：同机其它进程照样能调，边界是"别家网页进不来"，单用户工作机上够用。
+- **生命周期脚本**：**没有** `preinstall`/`install`/`postinstall`/`prepare` 任何一项（`npm install` 不构建、git 安装也不构建，因为 `lib/`、`client/` 就是提交进仓库的构建产物）；只有 `prepublishOnly`，它只在**作者**执行 `npm publish` 时跑，装包的人永远不会触发。
+- **外部运行依赖**：无。`dependencies` 为空，运行期只用 DSH 自己提供的服务（`systemPrompt`、`settingsScope`、`llm`）与 Node 内置模块；`lib/` 与 `client/` 都是自洽产物。
+- **已知风险**（照实说，不粉饰）：
+  - 那条 loopback 路由**不是认证**，同机任意进程都能调它读写你的提示词索引 —— 单用户工作机上够用，多用户/共享机器上不够。
+  - 探测命令与变量脚本**以 DSH 的权限执行**，能力上限等于你给 DSH 的权限；恶意或手误的脚本能做的事，插件拦不住。
+  - 订阅来的正文会**注入 system prompt**，等于让第三方仓库的内容进入你的模型上下文；只订阅你信得过的仓库，应用前先看 diff（来源页会列出变更文件与增删行数）。
+  - 订阅条目默认只读，但**「fork 成本地条目」之后就是本地正文**，之后它的内容与来源仓库不再有关系。
 
 ## 设置页
 
@@ -364,7 +373,7 @@ DSH 里两种注入方式落在不同通道：
 npm install          # 只装开发依赖：typescript 与 DSH 类型包
 npm run build        # src/*.ts -> lib/*.js + lib/types/*.d.ts，并检查 client/client.js
 npm run typecheck    # tsc --noEmit
-npm test             # 先构建，再跑十三个测试（test/*.mjs，各自文件头有说明）
+npm test             # 先构建，再跑十四个测试（test/*.mjs，各自文件头有说明）
 npm run check:build  # 核对 lib/ 没有未提交的改动（提交前跑）
 npm run check:pack   # 核对 npm 会打包的内容里有 bundle patch、浏览器半边、构建产物
 ```
@@ -391,6 +400,7 @@ git tag v3.1.0 && git push origin main --follow-tags
 | `dsh.client` | `{platform: 'web', inject: [...]}` + `exports["./client"]` | 浏览器半边；工厂 `id` 必须等于包名 |
 | `dsh.compatibility.dsh` | `>=0.1.5-rc.1 <0.2.0` | 瞄准的 DSH 线。**不写不是"留空"而是被推断**：校验脚本会拿唯一的 `@deepseek-ai/dsh-*` peer 范围顶上，那是个依赖服务的范围，读起来像"任何 DSH 都行" |
 | `dsh.compatibility.dshReleases` | 官方最新三个版本逐版本声明 | 商城上下架依据：至少要有一个精确的 `compatible`，全 `unknown` 会被转 `unlisted` |
+| `dsh.compatibility.dshOperations` | 逐版本记 `install`/`start`/`uninstall`/`rollback` 四项 | 商城要的是**真跑过**的操作证据，范围声明不能顶替；只有实测过的版本写 `passed`，没测的照实写 `unknown`（实测过程见 `docs/marketplace-evidence.md`） |
 | `engines.node` | `>=22` | 商城记录成兼容范围 |
 | `publishConfig.access` | `public` | scoped 包默认私有 |
 | `files` | 含 `lib`、`client`、`cordis.patch.yml`、`environment.md` | 装出来的包要自洽 |

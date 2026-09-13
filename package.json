@@ -28,7 +28,7 @@
     "check:pack": "node tools/check-pack.mjs",
     "prepublishOnly": "npm run build",
     "pretest": "npm run build",
-    "test": "node test/smoke.mjs && node test/probe.mjs && node test/guard.mjs && node test/store.mjs && node test/pack.mjs && node test/routes.mjs && node test/source.mjs && node test/net.mjs && node test/sync.mjs && node test/subscriptions.mjs && node test/scripts.mjs && node test/compaction.mjs && node test/client.mjs"
+    "test": "node test/smoke.mjs && node test/probe.mjs && node test/guard.mjs && node test/store.mjs && node test/pack.mjs && node test/routes.mjs && node test/source.mjs && node test/net.mjs && node test/sync.mjs && node test/subscriptions.mjs && node test/scripts.mjs && node test/compaction.mjs && node test/client.mjs && node test/manifest.mjs"
   },
   "engines": {
     "node": ">=22"
@@ -68,6 +68,26 @@
         "0.1.5-alpha.2": "unknown",
         "0.1.5-rc.1": "compatible",
         "0.1.5-rc.2": "unknown"
+      },
+      "dshOperations": {
+        "0.1.5-rc.1": {
+          "install": "passed",
+          "start": "passed",
+          "uninstall": "passed",
+          "rollback": "passed"
+        },
+        "0.1.5-alpha.2": {
+          "install": "unknown",
+          "start": "unknown",
+          "uninstall": "unknown",
+          "rollback": "unknown"
+        },
+        "0.1.5-rc.2": {
+          "install": "unknown",
+          "start": "unknown",
+          "uninstall": "unknown",
+          "rollback": "unknown"
+        }
       },
       "profiles": [
         "web"
