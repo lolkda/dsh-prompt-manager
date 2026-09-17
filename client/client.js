@@ -50,6 +50,11 @@ window.__ModuleLoader__.load({
      * breadcrumb, and the Host names a session after its first turn, so its own
      * title would push the chips around. Here the corner control pins the group
      * and the title gives way instead.
+     *
+     * The slot's own row is the title's, and the chips are drawn on the view tabs'
+     * row below it — the row a person looks in for them. That step is the sheet's
+     * `__seat` transform; the slot still decides where the row lives and how far
+     * right it ends.
      */
     const HEADER_SLOT = 'conversation.session.header.utilities'
 
@@ -216,6 +221,19 @@ window.__ModuleLoader__.load({
 .dsh-prompt-manager__chip:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .dsh-prompt-manager__chip--on{color:var(--dsw-alias-label-primary)}
 .dsh-prompt-manager__chipLabel{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* The line the resident seat borrows: the Host's header has one right-aligned seat
+   (conversation.session.header.utilities) and it rides the title row, where a chip floats between the
+   title and the views; the row a person actually looks in — the view tabs' row — has no
+   seat at all, because the Host fills that div with view buttons and nothing else. So the
+   chip is laid out where the seat puts it and then moved down onto the tab line, which is
+   why this is a transform: the header's rows are fixed-height, and a chip that grew one
+   of them would push the corner control with it.
+   The offset is the distance between the two rows' centre lines, as the Host's own sheet
+   lays them out: title row = 10px padding + 30px row => centre 25; tab label = 10 + 30 +
+   10px margin + 16px line-height => centre 58; difference 33. It is a copy of another
+   package's metrics that nothing at runtime can verify, so test/client.mjs pins it. */
+.dsh-prompt-manager__seat{transform:translateY(33px)}
 
 /* the shell marks keyboard focus with a 2px business-colour ring; keep that */
 .dsh-prompt-manager__tab:focus-visible,.dsh-prompt-manager__button:focus-visible,.dsh-prompt-manager__addButton:focus-visible,.dsh-prompt-manager__cardMain:focus-visible,.dsh-prompt-manager__iconButton:focus-visible,.dsh-prompt-manager__chip:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
@@ -2887,10 +2905,12 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * A resident seat: draws wherever the Host draws the session header, and counts
-     * itself in for as long as it stays mounted.
+     * A resident seat: draws wherever the Host draws the session header, counts itself
+     * in for as long as it stays mounted, and carries the row the stylesheet moves it
+     * onto — see `__seat` in the sheet, and `HEADER_SLOT` for why it is that row and not
+     * the one the slot hands it.
      * @param props - the chip element to draw.
-     * @returns the chip element, or whatever the chip itself decides to draw.
+     * @returns the seat's row, holding the chip.
      */
     function Resident(props) {
       // A layout effect, not an effect: the fallback reads zero during the render
@@ -2904,7 +2924,7 @@ window.__ModuleLoader__.load({
           publishSeats()
         }
       }, [])
-      return props.children
+      return h('span', { className: 'dsh-prompt-manager__seat' }, props.children)
     }
 
     /**

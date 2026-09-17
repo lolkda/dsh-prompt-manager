@@ -692,12 +692,19 @@ const chipsIn = (label) => {
   return probe === undefined ? -1 : inspect(probe, MENU).nodes.length
 }
 
+/** How many resident rows the tree carries — the wrapper the sheet moves onto the tabs' line. */
+const seatRows = () => inspect(seatRenderer.tree, 'span').nodes
+  .filter((node) => node.props.className === 'dsh-prompt-manager__seat').length
+
 seatRenderer.mount(SeatTree, { header: true })
 await seatRenderer.settle()
 seatRenderer.mount(SeatTree, { header: true })
 await seatRenderer.settle()
 assert.equal(chipsIn('probe-header'), 1, 'a rendered session header must carry the chip')
 assert.equal(chipsIn('probe-composer'), 0, 'and the composer must not draw a second one beside it')
+// The slot hands the resident seat a place in the title row; the row the chip is drawn
+// on is the sheet's transform, so the wrapper carrying it belongs to that seat alone.
+assert.equal(seatRows(), 1, 'the resident seat must carry the row the sheet moves it onto')
 
 // A blank session: the Host renders no header, which unmounts the resident seat — and
 // the fallback is then all that session has.
@@ -706,6 +713,7 @@ seatRenderer.mount(SeatTree, { header: false })
 await seatRenderer.settle()
 assert.equal(chipsIn('probe-composer'), 1, 'with no header to sit in, the composer must draw the chip again')
 assert.equal(chipsIn('probe-header'), -1, 'and the header probe must be gone with it')
+assert.equal(seatRows(), 0, 'the fallback sits in the composer row, not on the tabs line, so it carries no such wrapper')
 
 // ── the list page ─────────────────────────────────────────────────────────────
 
@@ -2209,6 +2217,23 @@ assert.equal(
   addButtonRules[0].includes('min-width'),
   false,
   'and it carries no minimum width for a wrap threshold to key off',
+)
+
+// The resident seat's row is the one number in this bundle copied from another package's
+// metrics (see the sheet's own comment): the title row's centre line to the tab label's,
+// so a 28px chip lands on the tab line instead of above it. Nothing at runtime can check
+// a transform against a header it does not lay out, so it is pinned here — this is the
+// assertion to re-read when the header around those rows changes.
+// Deduped like the rule above: the suite materializes the bundle once per case, and
+// every materialization injects the same sheet.
+const seatRules = [...new Set(injectedCss
+  .flatMap((css) => [...css.matchAll(/\.dsh-prompt-manager__seat\{([^}]*)\}/g)])
+  .map((match) => match[1]))]
+assert.equal(seatRules.length, 1, `the sheet must give the resident seat exactly one row rule, got ${String(seatRules.length)}`)
+assert.equal(
+  seatRules[0],
+  'transform:translateY(33px)',
+  'and that row is the line the view tabs sit on: (10 + 30 + 10 + 8) - (10 + 15) = 33',
 )
 
 console.log('client ok')
