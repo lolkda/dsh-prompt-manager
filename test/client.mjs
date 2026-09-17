@@ -297,8 +297,9 @@ function walk(node, visit) {
 }
 
 /**
- * A stateful React stub: hook slots in call order, dependency comparison, and a
- * microtask re-render, enough to drive the section's view switching.
+ * A stateful React stub: hook slots in call order, dependency comparison, a
+ * microtask re-render, and an unmount, enough to drive the section's view
+ * switching and the seat arbitration.
  * @returns the React module to hand the bundle, plus render helpers.
  */
 function createRenderer() {
@@ -379,9 +380,22 @@ function createRenderer() {
     useEffect(callback, deps) {
       const index = cursor++
       const previous = slots[index]
-      slots[index] = { deps }
-      if (!sameDeps(previous, deps)) pendingEffects.push(callback)
+      // A re-render with unchanged deps keeps the effect alive, cleanup included —
+      // the cleanup is carried over rather than dropped with the old slot.
+      slots[index] = { deps, cleanup: previous?.cleanup }
+      if (!sameDeps(previous, deps)) {
+        // The cleanup is kept on the slot rather than dropped, because `unmount`
+        // has to run it: the seats' whole arbitration is a mount count, and it is
+        // only correct if a going-away seat can take its count back.
+        pendingEffects.push(() => {
+          const cleanup = callback()
+          if (typeof cleanup === 'function') slots[index].cleanup = cleanup
+        })
+      }
     },
+    // A layout effect runs before the browser paints and a passive one after; this
+    // stub renders synchronously and paints nothing, so the two coincide.
+    useLayoutEffect: (callback, deps) => React.useEffect(callback, deps),
     useSyncExternalStore(_subscribe, getSnapshot) {
       cursor += 1
       return getSnapshot()
@@ -411,6 +425,17 @@ function createRenderer() {
     async settle() {
       for (let tick = 0; tick < 6; tick += 1) await new Promise((resolve) => setTimeout(resolve, 0))
       return tree
+    },
+    /**
+     * Tear the tree down the way React would when a subtree goes away: run every
+     * live effect cleanup, then drop the hook slots so the next mount starts from
+     * an empty table.
+     */
+    unmount() {
+      const cleanups = slots.map((slot) => slot?.cleanup).filter((cleanup) => typeof cleanup === 'function')
+      slots.length = 0
+      cursor = 0
+      for (const cleanup of cleanups) cleanup()
     },
     get tree() {
       return tree
@@ -613,23 +638,74 @@ const { registrations, injections } = materialize(renderer.React)
 
 assert.deepEqual(
   injections,
-  ['settings.section', 'conversation.input.right'],
-  'the bundle must contribute the settings section and both composer controls',
+  ['settings.section', 'conversation.session.header.utilities', 'conversation.input.right'],
+  'the bundle must contribute the settings section and both seats the chips share',
 )
-assert.equal(registrations.length, 3, 'exactly one settings section and two composer controls must be registered')
+assert.equal(registrations.length, 5, 'one settings section, and two chips in each of the two seats')
 const { meta, component } = registrations[0]
 assert.equal(meta.name, 'settings.section', 'the registration must name its slot')
 assert.equal(meta.id, 'prompt-manager', 'the section id must be the namespace')
 assert.equal(meta.order, 60, 'the section must sit after the shipped settings sections')
 assert.equal(meta.label(), '提示词', 'the navigation label must be the Chinese one')
-const { meta: chipMeta } = registrations[1]
-assert.equal(chipMeta.name, 'conversation.input.right', 'the preset chip must sit in the composer tool row')
-assert.equal(chipMeta.id, 'prompt-manager', 'the chip id must be the namespace')
-assert.equal(chipMeta.order, 10, 'and come first of the two that share that row')
-const { meta: compactionChipMeta } = registrations[2]
-assert.equal(compactionChipMeta.name, 'conversation.input.right', 'the compaction chip rides the same row')
-assert.equal(compactionChipMeta.id, 'prompt-manager-compaction', 'under an id of its own, since a slot lists both')
-assert.equal(compactionChipMeta.order, 11, 'right after the preset chip it sits beside')
+
+// Both seats carry the same two entries: a slot is a list keyed by id, so the preset
+// chip leads and the compaction chip follows in each of them. The seat that stays put
+// comes first in the registrations, but nothing downstream may depend on that order —
+// this pins the shape each seat has, not one seat's position in the list.
+const seatOf = (name) => registrations.filter((registration) => registration.meta.name === name)
+for (const name of ['conversation.session.header.utilities', 'conversation.input.right']) {
+  const seats = seatOf(name)
+  assert.equal(seats.length, 2, `the seat ${name} must hold both chips`)
+  assert.equal(seats[0].meta.id, 'prompt-manager', `the chip id must be the namespace (${name})`)
+  assert.equal(seats[0].meta.order, 10, `and lead the two that share the seat (${name})`)
+  assert.equal(seats[1].meta.id, 'prompt-manager-compaction', `the compaction chip needs an id of its own (${name}), since a slot lists both`)
+  assert.equal(seats[1].meta.order, 11, `right after the preset chip it sits beside (${name})`)
+}
+
+// ── the two seats ─────────────────────────────────────────────────────────────
+
+// Exactly one seat may show. The header seat is the one that stays put — nothing the
+// input box, the transcript, or a running turn does can move it — and the composer
+// seat exists for the state the header cannot cover, because the Host renders no part
+// of a blank session's header at all. They settle that between themselves through a
+// mount count rather than a copy of the Host's blank rule, so what is worth pinning is
+// the count's two edges: a mounted header seat hides the fallback, and its unmount
+// brings the fallback back.
+//
+// The stub's store has no subscription, so the re-render React would perform on its
+// own is spelled out below as a second mount.
+const seatRenderer = createRenderer()
+const seatRegistrations = materialize(seatRenderer.React).registrations
+const seatComponent = (name) => seatRegistrations.find((registration) => registration.meta.name === name).component
+
+/** Both seats in one tree, with the header seat switched on or off as the Host does. */
+const SeatTree = (props) => createElement('div', null,
+  props.header
+    ? createElement('div', { className: 'probe-header' }, createElement(seatComponent('conversation.session.header.utilities'), { scope }))
+    : null,
+  createElement('div', { className: 'probe-composer' }, createElement(seatComponent('conversation.input.right'), { scope })),
+)
+
+/** How many chips one probe subtree holds, or -1 when that subtree is not there. */
+const chipsIn = (label) => {
+  const probe = inspect(seatRenderer.tree, 'div').nodes.find((node) => node.props.className === label)
+  return probe === undefined ? -1 : inspect(probe, MENU).nodes.length
+}
+
+seatRenderer.mount(SeatTree, { header: true })
+await seatRenderer.settle()
+seatRenderer.mount(SeatTree, { header: true })
+await seatRenderer.settle()
+assert.equal(chipsIn('probe-header'), 1, 'a rendered session header must carry the chip')
+assert.equal(chipsIn('probe-composer'), 0, 'and the composer must not draw a second one beside it')
+
+// A blank session: the Host renders no header, which unmounts the resident seat — and
+// the fallback is then all that session has.
+seatRenderer.unmount()
+seatRenderer.mount(SeatTree, { header: false })
+await seatRenderer.settle()
+assert.equal(chipsIn('probe-composer'), 1, 'with no header to sit in, the composer must draw the chip again')
+assert.equal(chipsIn('probe-header'), -1, 'and the header probe must be gone with it')
 
 // ── the list page ─────────────────────────────────────────────────────────────
 
@@ -1197,7 +1273,7 @@ assert.equal(chipMenu().props.items[0].disabled, true, 'and that hint must not b
 // components cannot share one hook-slot table.
 const compactionChipRenderer = createRenderer()
 const compactionChipRegistration = materialize(compactionChipRenderer.React).registrations
-  .find((registration) => registration.meta.id === 'prompt-manager-compaction')
+  .find((registration) => registration.meta.name === 'conversation.input.right' && registration.meta.id === 'prompt-manager-compaction')
 assert.ok(compactionChipRegistration !== undefined, 'the composer row must also carry the compaction chip')
 
 const compactionChipMenu = () => inspect(compactionChipRenderer.tree, MENU).nodes[0]
@@ -2138,7 +2214,8 @@ assert.equal(
 console.log('client ok')
 console.log(`  bundle      factory id ${PACKAGE_NAME}, materialized and driven against stub modules`)
 console.log(`  section     settings.section id=prompt-manager order=${String(meta.order)}`)
-console.log(`  chip        ${chipMeta.name} id=prompt-manager, switches the preset with one settings write`)
+console.log('  chip        the preset chip switches the preset with one settings write, from either seat')
+console.log(`  seats       ${String(seatOf('conversation.session.header.utilities').length)} registrations in conversation.session.header.utilities and ${String(seatOf('conversation.input.right').length)} in conversation.input.right; the header seat hides the composer fallback while it is mounted`)
 console.log(`  list        ${String(ENTRIES.length)} rows, switches, kebab menus, the plugin's own repo link, add control refused at the cap`)
 console.log('  views       row menu -> editor page -> save -> back to the list')
 console.log('  compaction  a row of its own kind: badge, no switch, the pointer action, and a combo overriding it')
