@@ -10,14 +10,20 @@
  * `llm/stream` waterfall, the message projection, and the adapter boundary are
  * all the real ones.
  *
+ * Which instruction is in force is the *session's* own choice, so every request
+ * below names the session it summarises (`sessionId`, as the engine sends it) and
+ * the harness writes that session's own file under `<storeDir>/sessions/`. A
+ * session that has chosen nothing gets DSH's own text, and the settings document
+ * no longer decides this at all.
+ *
  * Coverage: the untouched default, a replacement drawn from a body file with
  * variables interpolated, the identity of everything not replaced, requests that
- * must never be touched, the four ways a configured instruction can be unusable,
- * a frozen request, a deployment with no LLM at all, and the config switch that
- * turns the whole feature off.
+ * must never be touched, the four ways a chosen instruction can be unusable, one
+ * session's choice not reaching another, a frozen request, a deployment with no
+ * LLM at all, and the config switch that turns the whole feature off.
  */
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -167,6 +173,45 @@ function writeBody(id, text) {
   writeFileSync(join(SECTIONS, `${id}.md`), text, 'utf8')
 }
 
+/** The session every compaction below is for, unless a test names another. */
+const SESSION = 'session-compaction'
+
+/**
+ * Record one session's choice, the way the composer chip's own request does.
+ *
+ * The Host reads `<storeDir>/sessions/<id>.json` on every compaction, so this
+ * writes the file the Host reads instead of going through the route: the route's
+ * own shaping is asserted in `routes.mjs`, and which instruction a compaction
+ * sends is what this file is about.
+ * @param sessionId - the session choosing.
+ * @param patch - the fields to set, merged over whatever the file already holds.
+ */
+function choose(sessionId, patch) {
+  const dir = join(STORE_ROOT, 'sessions')
+  mkdirSync(dir, { recursive: true })
+  const file = join(dir, `${sessionId}.json`)
+  let current = { preset: '', compaction: '' }
+  try {
+    current = JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    /* no choice yet, which is how every session starts */
+  }
+  writeFileSync(file, JSON.stringify({ ...current, ...patch }), 'utf8')
+}
+
+/**
+ * One compaction request, shaped as `dsh-compaction-basic` sends it.
+ *
+ * `sessionId` is not decoration: it is the only thing that says whose choice
+ * applies, and the engine always sends it.
+ * @param messages - the replayed prefix plus the instruction.
+ * @param sessionId - the session being summarised.
+ * @returns the request to hand to `ctx.llm.stream`.
+ */
+function compactionFor(messages, sessionId = SESSION) {
+  return { provider: 'lab', model: 'stand-in', purpose: 'compaction', sessionId, messages }
+}
+
 /** SystemPrompt config that keeps the assembly to what this plugin contributes. */
 const BARE = { includeHarnessIdentity: false, includeRuntimeContext: false }
 
@@ -195,14 +240,19 @@ async function mount(config = {}, options = {}) {
   return { ctx, warnings, adapter, settings: options.settings }
 }
 
-/** One settings document holding a section entry and a compaction entry. */
-function indexWith(compactionPointer) {
+/**
+ * One settings document holding a section entry and a compaction entry.
+ *
+ * It deliberately carries no instruction pointer: neither this document nor a
+ * preset's own field answers "which instruction goes out" any more, and one case
+ * below asserts exactly that by naming a different one here.
+ */
+function indexWith() {
   return {
     entries: [
       { id: 'note', title: '补充说明', order: 10, enabled: true },
       { id: 'compact-zh', title: '压缩指令', order: 90, enabled: false, kind: 'compaction' },
     ],
-    compaction: compactionPointer,
   }
 }
 
@@ -214,22 +264,23 @@ try {
   const { ctx, adapter } = driven
 
   const untouched = compactionMessages()
-  await send(ctx, { provider: 'lab', model: 'stand-in', purpose: 'compaction', messages: untouched })
-  assert.equal(lastText(adapter.requests.at(-1)), STOCK_INSTRUCTION, 'with no pointer the stock instruction must reach the model unchanged')
+  await send(ctx, compactionFor(untouched))
+  assert.equal(lastText(adapter.requests.at(-1)), STOCK_INSTRUCTION, 'a session that chose nothing sends the stock instruction unchanged')
   assert.equal(
     JSON.stringify(adapter.requests.at(-1).messages),
     JSON.stringify(untouched),
     'and no message may be touched at all',
   )
 
-  // ── a pointer replaces it with the entry body, variables and all ────────────
+  // ── a session's choice replaces it with the entry body, variables and all ───
 
   writeBody('compact-zh', '压缩：{{os}} / {{nope}}')
-  settings.state.value = indexWith('compact-zh')
+  settings.state.value = indexWith()
   settings.state.watcher()
+  choose(SESSION, { compaction: 'compact-zh' })
 
   const replaced = compactionMessages()
-  await send(ctx, { provider: 'lab', model: 'stand-in', purpose: 'compaction', messages: replaced })
+  await send(ctx, compactionFor(replaced))
   const afterReplace = adapter.requests.at(-1)
   const instruction = lastText(afterReplace)
   assert.ok(instruction.startsWith('压缩：'), `the body must replace the instruction, got: ${instruction.slice(0, 40)}`)
@@ -296,12 +347,7 @@ try {
     inject: ['llm'],
     apply: (scoped) => {
       fromRealm = async () => {
-        for await (const _chunk of scoped.llm.stream({
-          provider: 'lab',
-          model: 'stand-in',
-          purpose: 'compaction',
-          messages: compactionMessages(),
-        })) { /* the chunks are not under test */ }
+        for await (const _chunk of scoped.llm.stream(compactionFor(compactionMessages()))) { /* the chunks are not under test */ }
       }
     },
   })
@@ -320,14 +366,14 @@ try {
   // about another package's internals; this is the shape the tag actually takes,
   // taken from the backend that ships in this harness.
 
-  settings.state.value = indexWith('compact-zh')
+  settings.state.value = indexWith()
   settings.state.watcher()
   writeBody('compact-zh', 'FOUND-BY-TAG')
   const tagged = [
     ...compactionMessages(),
     message('user', 'a later message the projection added', { kind: 'user' }),
   ]
-  await send(ctx, { provider: 'lab', model: 'stand-in', purpose: 'compaction', messages: tagged })
+  await send(ctx, compactionFor(tagged))
   const found = adapter.requests.at(-1)
   assert.equal(lastText(found), 'a later message the projection added', 'the message that is not the instruction must stay last')
   assert.equal(
@@ -344,30 +390,23 @@ try {
     message('user', 'first request', { kind: 'user' }),
     message('user', 'STOCK-INSTRUCTION-UNTAGGED'),
   ]
-  await send(ctx, { provider: 'lab', model: 'stand-in', purpose: 'compaction', messages: untagged })
+  await send(ctx, compactionFor(untagged))
   assert.equal(
     lastText(adapter.requests.at(-1)),
     'LAST-RESORT-BODY',
     'an instruction that carries no provenance must still be replaced, from the last message',
   )
 
-  // ── the four ways a configured instruction is unusable: all pass through ────
+  // ── the four ways a chosen instruction is unusable: all pass through ────────
 
   const unusable = [
-    {
-      label: 'a pointer naming an entry the index does not have',
-      document: { ...indexWith('gone'), entries: indexWith('gone').entries },
-    },
-    {
-      label: 'a pointer naming a section entry',
-      document: { ...indexWith('note'), entries: indexWith('note').entries },
-    },
+    { label: 'a session naming an entry the index does not have', id: 'gone' },
+    { label: 'a session naming a section entry', id: 'note' },
   ]
   for (const sample of unusable) {
-    settings.state.value = sample.document
-    settings.state.watcher()
+    choose(SESSION, { compaction: sample.id })
     const request = compactionMessages()
-    await send(ctx, { provider: 'lab', model: 'stand-in', purpose: 'compaction', messages: request })
+    await send(ctx, compactionFor(request))
     assert.equal(
       lastText(adapter.requests.at(-1)),
       STOCK_INSTRUCTION,
@@ -379,13 +418,13 @@ try {
   writeBody('compact-empty', '   \n')
   settings.state.value = {
     entries: [
-      ...indexWith('note').entries,
+      ...indexWith().entries,
       { id: 'compact-empty', title: '空的', order: 91, enabled: false, kind: 'compaction' },
     ],
-    compaction: 'compact-empty',
   }
   settings.state.watcher()
-  await send(ctx, { provider: 'lab', model: 'stand-in', purpose: 'compaction', messages: compactionMessages() })
+  choose(SESSION, { compaction: 'compact-empty' })
+  await send(ctx, compactionFor(compactionMessages()))
   assert.equal(
     lastText(adapter.requests.at(-1)),
     STOCK_INSTRUCTION,
@@ -394,9 +433,8 @@ try {
 
   // The body file deleted by hand, with the index still naming it.
   rmSync(join(SECTIONS, 'compact-zh.md'), { force: true })
-  settings.state.value = indexWith('compact-zh')
-  settings.state.watcher()
-  await send(ctx, { provider: 'lab', model: 'stand-in', purpose: 'compaction', messages: compactionMessages() })
+  choose(SESSION, { compaction: 'compact-zh' })
+  await send(ctx, compactionFor(compactionMessages()))
   assert.equal(
     lastText(adapter.requests.at(-1)),
     STOCK_INSTRUCTION,
@@ -406,12 +444,11 @@ try {
   // ── a frozen request is left alone rather than failing the compaction ───────
 
   writeBody('compact-zh', 'FROZEN-CASE-BODY')
-  settings.state.value = indexWith('compact-zh')
-  settings.state.watcher()
   const frozen = Object.freeze({
     provider: 'lab',
     model: 'stand-in',
     purpose: 'compaction',
+    sessionId: SESSION,
     messages: Object.freeze(compactionMessages()),
   })
   await assert.doesNotReject(
@@ -420,42 +457,64 @@ try {
   )
   assert.equal(lastText(adapter.requests.at(-1)), STOCK_INSTRUCTION, 'and it must go out with the instruction it came in with')
 
-  // ── a preset's pointer overrides the document's, and follows the preset ─────
+  // ── the session's own choice is the only pointer, and it is nobody else's ───
 
+  // Both of the old global pointers are still sitting in the document here, and
+  // both name a *different* instruction: the root `compaction` field and the
+  // preset's own field. Neither may move what this session sends. A preset switch
+  // writes the session's choice alongside the preset id (that is one request from
+  // the composer chip), so consulting the document here would be reading state
+  // this session never chose.
+  const OTHER = 'session-compaction-other'
   writeBody('compact-preset', 'PRESET-BODY')
   settings.state.value = {
     entries: [
-      ...indexWith('compact-zh').entries,
+      ...indexWith().entries,
       { id: 'compact-preset', title: '组合用的压缩指令', order: 92, enabled: false, kind: 'compaction' },
     ],
-    compaction: 'compact-zh',
+    compaction: 'compact-preset',
     presets: [{ id: 'ctf', name: 'ctf', entries: ['note'], compaction: 'compact-preset' }],
-  }
-  settings.state.watcher()
-  await send(ctx, { provider: 'lab', model: 'stand-in', purpose: 'compaction', messages: compactionMessages() })
-  assert.equal(lastText(adapter.requests.at(-1)), 'FROZEN-CASE-BODY', 'with no preset in force the document pointer decides')
-
-  settings.state.value = { ...settings.state.value, activePreset: 'ctf' }
-  settings.state.watcher()
-  await send(ctx, { provider: 'lab', model: 'stand-in', purpose: 'compaction', messages: compactionMessages() })
-  assert.equal(
-    lastText(adapter.requests.at(-1)),
-    'PRESET-BODY',
-    'a preset in force owns the pointer: its instruction replaces the document pointer, not beside it',
-  )
-
-  settings.state.value = {
-    entries: indexWith('compact-zh').entries,
-    compaction: 'compact-zh',
-    presets: [{ id: 'ctf', name: 'ctf', entries: ['note'], compaction: '' }],
     activePreset: 'ctf',
   }
   settings.state.watcher()
-  await send(ctx, { provider: 'lab', model: 'stand-in', purpose: 'compaction', messages: compactionMessages() })
+  await send(ctx, compactionFor(compactionMessages()))
+  assert.equal(
+    lastText(adapter.requests.at(-1)),
+    'FROZEN-CASE-BODY',
+    'the document pointer and the preset in force decide nothing: the session choice is what is in force',
+  )
+
+  choose(SESSION, { compaction: 'compact-preset' })
+  await send(ctx, compactionFor(compactionMessages()))
+  assert.equal(
+    lastText(adapter.requests.at(-1)),
+    'PRESET-BODY',
+    'a session that switches its instruction sends the one it switched to',
+  )
+
+  // The point of the whole module: that switch was this conversation's. A
+  // compaction for a session that chose nothing must not inherit it.
+  await send(ctx, compactionFor(compactionMessages(), OTHER))
   assert.equal(
     lastText(adapter.requests.at(-1)),
     STOCK_INSTRUCTION,
-    'a preset that names no instruction returns to the stock one, whatever the document pointer says',
+    'another session must not inherit an instruction this one chose',
+  )
+
+  choose(OTHER, { preset: 'ctf', compaction: 'compact-zh' })
+  await send(ctx, compactionFor(compactionMessages(), OTHER))
+  assert.equal(
+    lastText(adapter.requests.at(-1)),
+    'FROZEN-CASE-BODY',
+    'and a session that chose for itself sends its own, whatever another session chose',
+  )
+
+  choose(SESSION, { preset: 'ctf', compaction: '' })
+  await send(ctx, compactionFor(compactionMessages()))
+  assert.equal(
+    lastText(adapter.requests.at(-1)),
+    STOCK_INSTRUCTION,
+    'a session that chose no instruction goes back to the stock one, whatever the document pointer says',
   )
 
   // ── a deployment with no LLM mounts, it just never intercepts ───────────────
@@ -473,9 +532,11 @@ try {
   const off = fakeSettings([])
   const disabled = await mount({ compaction: false }, { settings: off })
   writeBody('compact-zh', 'MUST-NOT-APPEAR')
-  off.state.value = indexWith('compact-zh')
+  off.state.value = indexWith()
   off.state.watcher()
-  await send(disabled.ctx, { provider: 'lab', model: 'stand-in', purpose: 'compaction', messages: compactionMessages() })
+  // A session asking for one is exactly the case the switch has to override.
+  choose(SESSION, { compaction: 'compact-zh' })
+  await send(disabled.ctx, compactionFor(compactionMessages()))
   assert.equal(
     lastText(disabled.adapter.requests.at(-1)),
     STOCK_INSTRUCTION,
@@ -483,13 +544,13 @@ try {
   )
 
   console.log('compaction ok')
-  console.log('  default     no pointer leaves the instruction DSH ships, byte for byte')
+  console.log('  default     a session that chose nothing gets the instruction DSH ships, byte for byte')
   console.log('  replace     the entry body goes out with its variables resolved, the replayed prefix untouched')
   console.log('  scope       conversation and session-title calls are never touched')
   console.log('  realm       a compaction issued from an isolated group is intercepted too, which is the shipped topology')
-  console.log('  unusable    a dangling pointer, a section pointer, an empty body, and a deleted file all pass through')
+  console.log('  unusable    a dangling id, a section id, an empty body, and a deleted file all pass through')
   console.log('  frozen      a request that cannot be rewritten goes out unchanged instead of failing')
-  console.log('  presets     a preset owns the pointer while it is in force, and returns to the stock one when it names none')
+  console.log('  sessions    the session file is the only pointer, its choice reaches no other session, and none goes back to stock')
   console.log('  optional    no llm service still mounts; compaction: false never intercepts')
   console.log(`  routes      ${ROUTE_PREFIX} routes are registered by the same mount`)
 } finally {

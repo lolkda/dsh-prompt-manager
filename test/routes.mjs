@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { installPromptRoutes, ROUTE_PREFIX } from '../lib/routes.js'
+import { SessionChoices } from '../lib/sessions.js'
 import { PromptStore } from '../lib/store.js'
 import { entryIdFor, MAX_ENTRIES, MAX_PRESETS } from '../lib/entries.js'
 import { MAX_PACK_BYTES } from '../lib/pack.js'
@@ -197,6 +198,9 @@ try {
 
   installPromptRoutes(ctx, {
     store,
+    // The real host hands the live per-session store in; the route only ever reads
+    // and writes files through it, so the real one is what a test should drive.
+    sessions: new SessionChoices(ROOT),
     describe: (id) => {
       if (id === 'src-a-a') return { text: 'SUBSCRIBED', source: 'subscribed' }
       // The real host swallows an unusable id here and answers an empty body:
@@ -917,6 +921,114 @@ try {
   })
   assert.equal(remoteExport.state.status, 403, 'and even an export stays on loopback')
 
+  // ── one session's choice ────────────────────────────────────────────────────
+  //
+  // This is the route the two composer chips write through, and it is the only
+  // thing that decides which prompt set and which compaction instruction a
+  // conversation gets. Beyond the status codes, two properties matter: a session
+  // that has never chosen answers with the effective "nothing" rather than a 404,
+  // and a patch merges, because each chip owns one field and neither should have
+  // to read the other's.
+
+  const SESSION = 'session-route'
+  const choiceUrl = (sessionId) => [ROUTE_PREFIX, 'session', sessionId].join('/')
+  const local = { origin: 'http://127.0.0.1:3080' }
+
+  const noChoice = await call({ url: choiceUrl(SESSION) })
+  assert.equal(noChoice.state.status, 200, 'a session that chose nothing is not an error')
+  assert.deepEqual(
+    noChoice.json(),
+    { session: SESSION, preset: '', compaction: '', stored: false },
+    'and it answers with the effective nothing, saying nothing is stored yet',
+  )
+
+  const chosePreset = await call({
+    method: 'POST',
+    url: choiceUrl(SESSION),
+    ...local,
+    body: JSON.stringify({ preset: 'ctf' }),
+  })
+  assert.equal(chosePreset.state.status, 200, 'choosing a preset is a write that succeeds')
+  assert.deepEqual(
+    chosePreset.json(),
+    { session: SESSION, preset: 'ctf', compaction: '', stored: true },
+    'and it answers with what was stored, which is what the chip holds on to',
+  )
+
+  const choseInstruction = await call({
+    method: 'POST',
+    url: choiceUrl(SESSION),
+    ...local,
+    body: JSON.stringify({ compaction: 'compact-zh' }),
+  })
+  assert.equal(choseInstruction.json().preset, 'ctf', 'a patch naming one field must leave the other alone')
+  assert.equal(choseInstruction.json().compaction, 'compact-zh', 'and set the field it names')
+
+  const otherSession = await call({ url: choiceUrl('session-other') })
+  assert.equal(otherSession.json().preset, '', 'a second session must not inherit the first one\'s choice')
+  assert.equal(otherSession.json().compaction, '', 'in either field')
+
+  // The health route is how a person sees that choices are being stored at all,
+  // and where: a settings page that silently wrote nothing is otherwise
+  // indistinguishable from one whose writes work.
+  const health = await call({ url: [ROUTE_PREFIX, 'status'].join('/') })
+  assert.equal(health.json().sessions.dir, join(ROOT, 'sessions'), 'status must report where the choices live')
+  assert.equal(health.json().sessions.count, 1, 'and how many sessions have one, so the store is not invisible')
+
+  const cleared = await call({ method: 'DELETE', url: choiceUrl(SESSION), ...local })
+  assert.equal(cleared.state.status, 200, 'a session may forget its choice')
+  assert.deepEqual(
+    cleared.json(),
+    { session: SESSION, preset: '', compaction: '', stored: false, cleared: true },
+    'which puts it back exactly where a fresh session starts, and says a file was removed',
+  )
+  const clearedAgain = await call({ method: 'DELETE', url: choiceUrl(SESSION), ...local })
+  assert.equal(clearedAgain.json().cleared, false, 'clearing a choice that is already gone is not an error')
+  const emptied = await call({ url: [ROUTE_PREFIX, 'status'].join('/') })
+  assert.equal(emptied.json().sessions.count, 0, 'and a forgotten choice stops counting against the store')
+
+  // An id, and two values, that could not address anything are refused before they
+  // are written: an id that never resolves would be reported at every assembly
+  // from then on, which is a much worse place to learn about it.
+  const refusals = [
+    ['a session id the store will not name a file after', { url: choiceUrl('Upper') }, 'invalid-id'],
+    ['a session id that is a path', { url: choiceUrl('..%2Fescape') }, 'invalid-id'],
+    ['a preset id that is not an id', {
+      method: 'POST',
+      url: choiceUrl(SESSION),
+      ...local,
+      body: JSON.stringify({ preset: '../escape' }),
+    }, 'invalid-value'],
+    ['a compaction id that is not a string', {
+      method: 'POST',
+      url: choiceUrl(SESSION),
+      ...local,
+      body: JSON.stringify({ compaction: 7 }),
+    }, 'invalid-value'],
+    ['a patch naming neither field', {
+      method: 'POST',
+      url: choiceUrl(SESSION),
+      ...local,
+      body: JSON.stringify({ irrelevant: true }),
+    }, undefined],
+  ]
+  for (const [label, options, code] of refusals) {
+    const refused = await call(options)
+    assert.equal(refused.state.status, 400, label + ' must be refused')
+    if (code !== undefined) assert.equal(refused.json().code, code, 'and the refusal must say why: ' + label)
+  }
+
+  const wrongSessionMethod = await call({ method: 'PUT', url: choiceUrl(SESSION), ...local, body: '{}' })
+  assert.equal(wrongSessionMethod.state.status, 405, 'a choice is read, replaced, or forgotten — nothing else')
+
+  const crossOriginChoice = await call({
+    method: 'POST',
+    url: choiceUrl(SESSION),
+    origin: 'http://evil.example',
+    body: JSON.stringify({ preset: 'ctf' }),
+  })
+  assert.equal(crossOriginChoice.state.status, 403, 'a choice is a write, so it sits behind the same-origin gate')
+
   assert.deepEqual(warnings, [], `no warning expected, got: ${warnings.join(' | ')}`)
 
   console.log('routes ok')
@@ -930,6 +1042,7 @@ try {
   console.log('  variables   list with provenance and references, draft run, saved run, refresh')
   console.log('  scripts     read / save with fence / delete, 422 on an unusable run, host-only writes')
   console.log('  packs       export by preset with a download name, import validated before it is applied')
+  console.log('  sessions    read / merge / clear one session\'s choice, neighbours untouched, unusable ids and values refused')
 } finally {
   rmSync(ROOT, { recursive: true, force: true })
 }

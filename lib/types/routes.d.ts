@@ -23,6 +23,7 @@ import { type PromptScripts } from './scripts.js';
 import { type PackApplyResult, type PromptPack } from './pack.js';
 import type { Subscriptions } from './subscriptions.js';
 import type { CompactionPromptStats } from './compaction.js';
+import { type SessionChoices } from './sessions.js';
 import type { VariableView } from './index.js';
 /** The single prefix every route below lives under. */
 export declare const ROUTE_PREFIX = "/dsh-prompt-manager";
@@ -82,6 +83,15 @@ export interface PromptRouteHost {
      * out for itself is whether this seam ever fired.
      */
     compaction?(): CompactionPromptStats | undefined;
+    /**
+     * The per-session choices: which preset and which compaction instruction one
+     * conversation put in force.
+     *
+     * Files rather than settings fields, because they belong to a conversation —
+     * the settings document is one for the deployment, and a switch made in one
+     * conversation must not reach another.
+     */
+    sessions: SessionChoices;
 }
 /**
  * Register the prompt-store route.

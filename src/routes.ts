@@ -37,6 +37,13 @@ import { ScriptError, type PromptScripts } from './scripts.js'
 import { MAX_PACK_BYTES, parsePack, type PackApplyResult, type PromptPack } from './pack.js'
 import type { Subscriptions } from './subscriptions.js'
 import type { CompactionPromptStats } from './compaction.js'
+import {
+  isSessionId,
+  NO_CHOICE,
+  SessionChoiceError,
+  type SessionChoices,
+  type SessionChoicePatch,
+} from './sessions.js'
 import type { VariableView } from './index.js'
 
 /** The single prefix every route below lives under. */
@@ -116,6 +123,15 @@ export interface PromptRouteHost {
    * out for itself is whether this seam ever fired.
    */
   compaction?(): CompactionPromptStats | undefined
+  /**
+   * The per-session choices: which preset and which compaction instruction one
+   * conversation put in force.
+   *
+   * Files rather than settings fields, because they belong to a conversation —
+   * the settings document is one for the deployment, and a switch made in one
+   * conversation must not reach another.
+   */
+  sessions: SessionChoices
 }
 
 /**
@@ -179,6 +195,9 @@ function createHandler(host: PromptRouteHost): (request: IncomingMessage, respon
         sendJson(response, 200, {
           ...host.store.status(),
           maxEntries: MAX_ENTRIES,
+          // Where the per-session choices live and how many exist, so a deployment
+          // can tell "this conversation chose nothing" from "nothing was written".
+          sessions: host.sessions.status(),
           variables: Object.fromEntries(host.variables().map((variable) => [variable.name, variable.value])),
           // Absent rather than zeroed when the feature is off: a page cannot tell
           // "switched off" from "on but never fired" if both read as 0.
@@ -213,6 +232,10 @@ function createHandler(host: PromptRouteHost): (request: IncomingMessage, respon
       }
       if (head === 'sources') {
         await handleSources(host, method, tail, request, response)
+        return
+      }
+      if (head === 'session' && tail.length > 0) {
+        await handleSession(host, method, tail, request, response)
         return
       }
       if (head === 'variables') {
@@ -865,4 +888,110 @@ function sendJson(response: ServerResponse, status: number, payload: unknown): v
  */
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * Read, set, or forget one session's choice.
+ *
+ * The chips in the composer are the only callers: they know which conversation
+ * they are drawn in, and the Host is the only side that can answer what that
+ * conversation will actually inject. Body writes carry a hash fence; this one
+ * carries none, because a choice is a single value a person just picked rather
+ * than a draft two editors could hold at once.
+ *
+ * @param host - the session-choice store.
+ * @param method - the request method: `GET`, `POST`, or `DELETE`.
+ * @param tail - the path below `session/`, holding the session id.
+ * @param request - the incoming request, whose body carries a `POST` patch.
+ * @param response - the response to answer on.
+ */
+async function handleSession(
+  host: PromptRouteHost,
+  method: string,
+  tail: string,
+  request: IncomingMessage,
+  response: ServerResponse,
+): Promise<void> {
+  const sessionId = decodeId(tail)
+  if (sessionId === undefined || !isSessionId(sessionId)) {
+    sendJson(response, 400, {
+      error: `the session id is not a valid id: ${JSON.stringify(tail)}`,
+      code: 'invalid-id',
+    })
+    return
+  }
+
+  if (method === 'GET' || method === 'HEAD') {
+    // The effective choice rather than the file: a session that chose nothing and
+    // a session whose file says `''` inject the same thing, and the chip should
+    // say so rather than making a person tell those two apart.
+    sendJson(response, 200, {
+      session: sessionId,
+      ...host.sessions.effective(sessionId),
+      stored: host.sessions.has(sessionId),
+    })
+    return
+  }
+
+  if (method === 'DELETE') {
+    let cleared: boolean
+    try {
+      cleared = host.sessions.clear(sessionId)
+    } catch (error) {
+      sendJson(response, 500, { error: messageOf(error), code: errorCodeOf(error) })
+      return
+    }
+    sendJson(response, 200, { session: sessionId, ...NO_CHOICE, stored: false, cleared })
+    return
+  }
+
+  if (method !== 'POST') {
+    sendJson(response, 405, { error: `method ${method} is not allowed on a session choice` })
+    return
+  }
+
+  const payload = asRecord(await readJsonBody(request))
+  if (payload === undefined) {
+    sendJson(response, 400, { error: 'the patch must be a JSON object' })
+    return
+  }
+  const patch: SessionChoicePatch = {}
+  for (const field of ['preset', 'compaction'] as const) {
+    const value = payload[field]
+    if (value === undefined) continue
+    if (typeof value !== 'string') {
+      sendJson(response, 400, { error: `${field} must be a string`, code: 'invalid-value' })
+      return
+    }
+    // An id-shaped value or nothing: a name that could never address an entry is
+    // refused here rather than stored and reported at every later assembly.
+    if (value !== '' && !isEntryId(value)) {
+      sendJson(response, 400, {
+        error: `${field} is not a usable id: ${JSON.stringify(value)}`,
+        code: 'invalid-value',
+      })
+      return
+    }
+    patch[field] = value
+  }
+  if (patch.preset === undefined && patch.compaction === undefined) {
+    sendJson(response, 400, { error: 'the patch names neither preset nor compaction' })
+    return
+  }
+
+  try {
+    const stored = host.sessions.write(sessionId, patch)
+    sendJson(response, 200, { session: sessionId, ...stored, stored: true })
+  } catch (error) {
+    sendJson(response, 500, { error: messageOf(error), code: errorCodeOf(error) })
+  }
+}
+
+/**
+ * The code one session-choice failure answers with.
+ * @param error - the caught value.
+ * @returns `invalid-id` for a refused name, `unwritable` otherwise.
+ */
+function errorCodeOf(error: unknown): string {
+  return error instanceof SessionChoiceError ? error.code : 'unwritable'
 }

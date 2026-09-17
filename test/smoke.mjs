@@ -168,6 +168,31 @@ function fakeResponse() {
  * @param plugins - extra plugins to mount before this one.
  * @returns the rendered system prompt, the assembly, and a re-assemble function.
  */
+/** The session every assembly in this file is for, unless a test names another. */
+const SESSION = 'session-harness'
+
+/**
+ * Record one session's choice, the way the composer chip's own request does.
+ *
+ * These tests drive the Host, so this writes the file the Host reads instead of
+ * going through the route: the route's own shaping is asserted in `routes.mjs`,
+ * and what an assembly does with a choice is what these tests are about.
+ * @param sessionId - the session choosing.
+ * @param patch - the fields to set, merged over whatever the file already holds.
+ */
+function choose(sessionId, patch) {
+  const dir = join(STORE_ROOT, 'sessions')
+  mkdirSync(dir, { recursive: true })
+  const file = join(dir, `${sessionId}.json`)
+  let current = { preset: '', compaction: '' }
+  try {
+    current = JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    /* no choice yet, which is how every session starts */
+  }
+  writeFileSync(file, JSON.stringify({ ...current, ...patch }), 'utf8')
+}
+
 async function assembleWith(config, promptConfig, plugins = []) {
   const { Context } = await load('@deepseek-ai/cordis')
   const { default: SystemPrompt, renderPrompt } = await load('@deepseek-ai/dsh-system-prompt')
@@ -180,8 +205,8 @@ async function assembleWith(config, promptConfig, plugins = []) {
   for (const plugin of plugins) await ctx.plugin(plugin)
   await ctx.plugin({ name, inject, apply }, { storeDir: STORE_ROOT, ...config })
   await settle()
-  const read = async () => {
-    const assembly = await ctx.systemPrompt.assemble({})
+  const read = async (sessionId = SESSION) => {
+    const assembly = await ctx.systemPrompt.assemble({ agent: { session: { id: sessionId } } })
     return { assembly, prompt: renderPrompt(assembly) }
   }
   const first = await read()
@@ -331,10 +356,12 @@ try {
       { id: 'note', title: '补充说明', order: 40, enabled: false },
     ],
     presets: [{ id: 'full', name: '全都要', entries: ['early', 'note'] }],
-    activePreset: 'full',
   }
   settings.state.watcher()
-  const presetOn = await driven.read()
+  // Which preset is in force is the conversation's own choice, recorded in that
+  // conversation's own file — the settings document no longer answers it at all.
+  choose('session-preset', { preset: 'full' })
+  const presetOn = await driven.read('session-preset')
   assert.ok(presetOn.prompt.includes('EARLY-BODY'), 'a preset must inject the entries it names')
   assert.ok(presetOn.prompt.includes('NOTE-BODY'), 'including one whose own switch is off')
 
@@ -343,21 +370,21 @@ try {
     presets: [{ id: 'full', name: '全都要', entries: ['note'] }],
   }
   settings.state.watcher()
-  const presetNarrow = await driven.read()
+  const presetNarrow = await driven.read('session-preset')
   assert.ok(
     !presetNarrow.prompt.includes('EARLY-BODY'),
     'an entry the preset leaves out must stay out, however its own switch reads',
   )
   assert.ok(presetNarrow.prompt.includes('NOTE-BODY'), 'and the members it does name stay in')
 
-  // Switching is one settings write and nothing else: the sections keep the names
+  // Switching is one small file write and nothing else: the sections keep the names
   // and placements they registered with, because text is resolved per assembly.
   settings.state.value = {
     ...settings.state.value,
     presets: [{ id: 'full', name: '全都要', entries: ['early', 'note'] }],
   }
   settings.state.watcher()
-  const switched = await driven.read()
+  const switched = await driven.read('session-preset')
   const switchedNames = switched.assembly.sections
     .map((section) => section.name)
     .filter((name_) => name_.startsWith('user:prompt-manager:'))
@@ -367,19 +394,17 @@ try {
     'switching a preset must not re-register the sections',
   )
 
-  // No preset hands the decision back to the switches.
-  settings.state.value = { ...settings.state.value, activePreset: '' }
-  settings.state.watcher()
-  const noPreset = await driven.read()
+  // Choosing no preset hands the decision back to the switches.
+  choose('session-preset', { preset: '' })
+  const noPreset = await driven.read('session-preset')
   assert.ok(noPreset.prompt.includes('EARLY-BODY'), 'without a preset the entry switches decide again')
   assert.ok(!noPreset.prompt.includes('NOTE-BODY'), 'and a switch left off stays off')
 
   // An id that names nothing must not freeze the prompt on whatever it was: the
   // switches take over, and the problem is reported once.
   const warningsBefore = driven.warnings.length
-  settings.state.value = { ...settings.state.value, activePreset: 'gone' }
-  settings.state.watcher()
-  const missingPreset = await driven.read()
+  choose('session-preset', { preset: 'gone' })
+  const missingPreset = await driven.read('session-preset')
   assert.ok(missingPreset.prompt.includes('EARLY-BODY'), 'a preset that no longer exists must fall back to the switches')
   assert.ok(
     driven.warnings.slice(warningsBefore).some((warning) => warning.includes('gone')),
@@ -393,11 +418,11 @@ try {
   const danglingBefore = driven.warnings.length
   settings.state.value = {
     ...settings.state.value,
-    activePreset: 'partial',
     presets: [{ id: 'partial', name: '缺一条', entries: ['early', 'renamed-away'] }],
   }
   settings.state.watcher()
-  const partial = await driven.read()
+  choose('session-preset', { preset: 'partial' })
+  const partial = await driven.read('session-preset')
   assert.ok(partial.prompt.includes('EARLY-BODY'), 'the members that do exist still inject')
   const dangling = driven.warnings.slice(danglingBefore).filter((warning) => warning.includes('renamed-away'))
   assert.equal(dangling.length, 1, 'the member no entry answers to is reported exactly once')
@@ -426,11 +451,11 @@ try {
       { id: 'early', title: '先说的', order: 5, enabled: true },
       { id: 'compact-zh', title: '压缩指令', order: 90, enabled: false, kind: 'compaction' },
     ],
-    activePreset: 'mixed',
     presets: [{ id: 'mixed', name: '混了', entries: ['early', 'compact-zh'] }],
   }
   settings.state.watcher()
-  const mixed = await driven.read()
+  choose('session-preset', { preset: 'mixed' })
+  const mixed = await driven.read('session-preset')
   assert.ok(mixed.prompt.includes('EARLY-BODY'), 'a preset member that is a section still injects')
   assert.ok(!mixed.prompt.includes('COMPACT-BODY'), 'and the compaction instruction named as a member does not')
   const misplaced = driven.warnings.slice(misplacedBefore).filter((warning) => warning.includes('compact-zh'))
@@ -573,10 +598,12 @@ try {
       { id: 'ok', name: '重名', entries: ['kept'] },
       'nonsense',
     ],
-    activePreset: 'ok',
   }
   settings.state.watcher()
-  const narrowedPresets = await driven.read()
+  // Which preset is in force is a session's own choice, so the narrowed list is
+  // exercised through one: the settings document no longer answers this at all.
+  choose('session-narrowed', { preset: 'ok' })
+  const narrowedPresets = await driven.read('session-narrowed')
   assert.ok(narrowedPresets.prompt.includes('KEPT-BODY'), 'the usable preset must still decide injection')
 
   const withPresets = parsePresets([
@@ -1078,7 +1105,7 @@ try {
   console.log('  empty       a fresh install registers no section and injects nothing')
   console.log(`  sections    ${addedNames.join(' -> ')}`)
   console.log('  index       settings-driven add / enable / disable / order / sanitize')
-  console.log('  presets     one activePreset write swaps the set, unknown id falls back to the switches')
+  console.log('  presets     a session\'s own choice swaps the set, unknown id falls back to the switches')
   console.log('  members     a preset naming an entry this machine lacks, or one that is a compaction instruction, is reported once')
   console.log('  bodies      store file, subscribed snapshot, and a bodyless entry')
   console.log(`  variables   os=${facts.os} platform=${facts.platform} arch=${facts.arch} release=${facts.os_release}`)

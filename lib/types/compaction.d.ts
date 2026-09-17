@@ -36,7 +36,7 @@ export interface CompactionPromptHost {
      * request exactly as it is. Called once per compaction, so it may read the
      * index, the settings document, and the body file directly.
      */
-    resolve(): {
+    resolve(sessionId: string | undefined): {
         id: string;
         text: string;
     } | undefined;

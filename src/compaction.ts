@@ -56,7 +56,7 @@ export interface CompactionPromptHost {
    * request exactly as it is. Called once per compaction, so it may read the
    * index, the settings document, and the body file directly.
    */
-  resolve(): { id: string; text: string } | undefined
+  resolve(sessionId: string | undefined): { id: string; text: string } | undefined
   /** The names a body may reference, exactly as a section's body may. */
   variables(): Readonly<Record<string, string | undefined>>
   /** Report a non-fatal problem; implementations deduplicate or not as they see fit. */
@@ -187,7 +187,10 @@ export function installCompactionPrompt(ctx: Context, host: CompactionPromptHost
       if (request === undefined || request.purpose !== 'compaction') return next()
       state.matches += 1
 
-      const instruction = host.resolve()
+      // The request names the session it summarises, so the instruction this
+      // plugin sends can be the one that session chose.
+      const sessionId = typeof request['sessionId'] === 'string' ? request['sessionId'] : undefined
+      const instruction = host.resolve(sessionId)
       // Nothing configured, or the configured thing is unusable: the request goes
       // out exactly as the engine built it. This is the default state of every
       // deployment that never made a compaction entry, so it must stay free of

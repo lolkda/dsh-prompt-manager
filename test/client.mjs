@@ -259,6 +259,39 @@ const scope = {
 }
 
 /**
+ * What each conversation has chosen, keyed by session id.
+ *
+ * This is the Host's `sessions/<id>.json` stood up in memory: the two chips read
+ * and write it through the choice route, so the fake transport has to answer the
+ * way the real one does — with what was stored, not with what was sent.
+ */
+const CHOICES = new Map()
+
+/**
+ * The session list the `sessions` service provides, as the chips consume it.
+ *
+ * `current` is the open conversation, and it is the only thing that tells one
+ * chip instance apart from another — which is why `apply` threads this list to
+ * every chip it registers.
+ */
+const sessionStore = {
+  current: undefined,
+  listeners: new Set(),
+  getSnapshot() {
+    return { current: this.current }
+  },
+  subscribe(listener) {
+    this.listeners.add(listener)
+    return () => { this.listeners.delete(listener) }
+  },
+  /** Show a different conversation, and tell the chips the way the real store does. */
+  open(sessionId) {
+    this.current = sessionId
+    for (const listener of this.listeners) listener()
+  },
+}
+
+/**
  * Whether an element type is a mountable component: a plain function, or a
  * `memo`/`forwardRef` object carrying `$$typeof`.
  */
@@ -440,6 +473,21 @@ function materialize(React) {
     async (url, init) => {
       const method = init?.method ?? 'GET'
       requests.push({ url, method, body: init?.body, seq: step++ })
+      // One conversation's choice. The Host merges a patch into the file that
+      // session already has, so this answers with the merged choice and never
+      // touches the settings document the rest of these cases write through.
+      if (url.includes('/session/')) {
+        const sessionId = decodeURIComponent(url.slice(url.indexOf('/session/') + '/session/'.length))
+        if (method === 'POST') {
+          CHOICES.set(sessionId, { preset: '', compaction: '', ...(CHOICES.get(sessionId) ?? {}), ...JSON.parse(init.body) })
+        }
+        const stored = CHOICES.get(sessionId)
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ session: sessionId, ...(stored ?? { preset: '', compaction: '' }), stored: stored !== undefined }),
+        }
+      }
       if (url.endsWith('/preset/id')) return { ok: true, status: 200, json: async () => ({ id: 'new-preset' }) }
       if (url.endsWith('/id')) return { ok: true, status: 200, json: async () => ({ id: 'new-note' }) }
       if (url.endsWith('/pack/import') && method === 'POST') {
@@ -542,11 +590,18 @@ function materialize(React) {
   assert.equal(exports.name, 'dsh-prompt-manager', 'the client plugin must expose its cordis name')
   assert.ok(exports.inject.includes('slots'), 'the client plugin must inject the slot service')
   assert.ok(exports.inject.includes('settingsScope'), 'the client plugin must inject the settings scope service')
+  assert.ok(
+    exports.inject.includes('sessions'),
+    'and the session list, which is the only thing that says which conversation a chip is drawing for',
+  )
   assert.equal(typeof exports.apply, 'function', 'the client plugin must expose apply')
 
   const registrations = []
   const injections = []
   const ctx = {
+    // The service the plugin injects to find out which conversation it is
+    // drawing for. `apply` reads `.list` off it and hands that to each chip.
+    sessions: { list: sessionStore },
     settingsScope: {
       bind: (spec) => {
         assert.equal(spec.namespace, 'prompt-manager', 'the section must bind the prompt-manager namespace')
@@ -686,11 +741,15 @@ assert.ok(inspect(renderer.tree).text.includes('还没有订阅来的提示词')
 tabButton('全部').props.onClick()
 await renderer.settle()
 
+// A compaction entry carries no switch: its `enabled` flag decides nothing, and the
+// pointer that used to make it live is chosen per conversation now. The row says
+// where that choice lives instead, which is one note rather than one control that
+// writes a field nobody reads.
 const switches = inspect(tree, SWITCH).nodes
 assert.equal(
   switches.length,
-  ENTRIES.length,
-  'every entry must carry one switch, the compaction entry included',
+  SECTION_ENTRIES.length,
+  'every section entry must carry one switch, and a compaction entry none',
 )
 assert.equal(switches[0].props.checked, true, 'the first switch must mirror the index')
 assert.equal(switches[1].props.checked, false, 'a disabled entry must render an unchecked switch')
@@ -1128,11 +1187,12 @@ assert.ok(
 )
 assert.equal(droppedEntry.value.some((entry) => entry.id === 'alpha'), false, 'and the dropped id is the one that was deleted')
 
-// ── the composer chip ─────────────────────────────────────────────────────────
+/// ── the composer chip ─────────────────────────────────────────────────────────
 
-// The chip is a second surface of the same bundle and the same namespace, driven
-// through a renderer of its own because it is a component of its own: two
-// components cannot share one hook-slot table.
+// The chip is a second surface of the same bundle, driven through a renderer of
+// its own because it is a component of its own: two components cannot share one
+// hook-slot table. The catalog it offers comes from the settings namespace; which
+// one it says is in force comes from the conversation it belongs to.
 const chipRenderer = createRenderer()
 const chipRegistration = materialize(chipRenderer.React).registrations
   .find((registration) => registration.meta.name === 'conversation.input.right')
@@ -1143,10 +1203,18 @@ const chipMenuNode = () => inspect(chipRenderer.tree, MENU).nodes[0]
 const chipText = () => textOf(chipMenuNode().props.anchor)
 const chipMenu = () => chipMenuNode()
 
-scope.state = { ...scope.state, value: { ...scope.state.value, presets: PRESETS, activePreset: '' } }
-chipRenderer.mount(chipRegistration.component, { scope })
+/** What the slot hands a chip: the settings scope, plus the session list that
+ * `apply` read off the injected `sessions` service. */
+const chipProps = () => ({ scope, sessions: sessionStore })
+/** The last choice request sent since one point in the log. */
+const lastChoice = (after) => requests.slice(after).filter((request) => request.url.includes('/session/')).at(-1)
+
+scope.state = { ...scope.state, value: { ...scope.state.value, presets: PRESETS } }
+CHOICES.clear()
+sessionStore.open('session-open')
+chipRenderer.mount(chipRegistration.component, chipProps())
 await chipRenderer.settle()
-assert.ok(chipText().includes('提示词 · 按开关'), 'with no preset the chip must say the switches decide')
+assert.ok(chipText().includes('提示词 · 按开关'), 'a conversation that chose nothing must read as the switches deciding')
 assert.deepEqual(
   chipMenu().props.items.map((entry) => entry.id),
   ['', 'ctf', 'plain'],
@@ -1156,32 +1224,68 @@ assert.ok(item(chipMenu(), '').label.includes('（当前）'), 'the no-preset en
 assert.ok(item(chipMenu(), 'ctf').label.includes('CTF 作业'), 'a preset entry must carry its name')
 assert.ok(item(chipMenu(), 'ctf').label.includes('2 条'), 'and how many entries it selects')
 
-// A switch is one settings write, and nothing else: the Host reads the field on
-// the next assembly, so the chip must not have to coordinate anything.
+// The chip reads the conversation's own file to find out what is in force, which
+// is the whole difference from the settings document it used to read.
+const chipRead = requests.find((request) => request.url === `${ROUTE}/session/session-open`)
+assert.ok(chipRead !== undefined && chipRead.method === 'GET', 'the chip must read this session\'s choice from the Host')
+
+// A switch is one request naming one conversation, and nothing else — the Host acts
+// on it at the next model step, so the chip has nothing to coordinate.
 const chipWritesBefore = writes.length
+const chipRequestsBefore = requests.length
 chipMenu().props.onSelect('ctf')
 await chipRenderer.settle()
-const activated = writes.slice(chipWritesBefore).find((write) => write.field === 'activePreset')
-assert.ok(activated !== undefined, 'choosing a preset must write activePreset')
-assert.equal(activated.value, 'ctf', 'and write the id that was chosen')
-assert.equal(writes.slice(chipWritesBefore).length, 1, 'a switch must not touch any other settings field')
+const chosePreset = lastChoice(chipRequestsBefore)
+assert.ok(chosePreset !== undefined, 'choosing a preset must tell the Host what this conversation chose')
+assert.equal(chosePreset.method, 'POST', 'as a write')
+assert.equal(chosePreset.url, `${ROUTE}/session/session-open`, 'naming this conversation and no other')
+assert.deepEqual(
+  JSON.parse(chosePreset.body),
+  { preset: 'ctf', compaction: 'compact-zh' },
+  'with the preset and the instruction that preset carries: switching one switches the whole set',
+)
+assert.equal(writes.length, chipWritesBefore, 'and it must not touch the settings document at all')
 
-// The chip reads the namespace it writes, so it follows the change by itself.
-chipRenderer.mount(chipRegistration.component, { scope })
+// The answer is what was stored, so a re-render shows the choice the Host will act
+// on rather than the one the page hoped for.
+chipRenderer.mount(chipRegistration.component, chipProps())
 await chipRenderer.settle()
-assert.ok(chipText().includes('CTF 作业'), 'the chip must show the preset now in force')
+assert.ok(chipText().includes('CTF 作业'), 'the chip must show the preset this conversation is using')
 assert.ok(item(chipMenu(), 'ctf').label.includes('（当前）'), 'and mark it in the menu')
 
-// A page whose settings channel is process-local can show the choice but not make one.
+// The point of the whole change: the same bundle, a different conversation.
+sessionStore.open('session-other')
+chipRenderer.mount(chipRegistration.component, chipProps())
+await chipRenderer.settle()
+assert.ok(chipText().includes('提示词 · 按开关'), 'another conversation must not inherit a choice made in the first one')
+assert.ok(item(chipMenu(), '').label.includes('（当前）'), 'which leaves it choosing nothing')
+assert.ok(!item(chipMenu(), 'ctf').label.includes('（当前）'), 'and marking no preset at all')
+
+// Back to the first conversation, and its choice is still there: the choice is a
+// file, not a value this component holds.
+sessionStore.open('session-open')
+chipRenderer.mount(chipRegistration.component, chipProps())
+await chipRenderer.settle()
+assert.ok(chipText().includes('CTF 作业'), 'and coming back reads the same stored choice again')
+
+// A page whose settings channel is process-local can offer the catalog but not make
+// a choice: the same refusal every write on this page makes.
 scope.state = { ...scope.state, mode: 'memory', writable: false }
-chipRenderer.mount(chipRegistration.component, { scope })
+chipRenderer.mount(chipRegistration.component, chipProps())
 await chipRenderer.settle()
 assert.equal(item(chipMenu(), 'ctf').disabled, true, 'a memory-mode page must refuse to switch a preset')
 scope.state = { ...scope.state, mode: 'host', writable: true }
 
+// With no conversation open the control cannot speak for anyone.
+sessionStore.open(undefined)
+chipRenderer.mount(chipRegistration.component, chipProps())
+await chipRenderer.settle()
+assert.equal(item(chipMenu(), 'ctf').disabled, true, 'with no conversation open there is nothing to choose for')
+
 // A deployment with no presets still renders: the chip says where to make one.
-scope.state = { ...scope.state, value: { ...scope.state.value, presets: [], activePreset: '' } }
-chipRenderer.mount(chipRegistration.component, { scope })
+sessionStore.open('session-open')
+scope.state = { ...scope.state, value: { ...scope.state.value, presets: [] } }
+chipRenderer.mount(chipRegistration.component, chipProps())
 await chipRenderer.settle()
 assert.ok(
   chipMenu().props.items[0].label.includes('还没有组合'),
@@ -1202,23 +1306,27 @@ assert.ok(compactionChipRegistration !== undefined, 'the composer row must also 
 
 const compactionChipMenu = () => inspect(compactionChipRenderer.tree, MENU).nodes[0]
 const compactionChipText = () => textOf(compactionChipMenu().props.anchor)
+/** The same props the slot hands this chip. */
+const compactionChipProps = () => ({ scope, sessions: sessionStore })
 
 scope.state = {
   ...scope.state,
   mode: 'host',
   writable: true,
-  value: { ...scope.state.value, entries: ENTRIES, presets: PRESETS, activePreset: '', compaction: '' },
+  value: { ...scope.state.value, entries: ENTRIES, presets: PRESETS },
 }
-compactionChipRenderer.mount(compactionChipRegistration.component, { scope })
+CHOICES.clear()
+sessionStore.open('session-open')
+compactionChipRenderer.mount(compactionChipRegistration.component, compactionChipProps())
 await compactionChipRenderer.settle()
 assert.ok(
   compactionChipText().includes('DSH'),
-  `with no pointer aimed anywhere the chip must say the built-in instruction is what runs, got ${compactionChipText()}`,
+  `a conversation that chose nothing must name the built-in instruction, got ${compactionChipText()}`,
 )
 
 // Only the compaction entries belong in this menu. Offering a section would promise
 // to make it the compaction instruction, which is a different thing — and offering
-// the whole index would bury the two entries this control is actually about.
+// the whole index would bury the entries this control is actually about.
 assert.deepEqual(
   compactionChipMenu().props.items.map((entry) => entry.id),
   ['', 'compact-zh'],
@@ -1227,53 +1335,49 @@ assert.deepEqual(
 assert.ok(item(compactionChipMenu(), 'compact-zh').label.includes('压缩指令（中文版）'), 'naming the entry it offers')
 assert.ok(item(compactionChipMenu(), '').label.includes('（当前）'), 'and marking what is in force right now')
 
+// One field of one conversation's file, patched rather than replaced: the preset
+// this conversation is using has to survive a change of instruction.
 const compactionWritesBefore = writes.length
+const compactionRequestsBefore = requests.length
 compactionChipMenu().props.onSelect('compact-zh')
 await compactionChipRenderer.settle()
-const aimedByChip = writes.slice(compactionWritesBefore).find((write) => write.field === 'compaction')
-assert.ok(aimedByChip !== undefined, 'choosing an entry must write the compaction pointer')
-assert.equal(aimedByChip.value, 'compact-zh', 'with the id that was chosen')
-assert.equal(writes.slice(compactionWritesBefore).length, 1, 'and it must not touch any other settings field')
+const choseInstruction = lastChoice(compactionRequestsBefore)
+assert.ok(choseInstruction !== undefined, 'choosing an entry must tell the Host what this conversation chose')
+assert.equal(choseInstruction.url, `${ROUTE}/session/session-open`, 'naming this conversation')
+assert.deepEqual(JSON.parse(choseInstruction.body), { compaction: 'compact-zh' }, 'and only the field it owns')
+assert.equal(writes.length, compactionWritesBefore, 'leaving the settings document alone')
 
-compactionChipRenderer.mount(compactionChipRegistration.component, { scope })
+compactionChipRenderer.mount(compactionChipRegistration.component, compactionChipProps())
 await compactionChipRenderer.settle()
-assert.ok(compactionChipText().includes('压缩指令（中文版）'), 'the chip follows the namespace it writes, like the preset chip')
+assert.ok(compactionChipText().includes('压缩指令（中文版）'), 'the chip follows the answer the Host gave, like the preset chip')
 
-// A combo answers the pointer by itself, so the chip must write the field that
-// actually decides — the combo's own — instead of one nothing reads. This is the
-// one way it differs from the settings row, which refuses while a combo is in force:
-// a composer control that dies whenever a combo is on would be dead most of the time.
-scope.state = { ...scope.state, value: { ...scope.state.value, activePreset: 'ctf', compaction: '' } }
-compactionChipRenderer.mount(compactionChipRegistration.component, { scope })
+// The instruction is the conversation's, so a second one is unaffected by it —
+// the same isolation the preset chip just demonstrated.
+sessionStore.open('session-other')
+compactionChipRenderer.mount(compactionChipRegistration.component, compactionChipProps())
 await compactionChipRenderer.settle()
-assert.ok(compactionChipText().includes('压缩指令（中文版）'), 'the chip shows what the combo put in force')
+assert.ok(
+  compactionChipText().includes('DSH'),
+  `a conversation that chose nothing must still get the built-in instruction, got ${compactionChipText()}`,
+)
+assert.ok(item(compactionChipMenu(), '').label.includes('（当前）'), 'with the built-in one marked for it')
 
-const throughComboBefore = writes.length
+// Clearing is the same patch with the empty id, which is how a conversation goes
+// back to what DSH ships.
+sessionStore.open('session-open')
+compactionChipRenderer.mount(compactionChipRegistration.component, compactionChipProps())
+await compactionChipRenderer.settle()
+const clearRequestsBefore = requests.length
 compactionChipMenu().props.onSelect('')
 await compactionChipRenderer.settle()
-const chipComboWrites = writes.slice(throughComboBefore)
-assert.equal(
-  chipComboWrites.filter((write) => write.field === 'compaction').length,
-  0,
-  'while a combo is in force the root pointer is not what decides, so writing it would change nothing',
-)
-const presetWrite = chipComboWrites.find((write) => write.field === 'presets')
-assert.ok(presetWrite !== undefined, 'choosing must write the combo that answers instead')
-assert.deepEqual(
-  presetWrite.value.map((preset) => ({
-    id: preset.id, name: preset.name, entries: preset.entries, compaction: preset.compaction,
-  })),
-  [
-    { id: 'ctf', name: 'CTF 作业', entries: ['alpha', 'beta'], compaction: '' },
-    { id: 'plain', name: '日常', entries: [], compaction: '' },
-  ],
-  'clearing the chosen combo and rewriting no other record',
-)
+const clearedChoice = lastChoice(clearRequestsBefore)
+assert.deepEqual(JSON.parse(clearedChoice.body), { compaction: '' }, 'choosing the built-in one writes the empty id')
+assert.ok(compactionChipText().includes('DSH'), 'and the chip goes back to naming the built-in instruction')
 
-// A page whose settings channel is process-local can show the choice but not make one —
-// the same refusal the preset chip makes, because it is the same kind of write.
+// A page whose settings channel is process-local can offer the catalog but not make
+// a choice — the same refusal the preset chip makes, because it is the same kind of write.
 scope.state = { ...scope.state, mode: 'memory', writable: false }
-compactionChipRenderer.mount(compactionChipRegistration.component, { scope })
+compactionChipRenderer.mount(compactionChipRegistration.component, compactionChipProps())
 await compactionChipRenderer.settle()
 assert.equal(
   item(compactionChipMenu(), 'compact-zh').disabled,
@@ -1283,15 +1387,11 @@ assert.equal(
 scope.state = { ...scope.state, mode: 'host', writable: true }
 
 // A deployment with no compaction entries still renders: the chip says where to make one.
-scope.state = {
-  ...scope.state,
-  value: { ...scope.state.value, entries: SECTION_ENTRIES, presets: [], activePreset: '', compaction: '' },
-}
-compactionChipRenderer.mount(compactionChipRegistration.component, { scope })
+scope.state = { ...scope.state, value: { ...scope.state.value, entries: SECTION_ENTRIES, presets: [] } }
+compactionChipRenderer.mount(compactionChipRegistration.component, compactionChipProps())
 await compactionChipRenderer.settle()
 assert.deepEqual(compactionChipMenu().props.items.map((entry) => entry.id), ['no-entries'], 'with none there is one hint')
 assert.equal(compactionChipMenu().props.items[0].disabled, true, 'and it is not selectable')
-
 // ── the presets page ─────────────────────────────────────────────────────────
 
 // The page is driven from a document this case states outright: earlier cases in
@@ -1299,7 +1399,7 @@ assert.equal(compactionChipMenu().props.items[0].disabled, true, 'and it is not 
 // one), and a preset case should not inherit their arithmetic.
 scope.state = {
   ...scope.state,
-  value: { ...scope.state.value, entries: ENTRIES, presets: PRESETS, activePreset: 'ctf' },
+  value: { ...scope.state.value, entries: ENTRIES, presets: PRESETS },
 }
 const presetRenderer = createRenderer()
 const presetSection = materialize(presetRenderer.React).registrations[0].component
@@ -1312,19 +1412,30 @@ const rowMenuFor = (tree, label) => inspect(tree, MENU).nodes
 presetRenderer.mount(presetSection, { scope })
 await presetRenderer.settle()
 
-// A preset in force changes what the switches mean, and the page has to say so —
-// otherwise a row's switch looks broken rather than out of the loop.
-assert.ok(presetText().includes('当前组合「CTF 作业」生效中'), 'the list must say a preset is in force')
-assert.ok(presetText().includes('单条开关只在「不用组合」时生效'), 'and what that does to the switches')
-assert.ok(presetText().includes('组合：注入'), 'a row the preset carries must say it is injected')
-assert.ok(presetText().includes('组合：不注入'), 'and a row it does not must say it is not')
+// This page no longer reports which combination is in force, because no combination
+// is in force *here*: that is a conversation's own choice, and this page's job is the
+// combinations themselves. What it has to say instead is where the switch lives, and
+// what a row's switch means once a conversation has chosen a combination.
+assert.ok(presetText().includes('哪个组合生效由每个会话自己决定'), 'the list must say who decides which preset is in force')
+assert.ok(presetText().includes('单条的开关键只在那个会话选了「不用组合」时起作用'), 'and what that does to the row switches')
+assert.equal(presetText().includes('生效中'), false, 'and it must not claim a preset is in force on this page')
+assert.equal(presetText().includes('组合：注入'), false, 'nor annotate rows with a fact about a conversation it cannot see')
 
 const presetsLink = button(presetRenderer.tree, '组合（2）')
 assert.ok(presetsLink !== undefined, 'the list must link to the presets page')
 presetsLink.props.onClick()
 await presetRenderer.settle()
 assert.ok(presetText().includes('CTF 作业') && presetText().includes('日常'), 'the page must list every preset')
-assert.ok(presetText().includes('当前'), 'and badge the one in force')
+assert.equal(presetText().includes('当前'), false, 'and badge none of them: no combination is in force on this page')
+
+// The row menu offers no way to make a combination current, in either direction: a
+// switch here could only mean "in every conversation at once", which is exactly what
+// per-session choices removed. The composer chip beside the input box is the place.
+for (const name of ['CTF 作业', '日常']) {
+  const menu = rowMenuFor(presetRenderer.tree, name)
+  assert.equal(item(menu, 'activate'), undefined, 'no 设为当前 action on a preset row: ' + name)
+  assert.equal(item(menu, 'clear'), undefined, 'and no 取消当前 either: ' + name)
+}
 assert.ok(presetText().includes('没有选中任何条目'), 'an empty preset must be described as selecting nothing')
 
 // A new preset gets its id from the Host — only the Host knows which one is free —
@@ -1359,29 +1470,22 @@ assert.equal(stored.value.at(-1).name, '交付检查', 'and the name that was ty
 assert.deepEqual(stored.value.at(-1).entries, [ENTRIES[0].id], 'with exactly the members that were ticked')
 assert.ok(allocation.seq < stored.seq, 'the id has to exist before the list carrying it is written')
 
-// Deleting the preset in force has to clear the selection with it, or every page
-// would go on reporting a preset that is not there.
+// Deleting a preset is one write: the list, and nothing else. There is no selection
+// to clear alongside it any more — a conversation that had chosen the deleted id
+// keeps it in its own file and reads it as naming nothing, which is what the Host
+// does with any id the index no longer carries, and it says so in its log once.
 const deleteBefore = writes.length
 rowMenuFor(presetRenderer.tree, 'CTF 作业').props.onSelect('delete')
 await presetRenderer.settle()
 const afterDelete = writes.slice(deleteBefore)
 assert.ok(afterDelete.some((write) => write.field === 'presets'), 'deleting must rewrite the preset list')
-const droppedSelection = afterDelete.find((write) => write.field === 'activePreset')
-assert.ok(droppedSelection !== undefined, 'and drop the selection when the deleted preset was in force')
-assert.equal(droppedSelection.value, '', 'by writing the empty preset id')
+assert.equal(
+  afterDelete.filter((write) => write.field !== 'presets').length,
+  0,
+  'and write no other settings field: which preset a conversation uses is not this document',
+)
 
-const activateBefore = writes.length
-rowMenuFor(presetRenderer.tree, '日常').props.onSelect('activate')
-await presetRenderer.settle()
-const reactivated = writes.slice(activateBefore).find((write) => write.field === 'activePreset')
-assert.ok(reactivated !== undefined && reactivated.value === 'plain', '设为当前 must write that preset id')
 
-// 取消当前 is the same single write the composer chip makes.
-const clearBefore = writes.length
-rowMenuFor(presetRenderer.tree, '日常').props.onSelect('clear')
-await presetRenderer.settle()
-const cleared = writes.slice(clearBefore).find((write) => write.field === 'activePreset')
-assert.ok(cleared !== undefined && cleared.value === '', '取消当前 must write the empty preset id')
 
 // ── preset packs ────────────────────────────────────────────────────────────
 
@@ -1480,127 +1584,59 @@ assert.ok(
 
 const compactRow = rowFor(compactRenderer.tree, '压缩指令')
 assert.ok(compactRow !== undefined, 'the compaction entry must be listed like every other entry')
-const compactSwitch = inspect(compactRow, SWITCH).nodes[0]
-assert.ok(compactSwitch !== undefined, 'and it must offer a switch like every other row')
-assert.equal(compactSwitch.props.checked, false, 'unchecked while no pointer is aimed at it')
-assert.ok(dotClass(compactRenderer.tree, '压缩指令').includes('--idle'), 'with no pointer aimed at it the compaction row is not in force')
+// No switch, and no pointer action. A compaction entry's `enabled` flag decides
+// nothing — `reconcile()` never gives it a system-prompt section — and the pointer
+// that used to make it live is one file per conversation now. A control here could
+// only write a field nothing reads, so the row says where that choice is made.
+assert.equal(inspect(compactRow, SWITCH).nodes.length, 0, 'a compaction row must offer no switch')
+assert.ok(textOf(compactRow).includes('每会话自选'), 'and it must say where the choice is made instead')
+assert.ok(dotClass(compactRenderer.tree, '压缩指令').includes('--idle'), 'a compaction entry is not in force on this page at all')
 assert.ok(!dotClass(compactRenderer.tree, '第一条').includes('--idle'), 'while a switched-on section still reads as in force')
 
 const compactMenu = rowMenuOf(compactRow)
 assert.deepEqual(
   compactMenu.props.items.map((candidate) => candidate.label),
-  ['编辑', '设为当前', '删除'],
-  'the compaction row offers its pointer action beside the shared row actions',
+  ['编辑', '删除'],
+  'the compaction row keeps exactly the shared row actions',
 )
-// Every action in a row menu carries an icon, and this one did not: without it the
-// pointer action read as a different kind of entry from the two beside it. The icon
-// follows the label — a check to make this the instruction, a cross to hand the next
-// compaction back to DSH.
 assert.deepEqual(
   compactMenu.props.items.map((candidate) => candidate.icon && candidate.icon.type),
-  [primitivesStub.IconEditOutline16, primitivesStub.IconCheckOutline16, primitivesStub.IconTrashOutline16],
-  'every action must carry an icon, and 设为当前 the one that says what it does',
+  [primitivesStub.IconEditOutline16, primitivesStub.IconTrashOutline16],
+  'every action must carry an icon, and neither of them is a way to make this the instruction',
 )
-assert.equal(item(compactMenu, 'current').disabled, false, 'and it can be made current right away')
+assert.equal(item(compactMenu, 'current'), undefined, 'there is no 设为当前 to reach for')
+assert.equal(item(compactMenu, 'activate'), undefined, 'and none hiding under another id')
 assert.deepEqual(
   rowMenuOf(rowFor(compactRenderer.tree, '第一条')).props.items.map((candidate) => candidate.label),
   ['编辑', '删除'],
   'a section row keeps exactly its two actions',
 )
 
-// Aiming the pointer is one settings write, the same shape the preset switch has.
-const currentBefore = writes.length
-compactMenu.props.onSelect('current')
-await compactRenderer.settle()
-const aimed = writes.slice(currentBefore).find((write) => write.field === 'compaction')
-assert.ok(aimed !== undefined, '设为当前 must write the compaction pointer')
-assert.equal(aimed.value, 'compact-zh', 'naming the entry that was chosen')
-assert.equal(writes.slice(currentBefore).length, 1, 'and it must not touch any other settings field')
-
-// The page reads the namespace it writes, so it follows the change by itself:
-// the dot lights up and the same action becomes the way back to the built-in text.
-compactRenderer.mount(compactSection, { scope })
-await compactRenderer.settle()
-assert.ok(!dotClass(compactRenderer.tree, '压缩指令').includes('--idle'), 'the entry the pointer names reads as in force')
-const currentMenu = rowMenuOf(rowFor(compactRenderer.tree, '压缩指令'))
-assert.equal(item(currentMenu, 'current').label, '取消当前', 'and the action turns into the way out of it')
-assert.equal(
-  item(currentMenu, 'current').icon.type,
-  primitivesStub.IconCloseOutline16,
-  'with the icon that matches the label it turned into',
-)
-const pointerClearBefore = writes.length
-currentMenu.props.onSelect('current')
-await compactRenderer.settle()
-const released = writes.slice(pointerClearBefore).find((write) => write.field === 'compaction')
-assert.ok(released !== undefined, '取消当前 must write the compaction pointer')
-assert.equal(released.value, '', 'as the empty pointer, which means the built-in instruction')
-
-// The row's own switch does the same thing, so the control a person reaches for first is
-// the one every other row has. It is bound to the pointer rather than to `enabled` —
-// which decides nothing here, because `reconcile()` never gives a compaction entry a
-// system-prompt section — so "on" means "this is the one DSH's instruction is replaced
-// with", and it holds for exactly one entry at a time.
-const switchAimBefore = writes.length
-inspect(rowFor(compactRenderer.tree, '压缩指令'), SWITCH).nodes[0].props.onChange()
-await compactRenderer.settle()
-const aimedBySwitch = writes.slice(switchAimBefore).find((write) => write.field === 'compaction')
-assert.ok(aimedBySwitch !== undefined, 'flipping the row switch on must write the compaction pointer')
-assert.equal(aimedBySwitch.value, 'compact-zh', 'naming the entry the switch belongs to')
-compactRenderer.mount(compactSection, { scope })
-await compactRenderer.settle()
-const aimedRowSwitch = inspect(rowFor(compactRenderer.tree, '压缩指令'), SWITCH).nodes[0]
-assert.equal(aimedRowSwitch.props.checked, true, 'and the switch then reads on, straight from the namespace')
-const switchClearBefore = writes.length
-aimedRowSwitch.props.onChange()
-await compactRenderer.settle()
-const releasedBySwitch = writes.slice(switchClearBefore).find((write) => write.field === 'compaction')
-assert.ok(releasedBySwitch !== undefined, 'flipping it back off releases the pointer')
-assert.equal(releasedBySwitch.value, '', 'as the empty pointer, which means the built-in instruction')
-
-// A preset in force answers the pointer by itself — the same rule the sections
-// follow, so the row cannot claim a compaction instruction the prompt is not using.
-scope.state = { ...scope.state, value: { ...scope.state.value, activePreset: 'ctf' } }
-compactRenderer.mount(compactSection, { scope })
-await compactRenderer.settle()
-assert.ok(
-  !dotClass(compactRenderer.tree, '压缩指令').includes('--idle'),
-  'a preset that names a compaction entry puts it in force over an empty root pointer',
-)
-// The root pointer is not what decides while a preset is on, so the row must not
-// offer to write it: an action that silently changes nothing is worse than none.
-// The switch and the … menu item are the same action, so both refuse together.
-assert.ok(compactText().includes('组合：生效'), 'the row says the combo is what put it in force')
-assert.equal(
-  item(rowMenuOf(rowFor(compactRenderer.tree, '压缩指令')), 'current').disabled,
-  true,
-  'and the pointer action is refused while the combo answers that question',
-)
-assert.equal(
-  inspect(rowFor(compactRenderer.tree, '压缩指令'), SWITCH).nodes[0].props.disabled,
-  true,
-  'the row switch refuses with it, so neither control writes a field nothing reads',
-)
-assert.equal(
-  inspect(rowFor(compactRenderer.tree, '压缩指令'), SWITCH).nodes[0].props.checked,
-  true,
-  'while still reading the state the combo put it in',
-)
-
-// And the preset wins even when it points at the built-in instruction: falling
-// back to the root field here would contradict what the Host does.
+// The document's two pointers are still sitting in the namespace here, and this page
+// is unmoved by them: neither one decides anything any more. What the page can still
+// honestly report is what the Host has actually done, which is the counters.
+STATUS = { ...STATUS, compaction: { matches: 2, replacements: 1, lastReplacedAt: '2026-09-12T03:00:00.000Z', characters: 1234 } }
 scope.state = {
   ...scope.state,
-  value: { ...scope.state.value, compaction: 'compact-zh', activePreset: 'plain' },
+  value: { ...scope.state.value, activePreset: 'ctf', compaction: 'compact-zh' },
 }
 compactRenderer.mount(compactSection, { scope })
 await compactRenderer.settle()
+assert.ok(dotClass(compactRenderer.tree, '压缩指令').includes('--idle'), 'a pointer in the document puts nothing in force on this page')
+assert.equal(inspect(rowFor(compactRenderer.tree, '压缩指令'), SWITCH).nodes.length, 0, 'and still offers no switch to change it')
 assert.ok(
-  dotClass(compactRenderer.tree, '压缩指令').includes('--idle'),
-  'a preset pointing at the built-in instruction wins over the root pointer',
+  compactText().includes('压缩指令：每个会话自己选'),
+  `the page must say who decides instead, got: ${compactText()}`,
 )
-assert.ok(compactText().includes('组合：不生效'), 'and the row says so in the combo\'s own words')
-scope.state = { ...scope.state, value: { ...scope.state.value, compaction: '', activePreset: '' } }
+assert.ok(compactText().includes('已替换 1 次'), 'while still reporting what the Host has really done')
+
+// The same holds with no combination in the document at all: the row does not change
+// shape, because there is nothing here for a combination to override.
+scope.state = { ...scope.state, value: { entries: ENTRIES, presets: PRESETS, activePreset: '', compaction: '' } }
+compactRenderer.mount(compactSection, { scope })
+await compactRenderer.settle()
+assert.ok(dotClass(compactRenderer.tree, '压缩指令').includes('--idle'), 'an empty document left the row exactly where it was')
+assert.equal(item(rowMenuOf(rowFor(compactRenderer.tree, '压缩指令')), 'current'), undefined, 'with no action to aim it, either way')
 
 // ── adding a compaction instruction ───────────────────────────────────────────
 
@@ -1641,11 +1677,16 @@ assert.equal(
   'a new compaction instruction starts empty rather than from a template this page made up',
 )
 
-// The pointer may only ever name an entry that exists, so the one control that aims
-// it has to refuse while the entry is still only a draft on this page.
-const draftAim = button(compactRenderer.tree, '设为当前')
-assert.ok(draftAim !== undefined, 'the editor still offers the control that puts an instruction in force')
-assert.equal(draftAim.props.disabled, true, 'and it refuses while the entry is only a draft on this page')
+// The editor offers no way to put an instruction in force: that is a conversation's
+// own choice, made from its composer chip. So there is nothing here aiming at a
+// record that does not exist yet, and nothing to disable while it is a draft. What
+// the editor must say instead is where the instruction becomes usable.
+assert.equal(button(compactRenderer.tree, '设为当前'), undefined, 'the editor must offer no way to make a draft current')
+assert.equal(button(compactRenderer.tree, '取消当前'), undefined, 'nor a way to release one')
+assert.ok(
+  compactText().includes('哪个会话用它，就在那个会话输入框那行的「压缩」芯片里选'),
+  `and it must say where that choice is made instead, got: ${compactText()}`,
+)
 
 // Backing out is the whole point of a draft: it must leave the index and the pointer
 // exactly as they were, and say which draft it is throwing away.
@@ -1659,9 +1700,10 @@ assert.equal(writes.length, discardWrites, 'and dropping it writes nothing at al
 assert.equal(compactionBadges(compactRenderer.tree).length, 1, 'so no blank instruction is left behind in the list')
 windowStub.confirm = () => true
 
-// Saving is what makes it real, in the one order that works: the body lands, then
-// the record the pointer may name, then the pointer itself.
-scope.state = { ...scope.state, value: { entries: ENTRIES, presets: PRESETS, activePreset: '', compaction: '' } }
+// Saving is what makes it real, in the one order that works: the body lands, then the
+// index record that may name it. Nothing aims at it here — this page cannot put an
+// instruction in force for a conversation it cannot see.
+scope.state = { ...scope.state, value: { entries: ENTRIES, presets: PRESETS } }
 compactRenderer.mount(compactSection, { scope })
 await compactRenderer.settle()
 const saveRequests = requests.length
@@ -1681,28 +1723,39 @@ assert.equal(
 )
 const savedWrites = writes.slice(saveWrites)
 const savedIndex = savedWrites.find((write) => write.field === 'entries')
-const savedPointer = savedWrites.find((write) => write.field === 'compaction')
-assert.ok(savedIndex !== undefined, 'and then the index gains the record the pointer can name')
+assert.ok(savedIndex !== undefined, 'and then the index gains the record')
 const freshEntry = savedIndex.value.find((entry) => entry.id === 'new-note')
 assert.equal(freshEntry.kind, 'compaction', 'marked as a compaction instruction')
 assert.equal(freshEntry.enabled, false, 'and keeps the switch a section would have, switched off')
 assert.ok(freshEntry.order > 90, 'placed after the entries that already exist')
-assert.ok(savedPointer !== undefined, 'and the pointer is aimed at it in the same breath')
-assert.equal(savedPointer.value, 'new-note', 'naming the id the Host allocated')
-assert.ok(
-  savedBody.seq < savedIndex.seq && savedIndex.seq < savedPointer.seq,
-  'the body exists first, then the index entry, then the pointer that names it',
+assert.equal(
+  savedWrites.some((write) => write.field === 'compaction'),
+  false,
+  'and nothing aims it: which instruction a conversation sends is that conversation\'s choice',
 )
-assert.ok(compactText().includes('已保存，下一次压缩生效。'), 'and the page says when that lands')
+assert.equal(
+  savedWrites.some((write) => write.field === 'activePreset'),
+  false,
+  'so no combination is put in force on the way past, either',
+)
+assert.ok(
+  savedBody.seq < savedIndex.seq,
+  'the body exists first, then the index record that names it',
+)
+assert.ok(
+  compactText().includes('想让某个会话用它，在那个会话输入框那行的「压缩」芯片里选它'),
+  `and the page says where it becomes usable, got: ${compactText()}`,
+)
 assert.ok(!compactText().includes('尚未保存'), 'so the editor is no longer holding a draft')
 await toList()
 
-// A combo answers which instruction is in force, so aiming the document's own
-// pointer from here would be a write that decides nothing now and everything later:
-// the entry is still created, and the combo page is where it becomes current.
+// The document's own two pointers are still there, and they change nothing about the
+// save: creating an instruction is one body write and one index write, whoever is
+// using what. That is the difference from the page that used to aim its own pointer
+// while no combination was in force.
 scope.state = {
   ...scope.state,
-  value: { entries: ENTRIES, presets: PRESETS, activePreset: 'ctf', compaction: '' },
+  value: { entries: ENTRIES, presets: PRESETS, activePreset: 'ctf', compaction: 'compact-zh' },
 }
 compactRenderer.mount(compactSection, { scope })
 await compactRenderer.settle()
@@ -1715,20 +1768,23 @@ const underCombo = writes.slice(comboWrites)
 assert.ok(
   underCombo.some((write) => write.field === 'entries'
     && write.value.some((entry) => entry.id === 'new-note' && entry.kind === 'compaction')),
-  'the instruction is created whether or not a combo is in force',
+  'the instruction is created whatever the document says',
 )
 assert.equal(
   underCombo.some((write) => write.field === 'compaction'),
   false,
-  'but the document pointer stays where it is while a combo decides',
+  'and the document pointer is left exactly where it was',
 )
-assert.ok(compactText().includes('这条还不会生效'), 'and the page says so instead of promising the next compaction')
+assert.ok(
+  compactText().includes('想让某个会话用它'),
+  'the page still says where the choice is made, rather than promising anybody the next compaction',
+)
 await toList()
 
 // Turning that draft into a section follows the same rule — nothing is written
 // before the save — and the flip must not mark it as saved, or the page would leave
 // the person holding a draft with the save button already reading "已保存".
-scope.state = { ...scope.state, value: { entries: ENTRIES, presets: PRESETS, activePreset: '', compaction: '' } }
+scope.state = { ...scope.state, value: { entries: ENTRIES, presets: PRESETS } }
 compactRenderer.mount(compactSection, { scope })
 await compactRenderer.settle()
 const flipWrites = writes.length
@@ -1752,7 +1808,7 @@ assert.equal(
   false,
   'and no pointer is aimed at a section, which could never answer it',
 )
-scope.state = { ...scope.state, value: { entries: ENTRIES, presets: PRESETS, activePreset: '', compaction: '' } }
+scope.state = { ...scope.state, value: { entries: ENTRIES, presets: PRESETS } }
 compactRenderer.mount(compactSection, { scope })
 await compactRenderer.settle()
 
@@ -1802,32 +1858,22 @@ assert.ok(compactText().includes('下一次压缩'), 'the editor says a compacti
 assert.ok(compactText().includes('system prompt'), 'and says it is not one of the system prompt sections')
 assert.equal(inspect(compactRenderer.tree, 'textarea').nodes.length, 1, 'while the body field is the same field a section uses')
 
-// Aiming it from the editor is the same single write the row menu makes.
-const aimButton = button(compactRenderer.tree, '设为当前')
-assert.ok(aimButton !== undefined, 'the editor offers to put this instruction in force')
-const aimBefore = writes.length
-aimButton.props.onClick()
-await compactRenderer.settle()
-const aimedFromEditor = writes.slice(aimBefore).find((write) => write.field === 'compaction')
-assert.ok(aimedFromEditor !== undefined, '设为当前 writes the compaction pointer')
-assert.equal(aimedFromEditor.value, 'compact-zh', 'naming the entry being edited')
-assert.ok(compactText().includes('下一次压缩'), 'and the report says when that takes effect')
+// The editor is where the text is written, and nowhere a conversation's choice is
+// made: no button here may aim the document's pointer at this entry, in either
+// direction, because that write could not reach the compaction it promises to.
+assert.equal(button(compactRenderer.tree, '设为当前'), undefined, 'the editor must not offer to make this current')
+assert.equal(button(compactRenderer.tree, '取消当前'), undefined, 'nor to take it back out')
+assert.ok(
+  compactText().includes('哪个会话用它，就在那个会话输入框那行的「压缩」芯片里选'),
+  'it has to say where that is done instead',
+)
 
-// It is one control doing both, so the same place is the way back out.
-compactRenderer.mount(compactSection, { scope })
-await compactRenderer.settle()
-const releaseButton = button(compactRenderer.tree, '取消当前')
-assert.ok(releaseButton !== undefined, 'once in force the same control offers the way out')
-const releaseBefore = writes.length
-releaseButton.props.onClick()
-await compactRenderer.settle()
-const releasedFromEditor = writes.slice(releaseBefore).find((write) => write.field === 'compaction')
-assert.ok(releasedFromEditor !== undefined && releasedFromEditor.value === '', '取消当前 writes the empty pointer')
-
-// Saving a compaction body reports the timing that is true of it.
+// Saving a compaction body writes the body and nothing else, and says where the
+// instruction becomes usable rather than promising the person a compaction.
 const compactBody = inspect(compactRenderer.tree, 'textarea').nodes[0]
 compactBody.props.onChange({ target: { value: 'EDITED COMPACTION' } })
 await compactRenderer.settle()
+const bodySaveBefore = writes.length
 button(compactRenderer.tree, '保存修改').props.onClick()
 await compactRenderer.settle()
 assert.ok(
@@ -1835,7 +1881,15 @@ assert.ok(
     && JSON.parse(request.body).body === 'EDITED COMPACTION'),
   'saving writes the compaction body through the same Host route a section uses',
 )
-assert.ok(compactText().includes('已保存，下一次压缩生效。'), 'and says when it lands, not "next step"')
+assert.equal(
+  writes.slice(bodySaveBefore).some((write) => write.field === 'compaction'),
+  false,
+  'and aims nothing: a body is not a choice about who uses it',
+)
+assert.ok(
+  compactText().includes('想让某个会话用它，在那个会话输入框那行的「压缩」芯片里选它'),
+  `and says where it becomes usable, not that a compaction will send it, got: ${compactText()}`,
+)
 
 // An entry can change kind: the same body can become a section, and turning it
 // back must take the field away rather than write `kind: 'section'` — a section
@@ -1855,18 +1909,20 @@ const demoted = kindIndex.value.find((entry) => entry.id === 'compact-zh')
 assert.equal('kind' in demoted, false, 'and a section entry must carry no kind key at all')
 assert.equal(demoted.title, '压缩指令（中文版）', 'the rest of the record is carried over untouched')
 assert.equal(demoted.enabled, false, 'including the switch it already had')
-assert.ok(
-  kindWrites.some((write) => write.field === 'compaction' && write.value === ''),
-  'and the pointer is released in the same step, since it may only name a compaction entry',
+assert.equal(
+  kindWrites.some((write) => write.field === 'compaction'),
+  false,
+  'and the document pointer is left alone: moving it would change nothing, since no conversation reads it',
 )
 
-// Deleting the instruction the pointer names has to let it go in the same breath, for
-// the same reason the kind flip does: the pointer may only ever name a compaction
-// entry, and a dangling one makes the Host fall back to the built-in instruction and
-// complain in its log at every compaction.
+// Deleting the instruction is the same shape: the body file, then the index. The
+// document's own pointer — aimed at this very entry here — is not this page's to move.
+// A conversation that had chosen the id keeps it in its own file and reads it as
+// naming nothing, which is what the Host does with any id that is gone, and it says so
+// once rather than at every compaction.
 scope.state = {
   ...scope.state,
-  value: { entries: ENTRIES, presets: PRESETS, activePreset: '', compaction: 'compact-zh' },
+  value: { entries: ENTRIES, presets: PRESETS, activePreset: 'ctf', compaction: 'compact-zh' },
 }
 compactRenderer.mount(compactSection, { scope })
 await compactRenderer.settle()
@@ -1884,54 +1940,26 @@ assert.equal(
   false,
   'and it is the instruction that went',
 )
-assert.ok(
-  dropWrites.some((write) => write.field === 'compaction' && write.value === ''),
-  'while the pointer that named it is released in the same step',
-)
-
-// A combo's own pointer is the combo page's to fix, and the document's field must not
-// be written in its place: that would silently drop a root pointer aimed elsewhere.
-scope.state = {
-  ...scope.state,
-  value: { entries: ENTRIES, presets: PRESETS, activePreset: 'ctf', compaction: 'beta' },
-}
-compactRenderer.mount(compactSection, { scope })
-await compactRenderer.settle()
-const comboDropBefore = writes.length
-rowMenuOf(rowFor(compactRenderer.tree, '压缩指令')).props.onSelect('delete')
-await compactRenderer.settle()
 assert.equal(
-  writes.slice(comboDropBefore).some((write) => write.field === 'compaction'),
+  dropWrites.some((write) => write.field === 'compaction' || write.field === 'activePreset'),
   false,
-  'deleting an entry a combo names leaves the document pointer alone',
-)
-
-// The same rule for the other release: demoting an entry a combo names must not write
-// the document pointer either, for the very same reason.
-scope.state = {
-  ...scope.state,
-  value: { entries: ENTRIES, presets: PRESETS, activePreset: 'ctf', compaction: 'beta' },
-}
-compactRenderer.mount(compactSection, { scope })
-await compactRenderer.settle()
-openRow(compactRenderer.tree, '压缩指令').props.onClick()
-await compactRenderer.settle()
-const comboFlipBefore = writes.length
-button(compactRenderer.tree, '转为普通段落').props.onClick()
-await compactRenderer.settle()
-const comboFlipWrites = writes.slice(comboFlipBefore)
-assert.ok(
-  comboFlipWrites.some((write) => write.field === 'entries'),
-  'the kind flip still rewrites the index',
-)
-assert.equal(
-  comboFlipWrites.some((write) => write.field === 'compaction'),
-  false,
-  'but not the document pointer that a combo is overriding',
+  'while neither pointer in the document is touched: no conversation\'s choice lives there',
 )
 
 // And back the other way, which must mark it again.
+// The entry is a section now — the flip above is what a person would have just done —
+// so this case starts from the index that flip wrote, not from the fixture.
+const asSection = ENTRIES.map((entry) => (entry.id === 'compact-zh'
+  ? { id: entry.id, title: entry.title, order: entry.order, enabled: false }
+  : entry))
+scope.state = {
+  ...scope.state,
+  value: { entries: asSection, presets: PRESETS, activePreset: 'ctf', compaction: 'compact-zh' },
+}
 compactRenderer.mount(compactSection, { scope })
+await compactRenderer.settle()
+await toList()
+openRow(compactRenderer.tree, '压缩指令').props.onClick()
 await compactRenderer.settle()
 const toCompaction = button(compactRenderer.tree, '转为压缩指令')
 assert.ok(toCompaction !== undefined, 'a section can be turned into a compaction instruction from its editor')
@@ -1941,9 +1969,14 @@ await compactRenderer.settle()
 const promoted = writes.slice(backBefore).find((write) => write.field === 'entries')
 assert.ok(promoted !== undefined, 'which again rewrites the index')
 assert.equal(promoted.value.find((entry) => entry.id === 'compact-zh').kind, 'compaction', 'marking it as one')
+assert.equal(
+  writes.slice(backBefore).some((write) => write.field === 'compaction'),
+  false,
+  'and still without aiming the document pointer, whether or not one is already there',
+)
 
 // Back to the fixture index and the list for the cases below.
-scope.state = { ...scope.state, value: { entries: ENTRIES, presets: PRESETS, activePreset: '', compaction: '' } }
+scope.state = { ...scope.state, value: { entries: ENTRIES, presets: PRESETS } }
 compactRenderer.mount(compactSection, { scope })
 await compactRenderer.settle()
 button(compactRenderer.tree, '← 返回').props.onClick()
@@ -2062,19 +2095,26 @@ const mountListText = async () => {
   return inspect(next.tree).text
 }
 
-// Counts and the last time come from the Host, and the page is the only place a
-// person can see whether their instruction is actually being used — "matches" is
-// how often compaction ran, "replacements" how often the text was theirs.
+// Counts and the last time come from the Host, and those counters are the only place
+// a person can see whether any instruction is being used at all — "matches" is how
+// often compaction ran, "replacements" how often one of theirs was sent. What the
+// line must *not* claim is which instruction that was: that is a conversation's own
+// choice, and this page cannot see any conversation.
 scope.state = {
   ...scope.state,
-  value: { entries: ENTRIES, presets: PRESETS, activePreset: '', compaction: 'compact-zh' },
+  value: { entries: ENTRIES, presets: PRESETS },
 }
 const replacedText = await mountListText()
 assert.ok(
-  replacedText.includes('压缩指令：压缩指令（中文版）'),
-  `the status line names the instruction in force, got: ${replacedText}`,
+  replacedText.includes('压缩指令：每个会话自己选'),
+  `the status line must say who decides which instruction runs, got: ${replacedText}`,
 )
-assert.ok(replacedText.includes('已替换 1 次'), 'and how often it has replaced the built-in text')
+assert.equal(
+  replacedText.includes('压缩指令：压缩指令（中文版）'),
+  false,
+  'and must not name one, whatever the document pointer happens to hold',
+)
+assert.ok(replacedText.includes('已替换 1 次'), 'while still reporting how often it has replaced the built-in text')
 assert.ok(
   replacedText.includes(`最近 ${new Date(STATUS.compaction.lastReplacedAt).toLocaleString()}`),
   'reported in local time, the way every other timestamp on this page is',
@@ -2091,8 +2131,8 @@ assert.ok(
 )
 assert.ok(!offText.includes('已替换'), 'and no count is invented for it')
 
-// A compaction that ran while the pointer was not aimed at the user's text is
-// worth saying exactly: it is the difference between "not working" and "not used yet".
+// A compaction that ran while no user instruction was sent is worth saying exactly:
+// it is the difference between "not working" and "not used yet".
 STATUS = { ...STATUS, compaction: { matches: 3, replacements: 0, lastReplacedAt: '', characters: 0 } }
 const seenText = await mountListText()
 assert.ok(
@@ -2100,11 +2140,14 @@ assert.ok(
   `a run that did not replace anything is reported honestly, got: ${seenText}`,
 )
 
-// And the ordinary first-run state, with the built-in instruction in force.
+// And the ordinary first-run state, where nobody has chosen an instruction yet.
 STATUS = { ...STATUS, compaction: { matches: 0, replacements: 0, lastReplacedAt: '', characters: 0 } }
-scope.state = { ...scope.state, value: { ...scope.state.value, compaction: '' } }
 const idleText = await mountListText()
-assert.ok(idleText.includes('压缩指令：DSH 自带'), 'with nothing pointed at, the line says which text is used instead')
+assert.ok(
+  idleText.includes('压缩指令：每个会话自己选'),
+  'with nobody having chosen, the line still says who decides',
+)
+assert.equal(idleText.includes('压缩指令：DSH 自带'), false, 'without claiming a text on anybody\'s behalf')
 assert.ok(idleText.includes('还没有遇到压缩'), 'and that no compaction has happened yet')
 STATUS = { ...STATUS, compaction: heldCompaction }
 
@@ -2138,14 +2181,15 @@ assert.equal(
 console.log('client ok')
 console.log(`  bundle      factory id ${PACKAGE_NAME}, materialized and driven against stub modules`)
 console.log(`  section     settings.section id=prompt-manager order=${String(meta.order)}`)
-console.log(`  chip        ${chipMeta.name} id=prompt-manager, switches the preset with one settings write`)
+console.log(`  chip        ${chipMeta.name} id=prompt-manager, reads and writes one session's own choice`)
+console.log('  sessions    both chips read and write the Host\'s per-session file, and no other conversation feels it')
 console.log(`  list        ${String(ENTRIES.length)} rows, switches, kebab menus, the plugin's own repo link, add control refused at the cap`)
 console.log('  views       row menu -> editor page -> save -> back to the list')
-console.log('  compaction  a row of its own kind: badge, no switch, the pointer action, and a combo overriding it')
-console.log('  kind        a draft that starts empty, written only on save, aimed, flipped to a section, dropped with its pointer')
+console.log('  compaction  a row of its own kind: own badge, no switch, and nothing here that could make it current')
+console.log('  kind        a draft that starts empty, written only on save, flipped to a section and back, never aimed')
 console.log('  combos      a combo picks one compaction instruction, and saving it leaves the other combos alone')
 console.log('  report      replacements and matches told apart, local time, and the feature switched off')
-console.log('  presets     list, editor, member checklist, id from the Host, delete clears the selection')
+console.log('  presets     list, editor, member checklist, an id from the Host, and no way to set one as current')
 console.log('  packs       export downloads what the Host built, import reports every id it had to change')
 console.log('  fence       a forked draft carries the hash the fork wrote, so the next save is accepted')
 console.log('  order       a body file is deleted before the index drops it, and a draft is not dropped silently')

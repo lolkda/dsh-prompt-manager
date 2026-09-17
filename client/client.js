@@ -51,8 +51,9 @@ window.__ModuleLoader__.load({
     const COMPACTION_CHIP_ID = `${NAMESPACE}-compaction`
 
     /**
-     * `activePreset` value meaning "no preset": each entry's own switch decides.
-     * Mirrors the Host, which reads an empty or unknown id the same way.
+     * The id meaning "none of them": no preset — each entry's own switch decides —
+     * or no compaction instruction, which leaves DSH's own text in force. Mirrors
+     * the Host, which reads an empty or unknown id the same way.
      */
     const NO_PRESET = ''
 
@@ -380,22 +381,6 @@ window.__ModuleLoader__.load({
         }))
     }
 
-    /**
-     * The preset in force, or `null` when each entry's own switch decides.
-     *
-     * An id that names nothing reads as no preset at all — exactly what the Host
-     * does with it, so the chip can never claim a preset the prompt is not using.
-     * @param snapshot - the settings snapshot.
-     * @param presets - the presets already read out of it.
-     * @returns the active preset, or `null`.
-     */
-    function activePresetOf(snapshot, presets) {
-      const value = snapshot && snapshot.value
-      const wanted = value && typeof value.activePreset === 'string' ? value.activePreset : NO_PRESET
-      if (wanted.length === 0) return null
-      return presets.find((preset) => preset.id === wanted) ?? null
-    }
-
     /** Whether two preset lists differ in anything the Host stores. */
     function presetsDiffer(before, after) {
       if (before.length !== after.length) return true
@@ -669,17 +654,89 @@ window.__ModuleLoader__.load({
       ])
     }
 
+    /** What a session that has chosen nothing gets: no preset, DSH's own instruction. */
+    const EMPTY_CHOICE = { preset: '', compaction: '' }
+
+    /** The text one failed request is reported as. */
+    function failureText(error) {
+      return error && error.message ? error.message : String(error)
+    }
+
+    /**
+     * The conversation the composer belongs to.
+     *
+     * The composer slots are drawn per session but hand their registrants no
+     * session id, so the chip reads the one the surrounding UI is showing — the
+     * session list's own answer rather than a second guess at it. That list is the
+     * `sessions` service's snapshot store, which `apply` passes down the same way
+     * it passes the settings scope; the store's `current` is the open session.
+     * @param store - the session list's snapshot store, or undefined when the
+     * deployment serves no session list at all.
+     * @returns the open session id, or undefined when no session is open.
+     */
+    function useCurrentSession(store) {
+      const subscribe = React.useCallback(
+        (listener) => (store === undefined ? () => {} : store.subscribe(listener)),
+        [store],
+      )
+      const getSnapshot = React.useCallback(
+        () => (store === undefined ? undefined : store.getSnapshot().current),
+        [store],
+      )
+      return React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+    }
+
+    /**
+     * One session's stored choice, and the way to change it.
+     *
+     * The choice is a file the Host owns, one per session, so this is a request
+     * rather than a settings read: the settings namespace holds the catalog every
+     * session picks from, and a pick made in one conversation must not reach
+     * another.
+     * @param sessionId - the conversation to read and write.
+     * @returns the choice in force, the last failure, and the writer.
+     */
+    function useSessionChoice(sessionId) {
+      const [state, setState] = React.useState({ value: EMPTY_CHOICE, failed: null })
+      const narrow = (payload) => ({
+        preset: payload && typeof payload.preset === 'string' ? payload.preset : '',
+        compaction: payload && typeof payload.compaction === 'string' ? payload.compaction : '',
+      })
+      React.useEffect(() => {
+        if (sessionId === undefined) {
+          setState({ value: EMPTY_CHOICE, failed: null })
+          return undefined
+        }
+        let live = true
+        setState({ value: EMPTY_CHOICE, failed: null })
+        request('GET', `/session/${encodeURIComponent(sessionId)}`)
+          .then((payload) => { if (live) setState({ value: narrow(payload), failed: null }) })
+          .catch((error) => { if (live) setState({ value: EMPTY_CHOICE, failed: failureText(error) }) })
+        return () => { live = false }
+      }, [sessionId])
+      // The answer is the stored choice, so the chip shows what the Host will act
+      // on rather than what the page hoped it would.
+      const write = (patch) => {
+        if (sessionId === undefined) return
+        request('POST', `/session/${encodeURIComponent(sessionId)}`, patch)
+          .then((payload) => { setState({ value: narrow(payload), failed: null }) })
+          .catch((error) => { setState((previous) => ({ ...previous, failed: failureText(error) })) })
+      }
+      return { value: state.value, failed: state.failed, write }
+    }
+
     /**
      * The composer chip: which prompt preset is in force, and the control that
      * switches it.
      *
      * It rides the composer tool row so the set can be swapped from beside the
-     * input box instead of through Settings. Everything it shows comes from the
-     * settings namespace itself — the presets, and which one is active — so a
-     * change made on the settings page shows up here with no wiring of its own,
-     * and a switch here is one settings write that the next model step already
-     * honours.
-     * @param props - composed slot props carrying the bound settings scope.
+     * input box instead of through Settings. The *catalog* it offers comes from the
+     * settings namespace — the presets, and a change made on the settings page
+     * shows up here with no wiring of its own — while which one is in force is read
+     * from this conversation's own file. So a switch here is one small request that
+     * the next model step honours, and no other conversation feels it.
+     * @param props - composed slot props carrying the bound settings scope and the
+     * session list.
      * @returns the chip element tree.
      */
     function PresetChip(props) {
@@ -688,16 +745,20 @@ window.__ModuleLoader__.load({
       const getSnapshot = React.useCallback(() => scope.getSnapshot(), [scope])
       const snapshot = React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
       const presets = React.useMemo(() => presetsOf(snapshot), [snapshot])
-      const active = React.useMemo(() => activePresetOf(snapshot, presets), [snapshot, presets])
+      const sessionId = useCurrentSession(props.sessions)
+      const session = useSessionChoice(sessionId)
+      // The preset in force for this session, named by its own file. An id that
+      // names nothing — a preset somebody just deleted — reads as no preset,
+      // which is what the Host does with it too.
+      const active = presets.find((preset) => preset.id === session.value.preset) ?? null
       const [open, setOpen] = React.useState(false)
-      const [failed, setFailed] = React.useState(null)
 
       // Nothing to say until the namespace has answered, and nothing to offer on
       // a host that does not serve it at all.
       if (snapshot.status !== 'ready') return null
 
       const writable = snapshot.writable !== false && snapshot.mode !== 'memory'
-      const current = active === null ? NO_PRESET : active.id
+      const current = session.value.preset.length === 0 ? NO_PRESET : session.value.preset
       const items = presets.length === 0
         ? [{ id: 'no-presets', label: '还没有组合：设置 → 提示词 → 组合 里新建', disabled: true }]
         : [
@@ -705,21 +766,19 @@ window.__ModuleLoader__.load({
           ...presets.map((preset) => ({
             id: preset.id,
             label: `${preset.name}（${String(preset.entries.length)} 条）${current === preset.id ? '（当前）' : ''}`,
-            disabled: !writable,
+            disabled: !writable || sessionId === undefined,
           })),
         ]
 
       const choose = (id) => {
         setOpen(false)
-        if (id === current || id === 'no-presets') return
-        // The chip keeps showing the namespace's own answer, so a refused write
-        // leaves the old preset in place rather than a selection that never
-        // reached the Host.
-        Promise.resolve(scope.set('activePreset', id))
-          .then(() => { setFailed(null) })
-          .catch((error) => {
-            setFailed(error && error.message ? error.message : String(error))
-          })
+        if (id === current || id === 'no-presets' || sessionId === undefined) return
+        // Switching a preset carries that preset's own compaction instruction, the
+        // way it always has: a preset answers "which prompts are in force" whole.
+        // Both answers land in this session's file and nowhere else, so the write
+        // is this conversation's and no other conversation can feel it.
+        const picked = presets.find((preset) => preset.id === id)
+        session.write({ preset: id, compaction: picked === undefined ? '' : picked.compaction })
       }
 
       return h(SlotMenu, {
@@ -729,20 +788,22 @@ window.__ModuleLoader__.load({
         onSelect: choose,
         anchor: h('button', {
           type: 'button',
-          className: active === null
+          className: session.value.preset.length === 0
             ? 'dsh-prompt-manager__composerChip'
             : 'dsh-prompt-manager__composerChip dsh-prompt-manager__composerChip--on',
-          'aria-label': '切换提示词组合',
+          'aria-label': '切换本会话的提示词组合',
           'aria-haspopup': 'menu',
           'aria-expanded': open,
-          title: failed !== null
-            ? `切换失败：${failed}`
-            : writable
-              ? '切换提示词组合（下一个模型步骤生效）'
-              : '这个页面是只读的：局域网地址打开时设置通道退化为内存模式',
+          title: session.failed !== null
+            ? `切换失败：${session.failed}`
+            : sessionId === undefined
+              ? '先打开一个会话：组合是每个会话自己的选择'
+              : writable
+                ? '切换本会话的提示词组合（下一个模型步骤生效，别的会话不受影响）'
+                : '这个页面是只读的：局域网地址打开时设置通道退化为内存模式',
           onClick: () => setOpen((wasOpen) => !wasOpen),
         }, h('span', { className: 'dsh-prompt-manager__composerChipLabel' },
-          failed !== null ? '提示词 · 切换失败' : `提示词 · ${active === null ? '按开关' : active.name}`)),
+          session.failed !== null ? '提示词 · 切换失败' : `提示词 · ${active === null ? '按开关' : active.name}`)),
       })
     }
 
@@ -750,17 +811,16 @@ window.__ModuleLoader__.load({
      * The compaction chip: which compaction instruction runs, and the control that
      * switches it.
      *
-     * The twin of the preset chip beside it — same namespace, same row, same one-write
-     * shape — answering the other half of the question. That chip decides which sections
-     * go into the prompt; this one decides which instruction replaces DSH's own when a
+     * The twin of the preset chip beside it — same row, same one-request shape —
+     * answering the other half of the question. That chip decides which sections go
+     * into the prompt; this one decides which instruction replaces DSH's own when a
      * context compaction summarises the conversation.
      *
-     * It writes the field that actually decides. With no combo in force that is the root
-     * `compaction` pointer; with one in force the Host reads the combo's own field and
-     * never looks at the root, so this writes the combo instead. The settings row refuses
-     * while a combo is in force — right for a row you can walk away from, wrong here: a
-     * composer control that dies whenever a combo is on would be dead most of the time.
-     * @param props - composed slot props carrying the bound settings scope.
+     * It writes this session's own file. The instruction belongs to the conversation,
+     * not to the deployment: two conversations may summarise against two different
+     * templates, and choosing one here cannot change what another one sends.
+     * @param props - composed slot props carrying the bound settings scope and the
+     * session list.
      * @returns the chip element tree.
      */
     function CompactionChip(props) {
@@ -769,10 +829,9 @@ window.__ModuleLoader__.load({
       const getSnapshot = React.useCallback(() => scope.getSnapshot(), [scope])
       const snapshot = React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
       const entries = React.useMemo(() => entriesOf(snapshot), [snapshot])
-      const presets = React.useMemo(() => presetsOf(snapshot), [snapshot])
-      const active = React.useMemo(() => activePresetOf(snapshot, presets), [snapshot, presets])
+      const sessionId = useCurrentSession(props.sessions)
+      const session = useSessionChoice(sessionId)
       const [open, setOpen] = React.useState(false)
-      const [failed, setFailed] = React.useState(null)
 
       // Nothing to say until the namespace has answered, and nothing to offer on a host
       // that does not serve it at all.
@@ -780,15 +839,12 @@ window.__ModuleLoader__.load({
 
       const writable = snapshot.writable !== false && snapshot.mode !== 'memory'
       const choices = entries.filter((entry) => isCompaction(entry))
-      const root = snapshot.value && typeof snapshot.value.compaction === 'string'
-        ? snapshot.value.compaction
-        : NO_PRESET
-      // What the Host will actually use: the combo's own choice while one is in force,
-      // the root pointer otherwise. An id that names nothing — a section, or an entry
-      // that has since been deleted — reads as no instruction at all, which is exactly
-      // what `resolveCompaction` does with it, so the chip can never claim an
-      // instruction the next compaction will not send.
-      const current = active !== null ? active.compaction : root
+      // What the Host will actually use: this session's own choice and nothing else.
+      // An id that names nothing — a section, or an entry that has since been deleted
+      // — reads as no instruction at all, which is exactly what `resolveCompaction`
+      // does with it, so the chip can never claim an instruction the next compaction
+      // will not send.
+      const current = session.value.compaction
       const chosen = choices.find((entry) => entry.id === current) ?? null
       const items = choices.length === 0
         ? [{ id: 'no-entries', label: '还没有压缩指令：设置 → 提示词 → 新增压缩指令', disabled: true }]
@@ -797,29 +853,16 @@ window.__ModuleLoader__.load({
           ...choices.map((entry) => ({
             id: entry.id,
             label: `${entry.title}${current === entry.id ? '（当前）' : ''}`,
-            disabled: !writable,
+            disabled: !writable || sessionId === undefined,
           })),
         ]
 
       const choose = (id) => {
         setOpen(false)
-        if (id === current || id === 'no-entries') return
-        // One write either way, the same one the settings page makes. The preset list
-        // travels whole when a combo answers, because that field is replaced rather
-        // than patched — the same shape the page's own preset editor writes.
-        const write = active === null
-          ? scope.set('compaction', id)
-          : scope.set('presets', presets.map((preset) => (
-            preset.id === active.id ? { ...preset, compaction: id } : preset
-          )))
-        // The chip keeps showing the namespace's own answer, so a refused write leaves
-        // the old instruction in place rather than a selection that never reached the
-        // Host.
-        Promise.resolve(write)
-          .then(() => { setFailed(null) })
-          .catch((error) => {
-            setFailed(error && error.message ? error.message : String(error))
-          })
+        if (id === current || id === 'no-entries' || sessionId === undefined) return
+        // One field of one session's file, patched rather than replaced: the preset
+        // that session is using stays exactly as it is.
+        session.write({ compaction: id })
       }
 
       return h(SlotMenu, {
@@ -835,16 +878,16 @@ window.__ModuleLoader__.load({
           'aria-label': '切换压缩指令',
           'aria-haspopup': 'menu',
           'aria-expanded': open,
-          title: failed !== null
-            ? `切换失败：${failed}`
-            : !writable
-              ? '这个页面是只读的：局域网地址打开时设置通道退化为内存模式'
-              : active === null
-                ? '切换压缩指令（下一次压缩生效）'
-                : `切换组合「${active.name}」的压缩指令：组合生效时由它决定，这一选改动的是那个组合（下一次压缩生效）`,
+          title: session.failed !== null
+            ? `切换失败：${session.failed}`
+            : sessionId === undefined
+              ? '先打开一个会话：压缩指令是每个会话自己的选择'
+              : !writable
+                ? '这个页面是只读的：局域网地址打开时设置通道退化为内存模式'
+                : '切换本会话的压缩指令（下一次压缩生效，别的会话不受影响）',
           onClick: () => setOpen((wasOpen) => !wasOpen),
         }, h('span', { className: 'dsh-prompt-manager__composerChipLabel' },
-          failed !== null ? '压缩 · 切换失败' : `压缩 · ${chosen === null ? 'DSH 原文' : chosen.title}`)),
+          session.failed !== null ? '压缩 · 切换失败' : `压缩 · ${chosen === null ? 'DSH 原文' : chosen.title}`)),
       })
     }
 
@@ -864,40 +907,11 @@ window.__ModuleLoader__.load({
       const entries = React.useMemo(() => entriesOf(snapshot), [snapshot])
       const configured = React.useMemo(() => sourcesOf(snapshot), [snapshot])
       const presets = React.useMemo(() => presetsOf(snapshot), [snapshot])
-      const activePreset = React.useMemo(() => activePresetOf(snapshot, presets), [snapshot, presets])
-
-      /**
-       * The compaction entry in force, or `null` when the built-in text is.
-       *
-       * A combo answers this the way it answers which sections inject: its own
-       * field wins even when it points at nothing, because "use the built-in
-       * instruction" is a choice a combo makes rather than the absence of one.
-       * With no combo in force the root field decides — exactly what the Host
-       * reads back for itself.
-       */
-      const compactionId = React.useMemo(() => {
-        if (activePreset !== null) return activePreset.compaction
-        const value = snapshot && snapshot.value
-        return value && typeof value.compaction === 'string' ? value.compaction : NO_PRESET
-      }, [activePreset, snapshot])
-      const compactionEntry = React.useMemo(() => {
-        if (compactionId.length === 0) return null
-        return entries.find((entry) => entry.id === compactionId && isCompaction(entry)) ?? null
-      }, [compactionId, entries])
-      /**
-       * The document's own compaction pointer, whatever a combo may be overriding.
-       *
-       * Only this field may be written when an entry stops being an instruction: a
-       * combo's pointer belongs to the combo page. Releasing "the pointer that named
-       * it" against the combo-aware id above would clear the document's field whenever
-       * a combo happened to name that entry, dropping a root pointer aimed elsewhere.
-       */
-      const rootCompactionId = React.useMemo(() => {
-        const value = snapshot && snapshot.value
-        return value && typeof value.compaction === 'string' ? value.compaction : NO_PRESET
-      }, [snapshot])
-      /** Whether a combo, rather than the root field, answers the pointer. */
-      const compactionLocked = activePreset !== null
+      // Which preset and which compaction instruction are in force are facts about
+      // a *conversation*, not about this deployment, so this page reads neither of
+      // them: the document's `activePreset` and root `compaction` fields stopped
+      // deciding anything when the per-session store arrived, and a page that
+      // reported them would be describing a switch nobody reads.
       const [view, setView] = React.useState('list')
       const [filter, setFilter] = React.useState('all')
       const [selectedId, setSelectedId] = React.useState(null)
@@ -1156,27 +1170,15 @@ window.__ModuleLoader__.load({
               return
             }
           }
-          // A brand-new instruction is the one save that aims the pointer, and it
-          // does so only while the document's own pointer is what decides: with a
-          // combo in force this write would be inert now and would silently take
-          // over the day that combo is dropped. Creating the entry is still right —
-          // the combo's own selector is where it becomes current.
-          if (compactionDraft && draft.isNew && !compactionLocked && compactionId !== draft.id) {
-            try {
-              await scope.set('compaction', draft.id)
-            } catch (error) {
-              // The entry exists, so the row's own action can finish the job.
-              setStatus({ kind: 'error', text: `正文和索引都写好了，但「设为当前」没写进去：${error.message}（在列表里点它的「设为当前」即可）` })
-              await refreshStore()
-              return
-            }
-          }
+          // Saving a compaction instruction aims nothing. Which instruction a
+          // conversation sends is that conversation's own choice, so this save
+          // creates the entry and stops there: the composer's compaction chip is
+          // the only place it can be put in force, and it is in force for the
+          // conversations that pick it and for no others.
           setStatus({
             kind: 'info',
             text: compactionDraft
-              ? (compactionLocked
-                ? '已保存。当前有组合生效，由组合里的「压缩指令」决定用哪条；这条还不会生效。'
-                : '已保存，下一次压缩生效。')
+              ? '已保存。想让某个会话用它，在那个会话输入框那行的「压缩」芯片里选它。'
               : '已保存，下一个模型步骤生效。',
           })
           await refreshStore()
@@ -1185,7 +1187,7 @@ window.__ModuleLoader__.load({
         } finally {
           setBusy(false)
         }
-      }, [compactionDraft, compactionId, compactionLocked, draft, entries, refreshStore, scope])
+      }, [compactionDraft, draft, entries, refreshStore, scope])
 
       // ── presets ──────────────────────────────────────────────────────────────
 
@@ -1270,35 +1272,19 @@ window.__ModuleLoader__.load({
         if (!window.confirm(`删除组合「${preset.name}」？`)) return
         setBusy(true)
         try {
+          // One write. There is no selection to clear with it any more: no
+          // conversation's choice lived in this document, so deleting the preset
+          // some conversation happens to have chosen leaves that conversation
+          // reading an id that names nothing — which is exactly how the Host
+          // already treats a preset somebody deleted, and it says so in its log.
           await scope.set('presets', presets.filter((candidate) => candidate.id !== preset.id))
-          // Deleting the preset in force has to clear the selection too: the Host
-          // falls back to the entry switches either way, but leaving the id behind
-          // would make every page report a preset that is not there.
-          if (activePreset !== null && activePreset.id === preset.id) await scope.set('activePreset', NO_PRESET)
           setStatus({ kind: 'info', text: `已删除组合「${preset.name}」。` })
         } catch (error) {
           setStatus({ kind: 'error', text: error.message })
         } finally {
           setBusy(false)
         }
-      }, [activePreset, presets, scope])
-
-      const activatePreset = React.useCallback(async (id) => {
-        setBusy(true)
-        try {
-          await scope.set('activePreset', id)
-          setStatus({
-            kind: 'info',
-            text: id === NO_PRESET
-              ? '已取消组合：回到每条提示词自己的开关。'
-              : '已切换组合，下一个模型步骤生效。',
-          })
-        } catch (error) {
-          setStatus({ kind: 'error', text: error.message })
-        } finally {
-          setBusy(false)
-        }
-      }, [scope])
+      }, [presets, scope])
 
       // ── preset packs ─────────────────────────────────────────────────────────
 
@@ -1569,30 +1555,16 @@ window.__ModuleLoader__.load({
        * the next compaction, not at the next model step.
        * @param entry - the compaction entry to aim the pointer at, or the one to release.
        */
-      const setCompaction = React.useCallback((entry) => {
-        const next = compactionId === entry.id ? NO_PRESET : entry.id
-        setBusy(true)
-        Promise.resolve(scope.set('compaction', next))
-          .then(() => setStatus({
-            kind: 'info',
-            text: next.length === 0
-              ? '已改回 DSH 自带的压缩指令，下一次压缩生效。'
-              : `已把「${entry.title}」设为压缩指令，下一次压缩生效。`,
-          }))
-          .catch((error) => setStatus({ kind: 'error', text: error.message }))
-          .finally(() => setBusy(false))
-      }, [compactionId, scope])
-
       /**
        * Change what an entry is: a system prompt section, or the compaction
        * instruction.
        *
        * The body is untouched either way — the same text can be a section today
-       * and an instruction tomorrow — so this is one index write, plus the one
-       * step that a pointer aimed at this entry makes necessary: it may only ever
-       * name a compaction entry, so it has to let go in the same breath. Left
-       * alone, the Host would read a pointer at a section as "no instruction" and
-       * say so in its log, which is a mess to explain from here.
+       * and an instruction tomorrow — so this is one index write and nothing else.
+       * No pointer has to be released alongside it: the id an entry may be pointed
+       * at lives in each conversation's own file, and the Host already treats a
+       * conversation that names a section as one that named nothing, reporting it
+       * the same way it reports any unusable id.
        * @param compaction - whether the entry should become the compaction instruction.
        */
       const setKind = React.useCallback(async (compaction) => {
@@ -1600,15 +1572,14 @@ window.__ModuleLoader__.load({
         setBusy(true)
         try {
           const next = compaction ? { ...draft, kind: 'compaction' } : withoutKind(draft)
-          // A draft has written nothing yet, so there is no record to rewrite and no
-          // pointer to release: flipping it only changes what the save will write.
+          // A draft has written nothing yet, so there is no record to rewrite:
+          // flipping it only changes what the save will write.
           if (!draft.isNew) {
             const nextEntries = entries.map((entry) => {
               if (entry.id !== draft.id) return entry
               return compaction ? { ...entry, kind: 'compaction' } : withoutKind(entry)
             })
             await scope.set('entries', nextEntries)
-            if (!compaction && rootCompactionId === draft.id) await scope.set('compaction', NO_PRESET)
           }
           setDraft(next)
           // A draft stays a draft: marking it saved here would turn the save button
@@ -1618,8 +1589,8 @@ window.__ModuleLoader__.load({
             kind: 'info',
             text: compaction
               ? (draft.isNew
-                ? '已改成压缩指令；保存后它才进索引，想让它生效再点「设为当前」。'
-                : '已改成压缩指令。它不再进 system prompt，想让它生效点「设为当前」。')
+                ? '已改成压缩指令；保存后它才进索引，想让它生效就在会话输入框那行的「压缩」芯片里选它。'
+                : '已改成压缩指令。它不再进 system prompt，想让它生效就在会话的「压缩」芯片里选它。')
               : (draft.isNew
                 ? '已改回普通段落；保存后它才进索引，按开关注入。'
                 : '已改回普通段落，按开关注入；压缩指令回到 DSH 自带的那段。'),
@@ -1629,7 +1600,7 @@ window.__ModuleLoader__.load({
         } finally {
           setBusy(false)
         }
-      }, [draft, entries, rootCompactionId, scope])
+      }, [draft, entries, scope])
 
       const remove = React.useCallback((entry) => {
         if (!window.confirm(`删除「${entry.title}」？它的正文文件也会一起删除。`)) return
@@ -1639,10 +1610,9 @@ window.__ModuleLoader__.load({
         // a file the page no longer shows.
         request('DELETE', `/body/${encodeURIComponent(entry.id)}`)
           .then(() => scope.set('entries', entries.filter((candidate) => candidate.id !== entry.id)))
-          // The pointer may only ever name a compaction entry, so deleting the one it
-          // names has to let it go in the same breath: left alone, the Host would read
-          // a pointer at nothing and say so in its log at every compaction.
-          .then(() => (rootCompactionId === entry.id ? scope.set('compaction', NO_PRESET) : undefined))
+          // Nothing else to release: a conversation that had chosen this entry
+          // keeps the id in its own file and reads it as naming nothing, which is
+          // what the Host does with any id an index no longer carries.
           .then(async () => {
             if (selectedId === entry.id) {
               setDraft(null)
@@ -1654,7 +1624,7 @@ window.__ModuleLoader__.load({
           })
           .catch((error) => setStatus({ kind: 'error', text: error.message }))
           .finally(() => setBusy(false))
-      }, [entries, refreshStore, rootCompactionId, scope, selectedId])
+      }, [entries, refreshStore, scope, selectedId])
 
       // ── variables and scripts ────────────────────────────────────────────────
 
@@ -1954,15 +1924,9 @@ window.__ModuleLoader__.load({
           ]),
           ]),
           h('div', { key: 'actions', className: 'dsh-prompt-manager__actions' }, [            h(Button, { key: 'save', variant: 'primary', disabled: !writable || busy || !dirty, onClick: save }, dirty ? '保存修改' : '已保存'),
-            compactionDraft
-              ? h(Button, {
-                key: 'current',
-                // A draft cannot be put in force: the pointer may only name an entry
-                // the index holds, and this one is not written yet.
-                disabled: !writable || busy || compactionLocked || draft.isNew,
-                onClick: () => { void setCompaction(draft) },
-              }, compactionEntry !== null && compactionEntry.id === draft.id ? '取消当前' : '设为当前')
-              : null,
+            // No "set as current" here any more: which instruction a compaction sends
+            // is the conversation's own choice, so this page edits the text and says
+            // nothing about who is using it.
             compactionDraft
               ? h(Button, {
                 key: 'asSection',
@@ -1977,9 +1941,9 @@ window.__ModuleLoader__.load({
             subscribedDraft
               ? h(Button, { key: 'fork', disabled: !writable || busy, onClick: () => { void forkEntry() } }, 'fork 成本地条目')
               : null,
-            compactionDraft && compactionLocked
+            compactionDraft
               ? h('span', { key: 'note', className: 'dsh-prompt-manager__note' },
-                '当前有组合生效，由组合里的「压缩指令」决定用哪条；想单独控制就先取消组合。')
+                '这条是每会话各自选的：哪个会话用它，就在那个会话输入框那行的「压缩」芯片里选；本页不改任何会话的选择。')
               : null,
             subscribedDraft
               ? h('span', { key: 'note', className: 'dsh-prompt-manager__note' }, '订阅条目的正文来自上游，只能通过「检查更新」改；想自己改就先 fork。')
@@ -2444,7 +2408,9 @@ window.__ModuleLoader__.load({
 
       if (view === 'presets') {
         const cards = presets.map((preset) => {
-          const current = activePreset !== null && activePreset.id === preset.id
+          // No card is badged as in force: no combination is in force *here*. A
+          // combination is in force in a conversation, and each conversation says
+          // so in its own composer.
           return h('div', { key: preset.id, className: 'dsh-prompt-manager__card' }, [
             h('button', {
               key: 'open',
@@ -2463,7 +2429,6 @@ window.__ModuleLoader__.load({
               ]),
             ]),
             h('div', { key: 'side', className: 'dsh-prompt-manager__cardSide' }, [
-              current ? h('span', { key: 'badge', className: 'dsh-prompt-manager__badge' }, '当前') : null,
               h(RowMenu, {
                 key: 'menu',
                 open: menuFor === preset.id,
@@ -2471,8 +2436,10 @@ window.__ModuleLoader__.load({
                 items: [
                   { id: 'edit', label: '编辑', icon: icon('IconEditOutline16') },
                   { id: 'export', label: '导出组合包' },
-                  { id: 'activate', label: '设为当前', disabled: !writable || current },
-                  { id: 'clear', label: '取消当前', disabled: !writable || !current },
+                  // No "set as current" here any more: which combination is in force
+                  // is the conversation's own choice, made from that conversation's
+                  // composer, so a switch on this page could only mean "for every
+                  // conversation at once" — which is what this change removed.
                   { id: 'delete', label: '删除', icon: icon('IconTrashOutline16'), disabled: !writable },
                 ],
                 onToggle: () => setMenuFor(menuFor === preset.id ? null : preset.id),
@@ -2481,8 +2448,6 @@ window.__ModuleLoader__.load({
                   setMenuFor(null)
                   if (id === 'edit') openPreset(preset)
                   else if (id === 'export') { void exportPreset(preset) }
-                  else if (id === 'activate') { void activatePreset(preset.id) }
-                  else if (id === 'clear') { void activatePreset(NO_PRESET) }
                   else if (id === 'delete') { void removePreset(preset) }
                 },
               }),
@@ -2496,7 +2461,7 @@ window.__ModuleLoader__.load({
             h('h2', { key: 'title', className: 'dsh-prompt-manager__headTitle' }, '组合'),
           ]),
           h('p', { key: 'lede', className: 'dsh-prompt-manager__intro' },
-            '一个组合 = 挑一组提示词。当前组合在下一个模型步骤生效，决定注入哪些条目；它管选哪些，不管顺序（顺序仍是每条自己的）。切换在聊天页输入栏右侧的「提示词」上。'),
+            '一个组合 = 挑一组提示词。用哪个组合由每个会话自己选：在会话输入框那行的「提示词」芯片里切，切完只影响那个会话，下一个模型步骤生效。它管选哪些，不管顺序（顺序仍是每条自己的）。'),
           presets.length === 0
             ? h('div', { key: 'empty', className: 'dsh-prompt-manager__empty' }, '还没有组合。点「新建组合」挑几条提示词试试。')
             : h('div', { key: 'cards', className: 'dsh-prompt-manager__list' }, cards),
@@ -2548,16 +2513,11 @@ window.__ModuleLoader__.load({
 
       const rows = visible.map((entry) => {
         const compaction = isCompaction(entry)
-        // What this entry contributes right now. An active preset answers it by
-        // itself, so the row's state dot has to follow the preset rather than the
-        // switch — otherwise the page would show a prompt as on while the prompt
-        // it describes is not being injected. A compaction entry answers a
-        // different question with the same dot: whether the pointer is aimed at it.
-        const injected = compaction
-          ? compactionEntry !== null && compactionEntry.id === entry.id
-          : activePreset === null
-            ? entry.enabled === true
-            : activePreset.entries.includes(entry.id)
+        // What this row can honestly report: the entry's own switch. Whether a
+        // prompt actually reaches a model now depends on the combination the
+        // conversation it belongs to chose, which this page cannot see — so it
+        // shows the switch it owns and claims nothing about the rest.
+        const injected = compaction ? false : entry.enabled === true
         const subscribed = isSubscribed(entry)
         const source = subscribed ? sourceById.get(entry.source) : undefined
         // The metadata line sits outside the row's button so the repository can be
@@ -2572,7 +2532,7 @@ window.__ModuleLoader__.load({
         const meta = compaction
           ? [
             ['本地'],
-            activePreset === null ? [] : [`组合：${injected ? '生效' : '不生效'}`],
+            [],
           ].filter((group) => group.length > 0)
           : [
             subscribed
@@ -2592,7 +2552,7 @@ window.__ModuleLoader__.load({
                   }, source.repo),
                 ]
               : ['本地'],
-            activePreset === null ? [] : [`组合：${injected ? '注入' : '不注入'}`],
+            [],
           ].filter((group) => group.length > 0)
         return h('div', {
           key: entry.id,
@@ -2619,54 +2579,38 @@ window.__ModuleLoader__.load({
               : isSubscribed(entry)
                 ? h('span', { key: 'badge', className: 'dsh-prompt-manager__badge' }, '订阅')
                 : null,
-            // A section's switch answers `enabled`; a compaction entry's answers the
-            // pointer. A compaction entry has no system-prompt section to switch —
-            // `reconcile()` never gives it one — so its `enabled` flag decides nothing,
-            // while the pointer is exactly what makes it live. "On" therefore means
-            // "this is the entry DSH's instruction is replaced with", which is true of
-            // at most one entry at a time; and a combo answers the pointer by itself, so
-            // the switch is refused while one is in force, the same rule the … menu uses.
-            h(Switch, {
-              key: 'switch',
-              checked: compaction ? injected : entry.enabled === true,
-              label: entry.title,
-              disabled: !writable || busy || (compaction && compactionLocked),
-              onChange: () => {
-                if (compaction) void setCompaction(entry)
-                else toggle(entry, entry.enabled !== true)
-              },
-            }),
+            // A section's switch answers `enabled`. A compaction entry has no
+            // switch: its `enabled` flag decides nothing (`reconcile()` never gives
+            // it a system-prompt section), and the pointer that used to make it live
+            // is now one file per conversation. A control here could only write a
+            // field nothing reads, or speak for every conversation at once — so the
+            // row says where that choice actually lives instead.
+            compaction
+              ? h('span', { key: 'switch', className: 'dsh-prompt-manager__note' }, '每会话自选')
+              : h(Switch, {
+                key: 'switch',
+                checked: injected,
+                label: entry.title,
+                disabled: !writable || busy,
+                onChange: () => { toggle(entry, entry.enabled !== true) },
+              }),
             h(RowMenu, {
               key: 'menu',
               open: menuFor === entry.id,
               label: `更多操作：${entry.title}`,
-              items: compaction
-                ? [
-                  { id: 'edit', label: '编辑', icon: icon('IconEditOutline16') },
-                  {
-                    id: 'current',
-                    label: injected ? '取消当前' : '设为当前',
-                    // The icon follows the label: a check for the action that makes this
-                    // the instruction, a cross for the one that hands the next compaction
-                    // back to DSH. Without it this row read as an entry of a different
-                    // kind from the two beside it.
-                    icon: icon(injected ? 'IconCloseOutline16' : 'IconCheckOutline16'),
-                    // A combo answers the pointer, so offering to write the root
-                    // field here would be an action that changes nothing.
-                    disabled: !writable || busy || compactionLocked,
-                  },
-                  { id: 'delete', label: '删除', icon: icon('IconTrashOutline16'), disabled: !writable },
-                ]
-                : [
-                  { id: 'edit', label: '编辑', icon: icon('IconEditOutline16') },
-                  { id: 'delete', label: '删除', icon: icon('IconTrashOutline16'), disabled: !writable },
-                ],
+              items: [
+                { id: 'edit', label: '编辑', icon: icon('IconEditOutline16') },
+                // No "set as current" here any more: a compaction instruction is
+                // chosen per conversation, from that conversation's own chip, so an
+                // action on this page could only speak for every conversation at
+                // once — the thing this change removed.
+                { id: 'delete', label: '删除', icon: icon('IconTrashOutline16'), disabled: !writable },
+              ],
               onToggle: () => setMenuFor(menuFor === entry.id ? null : entry.id),
               onClose: () => setMenuFor(null),
               onSelect: (id) => {
                 setMenuFor(null)
                 if (id === 'edit') select(entry)
-                else if (id === 'current') { void setCompaction(entry) }
                 else if (id === 'delete') remove(entry)
               },
             }),
@@ -2704,8 +2648,11 @@ window.__ModuleLoader__.load({
           : matches > 0
             ? `已见到 ${String(matches)} 次压缩，尚未替换`
             : '还没有遇到压缩'
+        // The counters are all this page can honestly say about the instruction:
+        // which one is in force is a fact about a conversation, and the number of
+        // replacements is what a person can match against a conversation's chip.
         return [
-          `压缩指令：${compactionTitleOf(compactionId)}`,
+          '压缩指令：每个会话自己选',
           usage,
           typeof report.lastReplacedAt === 'string' && report.lastReplacedAt.length > 0
             ? `最近 ${stamp(report.lastReplacedAt)}`
@@ -2740,11 +2687,14 @@ window.__ModuleLoader__.load({
         // are the only place a person can see whether it is being used at all.
         store === null ? null : h('p', { key: 'compaction', className: 'dsh-prompt-manager__note' }, compactionReport()),
         note === null ? null : h('p', { key: 'note', className: 'dsh-prompt-manager__note' }, note),
-        activePreset === null
-          ? null
-          : h('p', { key: 'preset', className: 'dsh-prompt-manager__note' }, [
-            `当前组合「${activePreset.name}」生效中（${String(activePreset.entries.length)} 条）—— 单条开关只在「不用组合」时生效。`,
-          ]),
+        // Which combination is in force is now a per-conversation fact, so this page
+        // can no longer report one: it edits the combinations, the composer of each
+        // conversation picks between them.
+        h('p', { key: 'preset', className: 'dsh-prompt-manager__note' }, [
+          '哪个组合生效由每个会话自己决定：在会话输入框那一行的「提示词」芯片里切，本页只管组合的内容。',
+          '单条的开关键只在那个会话选了「不用组合」时起作用。',
+          '压缩指令同理：本页只管有哪些压缩指令，用哪条在那个会话输入框那行的「压缩」芯片里选。',
+        ]),
         store !== null && store.writable === false
           ? h('p', { key: 'unwritable', className: 'dsh-prompt-manager__status dsh-prompt-manager__status--error' }, '正文目录不可写，编辑器已禁用；开关和排序仍然可用。')
           : null,
@@ -2842,7 +2792,9 @@ window.__ModuleLoader__.load({
     // `settingsScope` is a hard requirement: this section is nothing but the
     // index it serves, so a host without the settings domain mounts nothing
     // rather than rendering controls that cannot persist.
-    const inject = ['slots', 'settingsScope']
+    // `sessions` carries the open session's id, which is what tells one chip
+    // instance from another and which conversation's choice to read.
+    const inject = ['slots', 'settingsScope', 'sessions']
 
     /**
      * Register the settings section and the composer chip.
@@ -2854,6 +2806,11 @@ window.__ModuleLoader__.load({
      */
     function apply(ctx) {
       const scope = ctx.settingsScope.bind({ namespace: NAMESPACE })
+      // The open session is read from the session controller's own list rather
+      // than guessed at, and it is threaded to the chips beside the scope: a chip
+      // instance is drawn for whatever conversation the composer belongs to, and
+      // the list is the only thing that knows which one that is.
+      const sessions = ctx.sessions === undefined ? undefined : ctx.sessions.list
       ctx.effect(() => {
         const tag = injectStyle()
         return () => { if (tag !== null) tag.remove() }
@@ -2872,12 +2829,12 @@ window.__ModuleLoader__.load({
           name: PRESET_SLOT,
           id: NAMESPACE,
           order: 10,
-        }, (props) => h(Boundary, { label: '提示词组合' }, h(PresetChip, { ...props, scope }))),
+        }, (props) => h(Boundary, { label: '提示词组合' }, h(PresetChip, { ...props, scope, sessions }))),
         ctx.slots.register({
           name: PRESET_SLOT,
           id: COMPACTION_CHIP_ID,
           order: 11,
-        }, (props) => h(Boundary, { label: '压缩指令' }, h(CompactionChip, { ...props, scope }))),
+        }, (props) => h(Boundary, { label: '压缩指令' }, h(CompactionChip, { ...props, scope, sessions }))),
       ])
     }
 

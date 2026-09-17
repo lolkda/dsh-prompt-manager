@@ -57,6 +57,7 @@ import {
   type SchemaFactory,
 } from './entries.js'
 import { installCompactionPrompt, type CompactionPromptStats } from './compaction.js'
+import { SessionChoices } from './sessions.js'
 import { installPromptRoutes } from './routes.js'
 import { sanitizeReferences } from './guard.js'
 import {
@@ -677,12 +678,73 @@ export function apply(ctx: Context, config: Config = {}): void {
    * model step with no re-registration — section text is a callback, and neither
    * a preset's name nor its membership is part of a section's identity.
    */
-  let activePreset: PromptPreset | undefined
+  /**
+   * Parsed presets for the current settings document, rebuilt on every commit.
+   *
+   * Cached rather than re-parsed per section: one assembly asks which preset is
+   * in force once per registered entry, and the answer is the same every time.
+   */
+  let presetList: PromptPreset[] = []
 
-  /** Whether the "no such preset" report has already been made for this mount. */
-  let presetReported = false
-  /** The last set of missing preset members reported, so it is said once. */
-  let danglingReported = ''
+  /** Id of the last "no such preset" report, so one broken choice says so once. */
+  let presetReported = ''
+
+  /**
+   * The per-session half of the index: which preset and which compaction
+   * instruction one conversation chose.
+   *
+   * The index above is a catalog and stays one document for the deployment. What
+   * belongs to a conversation is only the pick — and a pick made in one
+   * conversation must never reach another, which is why it lives in its own file
+   * per session instead of in the settings document every session reads.
+   */
+  const choices = new SessionChoices(resolveStoreDir(config))
+
+  /**
+   * The preset a session put in force, or `undefined` for each entry's own switch.
+   *
+   * A session that chose nothing, a session whose preset has since been deleted,
+   * and an assembly that names no session at all answer the same way: each entry's
+   * own switch decides. That is the one answer which cannot change another
+   * conversation's prompt, and the one a person can always reason about.
+   *
+   * @param sessionId - the session this assembly is for, when the caller says.
+   * @returns the preset in force for that session, or `undefined`.
+   */
+  function presetInForceFor(sessionId: string | undefined): PromptPreset | undefined {
+    const wanted = choices.effective(sessionId).preset
+    if (wanted.length === 0) return undefined
+    const found = presetList.find((preset) => preset.id === wanted)
+    if (found !== undefined) return found
+    if (presetReported !== wanted) {
+      presetReported = wanted
+      warn(ctx, `会话选用的组合 ${wanted} 不存在（可能已被删除）：本次组装回到每条自己的开关`)
+    }
+    return undefined
+  }
+
+  /**
+   * The session one assembly is for, when the caller names it.
+   *
+   * Read structurally rather than declared: `AssembleContext` is merge-extensible
+   * and `@deepseek-ai/dsh-agent` is the package that augments it with the agent a
+   * section provider is called for, so naming the field here keeps this plugin
+   * from depending on that package to say what it already receives.
+   *
+   * @param context - the assembly context a section provider is handed.
+   * @returns the session id, or `undefined` when no agent is in view.
+   */
+  function sessionIdOf(context: unknown): string | undefined {
+    const agent = (context as { agent?: { session?: { id?: unknown } } } | null | undefined)?.agent
+    const id = agent?.session?.id
+    return typeof id === 'string' ? id : undefined
+  }
+  /**
+   * The id sets already reported as missing from a preset, one signature per
+   * preset, so a preset left broken for a week says so once rather than on every
+   * assembly.
+   */
+  const danglingReported = new Set<string>()
   /** Where each subscribed entry's body lives; refreshed when settings commit. */
   let locations = new Map<string, SubscriptionLocation>()
   /** How the engine writes the index back; present only with a settings service. */
@@ -728,22 +790,14 @@ export function apply(ctx: Context, config: Config = {}): void {
   }
 
   /**
-   * Adopt the preset `activePreset` names.
+   * Re-read the configured presets from the document that just committed.
    *
-   * A name that resolves to nothing — the preset was deleted, or a hand-edited
-   * document misspells it — falls back to the entries' own switches rather than
-   * freezing the prompt on whatever was active. That is a state somebody has to
-   * be able to see, so it is reported once instead of failing anything.
-   *
-   * @param document - the resolved settings document.
+   * The presets are catalog: every session picks from this same list, and the
+   * pick itself lives in that session's own file. This is therefore the only
+   * place the list is parsed, however many sections ask who is in force.
    */
-  function setActivePreset(document: unknown): void {
-    const wanted = activePresetOf(fieldOf(document, 'activePreset'))
-    const presets = presetsInForce()
-    activePreset = wanted.length === 0 ? undefined : presets.find((preset) => preset.id === wanted)
-    if (wanted.length === 0 || activePreset !== undefined || presetReported) return
-    presetReported = true
-    warn(ctx, `组合 ${wanted} 不存在（可能已被删除）：本次挂载回到每条自己的开关`)
+  function refreshPresets(): void {
+    presetList = presetsInForce()
   }
 
   /** Reports already made about the compaction pointer, by signature. */
@@ -752,10 +806,10 @@ export function apply(ctx: Context, config: Config = {}): void {
   /**
    * The compaction instruction in force, or `undefined` to send DSH's own.
    *
-   * A preset answers "which prompts are in force" as a whole, so while one is
-   * active its pointer decides — including when it points at nothing, which
-   * means the stock instruction rather than falling back to the document's. With
-   * no preset, the document's own pointer decides.
+   * The session answers this, and nothing else does: the instruction its own
+   * choice names, or DSH's own text when it chose none. A pointer in the shared
+   * document could only answer for every conversation at once, which is exactly
+   * the bleeding this seam exists to avoid.
    *
    * Every way this can come up empty is reported once and then resolves to the
    * stock instruction. Sending an empty instruction would be worse than useless:
@@ -764,10 +818,8 @@ export function apply(ctx: Context, config: Config = {}): void {
    *
    * @returns the entry id and body to send, or `undefined` for the stock one.
    */
-  function resolveCompaction(): { id: string; text: string } | undefined {
-    const wanted = activePreset !== undefined
-      ? activePreset.compaction
-      : activeCompactionOf(fieldOf(resolved, 'compaction'))
+  function resolveCompaction(sessionId: string | undefined): { id: string; text: string } | undefined {
+    const wanted = choices.effective(sessionId).compaction
     if (wanted.length === 0) return undefined
 
     const entry = byId.get(wanted)
@@ -1025,19 +1077,24 @@ export function apply(ctx: Context, config: Config = {}): void {
   }
 
   /**
-   * The text one entry contributes right now, or `''` when it contributes none.
+   * The text one entry contributes to one session right now, or `''` when it
+   * contributes none.
    *
-   * An active preset answers "is this entry on" by itself, so switching one is a
-   * single settings write with no bookkeeping: every entry keeps the `enabled`
-   * value a person gave it, for the times when no preset is in force.
+   * A preset in force answers "is this entry on" by itself, and it is the only
+   * thing that does: the entry's own switch is left exactly as a person set it,
+   * for every session that chose no preset. Switching a preset is therefore one
+   * small file write that loses nothing, and cancelling one puts the switches
+   * back the way they were found.
    *
+   * @param sessionId - the session this assembly is for, when the caller says.
    * @param id - entry id.
    * @returns the interpolatable body, or the empty string.
    */
-  function render(id: string): string {
+  function render(sessionId: string | undefined, id: string): string {
     const entry = byId.get(id)
     if (entry === undefined) return ''
-    const on = activePreset === undefined ? entry.enabled : activePreset.entries.includes(entry.id)
+    const preset = presetInForceFor(sessionId)
+    const on = preset === undefined ? entry.enabled : preset.entries.includes(entry.id)
     return on ? describe(id).text : ''
   }
 
@@ -1119,7 +1176,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       const disposer = ctx.effect(() => ctx.systemPrompt.section({
         name: section,
         order: entryOrder,
-        text: () => render(entry.id),
+        text: (context) => render(sessionIdOf(context), entry.id),
       }), `dsh-prompt-manager.section(${section})`)
       sections.set(entry.id, { disposer, name: section, order: entryOrder })
     }
@@ -1142,25 +1199,31 @@ export function apply(ctx: Context, config: Config = {}): void {
    * as a section, and it costs exactly one prompt from the set.
    */
   function reportDanglingMembers(): void {
-    const named = activePreset === undefined ? [] : activePreset.entries
-    const missing = named.filter((id) => !byId.has(id))
-    const misplaced = named.filter((id) => byId.get(id)?.kind === 'compaction')
-    const signature = `${activePreset?.id ?? ''}:${missing.join(',')}:${misplaced.join(',')}`
-    if ((missing.length === 0 && misplaced.length === 0) || signature === danglingReported) return
-    danglingReported = signature
-    const presetId = activePreset?.id ?? ''
-    if (missing.length > 0) {
+    // Every configured preset is checked, not merely whichever one a session happens
+    // to be using: a preset is a promise about what injecting it does, and that
+    // promise is broken whether or not anybody is using it today. Each preset is
+    // keyed on its own signature and named in its own report, because "one of your
+    // presets is broken" is not an answer anybody can act on.
+    for (const preset of presetList) {
+      // Both kinds are read from the *whole* member list, not from one another:
+      // a misplaced member is in the index, so it is by definition not absent, and
+      // filtering it out of the absent set is what made this report never fire.
+      const absent = preset.entries.filter((id) => !byId.has(id))
+      const misplaced = preset.entries.filter((id) => byId.get(id)?.kind === 'compaction')
+      const signature = `${preset.id}:${absent.join(',')}:${misplaced.join(',')}`
+      if (danglingReported.has(signature)) continue
+      danglingReported.add(signature)
+      if (absent.length === 0 && misplaced.length === 0) continue
+      const parts: string[] = []
+      if (absent.length > 0) {
+        parts.push(`${String(absent.length)} 条不在索引里：${absent.join('、')}`)
+      }
+      if (misplaced.length > 0) {
+        parts.push(`${String(misplaced.length)} 条是压缩指令而不是段落：${misplaced.join('、')}`)
+      }
       warn(
         ctx,
-        `组合 ${presetId} 里有 ${String(missing.length)} 条不在索引里：${missing.join('、')}`
-        + '（订阅没拉回来，或上游改了文件名）。这些条目这一轮不注入。',
-      )
-    }
-    if (misplaced.length > 0) {
-      warn(
-        ctx,
-        `组合 ${presetId} 里有 ${String(misplaced.length)} 条是压缩指令：${misplaced.join('、')}`
-        + '。压缩指令不进 system prompt，所以这几条不会注入 —— 把它们从组合成员里去掉，或改回普通段落。',
+        `组合 ${preset.id} 里${parts.join('；')}。这些条目这一轮不注入（订阅没拉回来，或上游改了文件名）。`,
       )
     }
   }
@@ -1244,6 +1307,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   installPromptRoutes(ctx, {
     store,
+    sessions: choices,
     describe,
     idFor: (title) => entryIdFor(title, takenIds()),
     presetIds: () => presetsInForce().map((preset) => preset.id),
@@ -1312,7 +1376,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
       const sync = (): void => {
         resolved = scope.get()
-        setActivePreset(resolved)
+        refreshPresets()
         const entries = parseEntries(resolved)
         reportTruncation(resolved, entries.length)
         active.length = 0
@@ -1325,7 +1389,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     })
   }
 
-  setActivePreset(resolved)
+  refreshPresets()
   locations = subscriptions.refreshLocations()
   reconcile(active)
 }
