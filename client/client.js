@@ -11,12 +11,6 @@
  * `ctx.settingsScope`; the bodies ride the plugin's own `/dsh-prompt-manager`
  * route, because they are markdown files on disk.
  *
- * Beside that page the bundle owns two controls —「提示词 · …」and「压缩 · …」— and
- * gives each of them two seats: the session header's utilities, where neither the
- * input box nor the transcript can move them, and the composer tool row, which is
- * the only seat left while a session is blank. The two seats settle between
- * themselves which one shows — see {@link Fallback}.
- *
  * Built in the client module system's lazy-CJS factory format by hand, so the
  * package needs no bundler: the factory only requests modules the shell's
  * platform table already carries (`react` and the UI primitives).
@@ -43,34 +37,16 @@ window.__ModuleLoader__.load({
     const SECTION_ORDER = 60
 
     /**
-     * The chips' resident seat: the session header's right-aligned utilities.
-     *
-     * Past the header's title cluster rather than inside it, which is why this is
-     * not `conversation.session.header.actions`: that seat rides right after the
-     * breadcrumb, and the Host names a session after its first turn, so its own
-     * title would push the chips around. Here the corner control pins the group
-     * and the title gives way instead.
-     *
-     * The slot's own row is the title's, and the chips are drawn on the view tabs'
-     * row below it — the row a person looks in for them. That step is the sheet's
-     * `__seat` transform; the slot still decides where the row lives and how far
-     * right it ends.
+     * The composer slot the preset chip claims: the tool row's trailing group,
+     * in front of the model selector, which is where a person looks when they
+     * want to change what this conversation is working with.
      */
-    const HEADER_SLOT = 'conversation.session.header.utilities'
+    const PRESET_SLOT = 'conversation.input.right'
 
     /**
-     * The chips' fallback seat: the composer tool row's trailing group, in front
-     * of the model selector. The Host renders no part of the session header while
-     * a session is still blank — the Hero chrome stands in for it — so a
-     * header-only chip would vanish exactly where a preset is most useful, before
-     * the first message. See {@link Fallback} for how the two share the work.
-     */
-    const COMPOSER_SLOT = 'conversation.input.right'
-
-    /**
-     * The id the compaction chip claims in those seats. A seat is a list, so the two
-     * chips share its slot name but not their id — a slot keyed by id would otherwise
-     * treat the second registration as a replacement for the first.
+     * The id the compaction chip claims in that row. The row is a list, so the two chips
+     * share its slot name but not their id — a slot keyed by id would otherwise treat
+     * the second registration as a replacement for the first.
      */
     const COMPACTION_CHIP_ID = `${NAMESPACE}-compaction`
 
@@ -216,27 +192,14 @@ window.__ModuleLoader__.load({
 .dsh-prompt-manager__memberLabel{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsh-prompt-manager__memberId{flex:0 0 auto;font-family:var(--ds-font-family-code,ui-monospace,monospace);font-size:11px;color:var(--dsw-alias-label-tertiary)}
 
-/* the chip: one compact control, drawn in whichever seat is showing (HEADER_SLOT) */
-.dsh-prompt-manager__chip{box-sizing:border-box;max-width:240px;height:28px;padding:0 10px;display:inline-flex;align-items:center;gap:6px;border:0;border-radius:14px;background:0 0;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;line-height:1;white-space:nowrap;overflow:hidden;cursor:pointer}
-.dsh-prompt-manager__chip:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
-.dsh-prompt-manager__chip--on{color:var(--dsw-alias-label-primary)}
-.dsh-prompt-manager__chipLabel{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-
-/* The line the resident seat borrows: the Host's header has one right-aligned seat
-   (conversation.session.header.utilities) and it rides the title row, where a chip floats between the
-   title and the views; the row a person actually looks in — the view tabs' row — has no
-   seat at all, because the Host fills that div with view buttons and nothing else. So the
-   chip is laid out where the seat puts it and then moved down onto the tab line, which is
-   why this is a transform: the header's rows are fixed-height, and a chip that grew one
-   of them would push the corner control with it.
-   The offset is the distance between the two rows' centre lines, as the Host's own sheet
-   lays them out: title row = 10px padding + 30px row => centre 25; tab label = 10 + 30 +
-   10px margin + 16px line-height => centre 58; difference 33. It is a copy of another
-   package's metrics that nothing at runtime can verify, so test/client.mjs pins it. */
-.dsh-prompt-manager__seat{transform:translateY(33px)}
+/* the composer chip: one compact control in the tool row below the input box */
+.dsh-prompt-manager__composerChip{box-sizing:border-box;max-width:240px;height:28px;padding:0 10px;display:inline-flex;align-items:center;gap:6px;border:0;border-radius:14px;background:0 0;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;line-height:1;white-space:nowrap;overflow:hidden;cursor:pointer}
+.dsh-prompt-manager__composerChip:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.dsh-prompt-manager__composerChip--on{color:var(--dsw-alias-label-primary)}
+.dsh-prompt-manager__composerChipLabel{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* the shell marks keyboard focus with a 2px business-colour ring; keep that */
-.dsh-prompt-manager__tab:focus-visible,.dsh-prompt-manager__button:focus-visible,.dsh-prompt-manager__addButton:focus-visible,.dsh-prompt-manager__cardMain:focus-visible,.dsh-prompt-manager__iconButton:focus-visible,.dsh-prompt-manager__chip:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
+.dsh-prompt-manager__tab:focus-visible,.dsh-prompt-manager__button:focus-visible,.dsh-prompt-manager__addButton:focus-visible,.dsh-prompt-manager__cardMain:focus-visible,.dsh-prompt-manager__iconButton:focus-visible,.dsh-prompt-manager__composerChip:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
 `.trim()
 
     /**
@@ -707,16 +670,11 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The preset chip: which prompt preset is in force, and the control that
+     * The composer chip: which prompt preset is in force, and the control that
      * switches it.
      *
-     * It draws in whichever seat {@link apply} gives it — the session header, or
-     * the composer tool row while a session is blank — so the set can be swapped
-     * from where a person is already looking instead of through Settings. The
-     * component never asks which seat it is in: it uses nothing but the bound
-     * scope, so both seats show the same chips at the same time.
-     *
-     * Everything it shows comes from the
+     * It rides the composer tool row so the set can be swapped from beside the
+     * input box instead of through Settings. Everything it shows comes from the
      * settings namespace itself — the presets, and which one is active — so a
      * change made on the settings page shows up here with no wiring of its own,
      * and a switch here is one settings write that the next model step already
@@ -772,8 +730,8 @@ window.__ModuleLoader__.load({
         anchor: h('button', {
           type: 'button',
           className: active === null
-            ? 'dsh-prompt-manager__chip'
-            : 'dsh-prompt-manager__chip dsh-prompt-manager__chip--on',
+            ? 'dsh-prompt-manager__composerChip'
+            : 'dsh-prompt-manager__composerChip dsh-prompt-manager__composerChip--on',
           'aria-label': '切换提示词组合',
           'aria-haspopup': 'menu',
           'aria-expanded': open,
@@ -783,7 +741,7 @@ window.__ModuleLoader__.load({
               ? '切换提示词组合（下一个模型步骤生效）'
               : '这个页面是只读的：局域网地址打开时设置通道退化为内存模式',
           onClick: () => setOpen((wasOpen) => !wasOpen),
-        }, h('span', { className: 'dsh-prompt-manager__chipLabel' },
+        }, h('span', { className: 'dsh-prompt-manager__composerChipLabel' },
           failed !== null ? '提示词 · 切换失败' : `提示词 · ${active === null ? '按开关' : active.name}`)),
       })
     }
@@ -792,7 +750,7 @@ window.__ModuleLoader__.load({
      * The compaction chip: which compaction instruction runs, and the control that
      * switches it.
      *
-     * The twin of the preset chip beside it — same namespace, same seats, same one-write
+     * The twin of the preset chip beside it — same namespace, same row, same one-write
      * shape — answering the other half of the question. That chip decides which sections
      * go into the prompt; this one decides which instruction replaces DSH's own when a
      * context compaction summarises the conversation.
@@ -801,7 +759,7 @@ window.__ModuleLoader__.load({
      * `compaction` pointer; with one in force the Host reads the combo's own field and
      * never looks at the root, so this writes the combo instead. The settings row refuses
      * while a combo is in force — right for a row you can walk away from, wrong here: a
-     * control that dies whenever a combo is on would be dead most of the time.
+     * composer control that dies whenever a combo is on would be dead most of the time.
      * @param props - composed slot props carrying the bound settings scope.
      * @returns the chip element tree.
      */
@@ -872,8 +830,8 @@ window.__ModuleLoader__.load({
         anchor: h('button', {
           type: 'button',
           className: chosen === null
-            ? 'dsh-prompt-manager__chip'
-            : 'dsh-prompt-manager__chip dsh-prompt-manager__chip--on',
+            ? 'dsh-prompt-manager__composerChip'
+            : 'dsh-prompt-manager__composerChip dsh-prompt-manager__composerChip--on',
           'aria-label': '切换压缩指令',
           'aria-haspopup': 'menu',
           'aria-expanded': open,
@@ -885,7 +843,7 @@ window.__ModuleLoader__.load({
                 ? '切换压缩指令（下一次压缩生效）'
                 : `切换组合「${active.name}」的压缩指令：组合生效时由它决定，这一选改动的是那个组合（下一次压缩生效）`,
           onClick: () => setOpen((wasOpen) => !wasOpen),
-        }, h('span', { className: 'dsh-prompt-manager__chipLabel' },
+        }, h('span', { className: 'dsh-prompt-manager__composerChipLabel' },
           failed !== null ? '压缩 · 切换失败' : `压缩 · ${chosen === null ? 'DSH 原文' : chosen.title}`)),
       })
     }
@@ -2867,77 +2825,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * The two seats' one bit of shared state, and the components that read it.
-     *
-     * The header seat is registered unconditionally — while the Host hides its
-     * header chrome it renders none of the header, so that seat is simply not
-     * there — and the composer seat covers exactly that state. They must never show
-     * together, and they settle that between themselves rather than by copying the
-     * Host's own blank rule: a mounted header seat *is* a rendered session header,
-     * so counting mounts answers the question, keeps answering it if the Host
-     * changes what "blank" means, and never has to read the DOM.
-     */
-    let residentSeats = 0
-    const seatListeners = new Set()
-
-    /**
-     * Subscribe to the seat count — the fallback's external store.
-     * @param listener - called whenever the count moves.
-     * @returns the unsubscribe function React expects.
-     */
-    function subscribeSeats(listener) {
-      seatListeners.add(listener)
-      return () => { seatListeners.delete(listener) }
-    }
-
-    /**
-     * Read the seat count. A number, so a snapshot compares by value.
-     * @returns how many resident seats are mounted.
-     */
-    function readSeats() {
-      return residentSeats
-    }
-
-    /** Announce that the seat count moved, waking every fallback. */
-    function publishSeats() {
-      for (const listener of [...seatListeners]) listener()
-    }
-
-    /**
-     * A resident seat: draws wherever the Host draws the session header, counts itself
-     * in for as long as it stays mounted, and carries the row the stylesheet moves it
-     * onto — see `__seat` in the sheet, and `HEADER_SLOT` for why it is that row and not
-     * the one the slot hands it.
-     * @param props - the chip element to draw.
-     * @returns the seat's row, holding the chip.
-     */
-    function Resident(props) {
-      // A layout effect, not an effect: the fallback reads zero during the render
-      // of the same commit, and a passive effect would leave both seats on screen
-      // for one painted frame each time a session gains its header.
-      React.useLayoutEffect(() => {
-        residentSeats += 1
-        publishSeats()
-        return () => {
-          residentSeats -= 1
-          publishSeats()
-        }
-      }, [])
-      return h('span', { className: 'dsh-prompt-manager__seat' }, props.children)
-    }
-
-    /**
-     * The fallback seat: draws the chip only while no resident seat is mounted,
-     * which is exactly while the session has no header to put it in.
-     * @param props - the chip element to draw.
-     * @returns the chip element, or null while a resident seat is showing.
-     */
-    function Fallback(props) {
-      const residents = React.useSyncExternalStore(subscribeSeats, readSeats, readSeats)
-      return residents === 0 ? props.children : null
-    }
-
     /** Attach this bundle's stylesheet to the document. */
     function injectStyle() {
       const existing = document.querySelector(`style[data-plugin-css=${JSON.stringify(STYLE_ID)}]`)
@@ -2958,13 +2845,11 @@ window.__ModuleLoader__.load({
     const inject = ['slots', 'settingsScope']
 
     /**
-     * Register the settings section and both chips, each in both of its seats.
+     * Register the settings section and the composer chip.
      *
-     * One bundle, one settings scope, three surfaces: the page where presets are
-     * authored, and the header and composer seats the chips share. All of them read
-     * the same namespace, so none has to tell another anything — and since a seat
-     * is the same components over the same scope, the two seats cannot disagree
-     * about what is in force.
+     * One bundle, one settings scope, two surfaces: the page where presets are
+     * authored, and the control beside the input box that switches between them.
+     * Both read the same namespace, so neither has to tell the other anything.
      * @param ctx - the browser plugin context.
      */
     function apply(ctx) {
@@ -2980,37 +2865,19 @@ window.__ModuleLoader__.load({
         label: () => '提示词',
         inject: () => ({ scope }),
       }, (props) => h(Boundary, null, h(PromptSection, props))))
-      // One injection per seat, two entries each: a seat is a list, and the effect
-      // an `inject` callback returns may be the iterable of disposers both
-      // registrations hand back.
-      //
-      // The header seat comes first and carries no condition of its own: while the
-      // Host hides its header chrome it renders none of the header, so this seat is
-      // absent exactly when it should be. The composer seat is the blank-session
-      // fallback, and hides itself while a resident seat is mounted.
-      ctx.slots.inject(HEADER_SLOT, () => [
+      // One injection, two entries: the row is a list, and the effect an `inject`
+      // callback returns may be the iterable of disposers both registrations hand back.
+      ctx.slots.inject(PRESET_SLOT, () => [
         ctx.slots.register({
-          name: HEADER_SLOT,
+          name: PRESET_SLOT,
           id: NAMESPACE,
           order: 10,
-        }, (props) => h(Boundary, { label: '提示词组合' }, h(Resident, null, h(PresetChip, { ...props, scope })))),
+        }, (props) => h(Boundary, { label: '提示词组合' }, h(PresetChip, { ...props, scope }))),
         ctx.slots.register({
-          name: HEADER_SLOT,
+          name: PRESET_SLOT,
           id: COMPACTION_CHIP_ID,
           order: 11,
-        }, (props) => h(Boundary, { label: '压缩指令' }, h(Resident, null, h(CompactionChip, { ...props, scope })))),
-      ])
-      ctx.slots.inject(COMPOSER_SLOT, () => [
-        ctx.slots.register({
-          name: COMPOSER_SLOT,
-          id: NAMESPACE,
-          order: 10,
-        }, (props) => h(Boundary, { label: '提示词组合' }, h(Fallback, null, h(PresetChip, { ...props, scope })))),
-        ctx.slots.register({
-          name: COMPOSER_SLOT,
-          id: COMPACTION_CHIP_ID,
-          order: 11,
-        }, (props) => h(Boundary, { label: '压缩指令' }, h(Fallback, null, h(CompactionChip, { ...props, scope })))),
+        }, (props) => h(Boundary, { label: '压缩指令' }, h(CompactionChip, { ...props, scope }))),
       ])
     }
 
