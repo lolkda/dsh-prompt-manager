@@ -1781,42 +1781,9 @@ assert.ok(
 )
 await toList()
 
-// Turning that draft into a section follows the same rule — nothing is written
-// before the save — and the flip must not mark it as saved, or the page would leave
-// the person holding a draft with the save button already reading "已保存".
-scope.state = { ...scope.state, value: { entries: ENTRIES, presets: PRESETS } }
-compactRenderer.mount(compactSection, { scope })
-await compactRenderer.settle()
-const flipWrites = writes.length
-button(compactRenderer.tree, '新增压缩指令').props.onClick()
-await compactRenderer.settle()
-button(compactRenderer.tree, '转为普通段落').props.onClick()
-await compactRenderer.settle()
-assert.equal(writes.length, flipWrites, 'flipping an unsaved draft writes nothing either')
-const afterFlip = button(compactRenderer.tree, '保存修改')
-assert.ok(afterFlip !== undefined, 'and the draft it left behind still offers to be saved')
-assert.equal(afterFlip.props.disabled, false, 'because the flip did not mark a draft nobody wrote as saved')
-afterFlip.props.onClick()
-await compactRenderer.settle()
-const sectionWrites = writes.slice(flipWrites)
-const sectionEntry = sectionWrites.find((write) => write.field === 'entries')
-  .value.find((entry) => entry.id === 'new-note')
-assert.equal('kind' in sectionEntry, false, 'saving then writes it as the section it has become')
-assert.equal(sectionEntry.enabled, true, 'switched on, the way a new section is')
-assert.equal(
-  sectionWrites.some((write) => write.field === 'compaction'),
-  false,
-  'and no pointer is aimed at a section, which could never answer it',
-)
-scope.state = { ...scope.state, value: { entries: ENTRIES, presets: PRESETS } }
-compactRenderer.mount(compactSection, { scope })
-await compactRenderer.settle()
-
 // Compaction entries occupy the same 50-entry cap the sections do, so the refusal
 // has to happen here too — and it has to happen before an id is taken. The cap
 // arrives with `/status`, so this case needs a mount of its own to see it.
-button(compactRenderer.tree, '← 返回').props.onClick()
-await compactRenderer.settle()
 STATUS = { ...STATUS, maxEntries: ENTRIES.length }
 const capRenderer = createRenderer()
 const capSection = materialize(capRenderer.React).registrations[0].component
@@ -1868,6 +1835,14 @@ assert.ok(
   'it has to say where that is done instead',
 )
 
+// Nor may it offer to change what the entry is: a compaction instruction stays one until
+// it is deleted, so there is no button that would turn it back into a section.
+assert.equal(
+  button(compactRenderer.tree, '转为普通段落'),
+  undefined,
+  'and the editor must not offer to turn the instruction back into a section',
+)
+
 // Saving a compaction body writes the body and nothing else, and says where the
 // instruction becomes usable rather than promising the person a compaction.
 const compactBody = inspect(compactRenderer.tree, 'textarea').nodes[0]
@@ -1891,28 +1866,20 @@ assert.ok(
   `and says where it becomes usable, not that a compaction will send it, got: ${compactText()}`,
 )
 
-// An entry can change kind: the same body can become a section, and turning it
-// back must take the field away rather than write `kind: 'section'` — a section
-// entry carries no `kind` key at all, and a phantom one would follow it forever.
-scope.state = { ...scope.state, value: { ...scope.state.value, compaction: 'compact-zh' } }
+// What an entry *is* cannot be changed after the fact: it is settled by the button that
+// created it, and the editor of a section offers no way to make it an instruction — so
+// the two kinds cannot be swapped by a stray click.
+scope.state = { ...scope.state, value: { entries: ENTRIES, presets: PRESETS, activePreset: '', compaction: '' } }
 compactRenderer.mount(compactSection, { scope })
 await compactRenderer.settle()
-const toSection = button(compactRenderer.tree, '转为普通段落')
-assert.ok(toSection !== undefined, 'the editor offers to turn a compaction instruction back into a section')
-const kindBefore = writes.length
-toSection.props.onClick()
+await toList()
+openRow(compactRenderer.tree, '补充说明').props.onClick()
 await compactRenderer.settle()
-const kindWrites = writes.slice(kindBefore)
-const kindIndex = kindWrites.find((write) => write.field === 'entries')
-assert.ok(kindIndex !== undefined, 'changing kind rewrites the index')
-const demoted = kindIndex.value.find((entry) => entry.id === 'compact-zh')
-assert.equal('kind' in demoted, false, 'and a section entry must carry no kind key at all')
-assert.equal(demoted.title, '压缩指令（中文版）', 'the rest of the record is carried over untouched')
-assert.equal(demoted.enabled, false, 'including the switch it already had')
+assert.ok(compactText().includes('编辑「补充说明」'), 'this is a section being edited, not an instruction')
 assert.equal(
-  kindWrites.some((write) => write.field === 'compaction'),
-  false,
-  'and the document pointer is left alone: moving it would change nothing, since no conversation reads it',
+  button(compactRenderer.tree, '转为压缩指令'),
+  undefined,
+  'and its editor offers no way to turn it into a compaction instruction',
 )
 
 // Deleting the instruction is the same shape: the body file, then the index. The
@@ -1926,8 +1893,8 @@ scope.state = {
 }
 compactRenderer.mount(compactSection, { scope })
 await compactRenderer.settle()
-// The kind flip above happened inside the editor, so the list has to come back
-// before a row menu exists to click.
+// The editor case above left the page inside an editor, so the list has to come
+// back before a row menu exists to click.
 await toList()
 const dropBefore = writes.length
 rowMenuOf(rowFor(compactRenderer.tree, '压缩指令')).props.onSelect('delete')
@@ -1946,41 +1913,11 @@ assert.equal(
   'while neither pointer in the document is touched: no conversation\'s choice lives there',
 )
 
-// And back the other way, which must mark it again.
-// The entry is a section now — the flip above is what a person would have just done —
-// so this case starts from the index that flip wrote, not from the fixture.
-const asSection = ENTRIES.map((entry) => (entry.id === 'compact-zh'
-  ? { id: entry.id, title: entry.title, order: entry.order, enabled: false }
-  : entry))
-scope.state = {
-  ...scope.state,
-  value: { entries: asSection, presets: PRESETS, activePreset: 'ctf', compaction: 'compact-zh' },
-}
-compactRenderer.mount(compactSection, { scope })
-await compactRenderer.settle()
-await toList()
-openRow(compactRenderer.tree, '压缩指令').props.onClick()
-await compactRenderer.settle()
-const toCompaction = button(compactRenderer.tree, '转为压缩指令')
-assert.ok(toCompaction !== undefined, 'a section can be turned into a compaction instruction from its editor')
-const backBefore = writes.length
-toCompaction.props.onClick()
-await compactRenderer.settle()
-const promoted = writes.slice(backBefore).find((write) => write.field === 'entries')
-assert.ok(promoted !== undefined, 'which again rewrites the index')
-assert.equal(promoted.value.find((entry) => entry.id === 'compact-zh').kind, 'compaction', 'marking it as one')
-assert.equal(
-  writes.slice(backBefore).some((write) => write.field === 'compaction'),
-  false,
-  'and still without aiming the document pointer, whether or not one is already there',
-)
-
 // Back to the fixture index and the list for the cases below.
 scope.state = { ...scope.state, value: { entries: ENTRIES, presets: PRESETS } }
 compactRenderer.mount(compactSection, { scope })
 await compactRenderer.settle()
-button(compactRenderer.tree, '← 返回').props.onClick()
-await compactRenderer.settle()
+await toList()
 
 // ── a combo picks the compaction instruction too ──────────────────────────────
 
@@ -2186,7 +2123,7 @@ console.log('  sessions    both chips read and write the Host\'s per-session fil
 console.log(`  list        ${String(ENTRIES.length)} rows, switches, kebab menus, the plugin's own repo link, add control refused at the cap`)
 console.log('  views       row menu -> editor page -> save -> back to the list')
 console.log('  compaction  a row of its own kind: own badge, no switch, and nothing here that could make it current')
-console.log('  kind        a draft that starts empty, written only on save, flipped to a section and back, never aimed')
+console.log('  kind        a draft that starts empty, written only on save, and a kind that no click can change')
 console.log('  combos      a combo picks one compaction instruction, and saving it leaves the other combos alone')
 console.log('  report      replacements and matches told apart, local time, and the feature switched off')
 console.log('  presets     list, editor, member checklist, an id from the Host, and no way to set one as current')

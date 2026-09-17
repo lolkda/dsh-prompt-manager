@@ -437,23 +437,6 @@ window.__ModuleLoader__.load({
       return entry.kind === 'compaction'
     }
 
-    /**
-     * One entry, as a section entry: with no `kind` key rather than `kind:
-     * 'section'`.
-     *
-     * The settings document is meant to carry what a record is and nothing else,
-     * and a section entry is what the absence of the field means — writing the
-     * literal would put a phantom key into the store and into every later
-     * rewrite of it.
-     * @param entry - the entry that stops being a compaction instruction.
-     * @returns a copy with the key removed.
-     */
-    function withoutKind(entry) {
-      const plain = { ...entry }
-      delete plain.kind
-      return plain
-    }
-
     /** The next free placement for an added entry. */
     function nextOrder(entries) {
       let highest = 0
@@ -1546,62 +1529,6 @@ window.__ModuleLoader__.load({
           .finally(() => setBusy(false))
       }, [entries, scope])
 
-      /**
-       * Aim the compaction pointer at one entry, or release it again.
-       *
-       * One settings write either way, and the entry that is already current
-       * switches back to the built-in instruction: the same control does both, so
-       * the page never needs a second one to undo the first. It takes effect at
-       * the next compaction, not at the next model step.
-       * @param entry - the compaction entry to aim the pointer at, or the one to release.
-       */
-      /**
-       * Change what an entry is: a system prompt section, or the compaction
-       * instruction.
-       *
-       * The body is untouched either way — the same text can be a section today
-       * and an instruction tomorrow — so this is one index write and nothing else.
-       * No pointer has to be released alongside it: the id an entry may be pointed
-       * at lives in each conversation's own file, and the Host already treats a
-       * conversation that names a section as one that named nothing, reporting it
-       * the same way it reports any unusable id.
-       * @param compaction - whether the entry should become the compaction instruction.
-       */
-      const setKind = React.useCallback(async (compaction) => {
-        if (draft === null) return
-        setBusy(true)
-        try {
-          const next = compaction ? { ...draft, kind: 'compaction' } : withoutKind(draft)
-          // A draft has written nothing yet, so there is no record to rewrite:
-          // flipping it only changes what the save will write.
-          if (!draft.isNew) {
-            const nextEntries = entries.map((entry) => {
-              if (entry.id !== draft.id) return entry
-              return compaction ? { ...entry, kind: 'compaction' } : withoutKind(entry)
-            })
-            await scope.set('entries', nextEntries)
-          }
-          setDraft(next)
-          // A draft stays a draft: marking it saved here would turn the save button
-          // into "已保存" on an entry that exists nowhere but this page.
-          setSaved(draft.isNew ? null : next)
-          setStatus({
-            kind: 'info',
-            text: compaction
-              ? (draft.isNew
-                ? '已改成压缩指令；保存后它才进索引，想让它生效就在会话输入框那行的「压缩」芯片里选它。'
-                : '已改成压缩指令。它不再进 system prompt，想让它生效就在会话的「压缩」芯片里选它。')
-              : (draft.isNew
-                ? '已改回普通段落；保存后它才进索引，按开关注入。'
-                : '已改回普通段落，按开关注入；压缩指令回到 DSH 自带的那段。'),
-          })
-        } catch (error) {
-          setStatus({ kind: 'error', text: error.message })
-        } finally {
-          setBusy(false)
-        }
-      }, [draft, entries, scope])
-
       const remove = React.useCallback((entry) => {
         if (!window.confirm(`删除「${entry.title}」？它的正文文件也会一起删除。`)) return
         setBusy(true)
@@ -1923,21 +1850,11 @@ window.__ModuleLoader__.load({
             h('div', { key: 'body', className: 'dsh-prompt-manager__preview' }, h(Preview, { text: draft.body })),
           ]),
           ]),
-          h('div', { key: 'actions', className: 'dsh-prompt-manager__actions' }, [            h(Button, { key: 'save', variant: 'primary', disabled: !writable || busy || !dirty, onClick: save }, dirty ? '保存修改' : '已保存'),
-            // No "set as current" here any more: which instruction a compaction sends
-            // is the conversation's own choice, so this page edits the text and says
-            // nothing about who is using it.
-            compactionDraft
-              ? h(Button, {
-                key: 'asSection',
-                disabled: !writable || busy,
-                onClick: () => { void setKind(false) },
-              }, '转为普通段落')
-              : h(Button, {
-                key: 'asCompaction',
-                disabled: !writable || busy,
-                onClick: () => { void setKind(true) },
-              }, '转为压缩指令'),
+          h('div', { key: 'actions', className: 'dsh-prompt-manager__actions' }, [
+            h(Button, { key: 'save', variant: 'primary', disabled: !writable || busy || !dirty, onClick: save }, dirty ? '保存修改' : '已保存'),
+            // Neither "set as current" nor "change what this entry is" is offered here:
+            // which instruction a compaction sends is the conversation's own choice, and
+            // what an entry is was settled when it was created.
             subscribedDraft
               ? h(Button, { key: 'fork', disabled: !writable || busy, onClick: () => { void forkEntry() } }, 'fork 成本地条目')
               : null,
