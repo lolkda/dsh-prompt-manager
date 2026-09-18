@@ -646,36 +646,24 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The conversation the composer belongs to.
-     *
-     * The composer slots are drawn per session but hand their registrants no
-     * session id, so the chip reads the one the surrounding UI is showing — the
-     * session list's own answer rather than a second guess at it. That list is the
-     * `sessions` service's snapshot store, which `apply` passes down the same way
-     * it passes the settings scope; the store's `current` is the open session.
-     * @param store - the session list's snapshot store, or undefined when the
-     * deployment serves no session list at all.
-     * @returns the open session id, or undefined when no session is open.
-     */
-    function useCurrentSession(store) {
-      const subscribe = React.useCallback(
-        (listener) => (store === undefined ? () => {} : store.subscribe(listener)),
-        [store],
-      )
-      const getSnapshot = React.useCallback(
-        () => (store === undefined ? undefined : store.getSnapshot().current),
-        [store],
-      )
-      return React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
-    }
-
-    /**
      * One session's stored choice, and the way to change it.
      *
      * The choice is a file the Host owns, one per session, so this is a request
      * rather than a settings read: the settings namespace holds the catalog every
      * session picks from, and a pick made in one conversation must not reach
      * another.
+     *
+     * The id itself is not looked up here. `conversation.input.right` is declared a
+     * session-scoped slot, so the renderer hands every entry the conversation the
+     * composer is drawn for — as the `sessionId` prop, from the `ui-session`
+     * standard source, per render occurrence. That is the seam this plugin is
+     * meant to use, and it has carried the id since 0.1.5.
+     *
+     * 3.2.1 read it from the session list's snapshot instead — the `current` field
+     * of that snapshot, which the list no longer carries. DSH 0.1.6 dropped it, so
+     * every chip got `undefined`: the menu still opened, every preset item came
+     * out `disabled`, and clicking one did nothing — which is exactly what
+     * "无法切换提示词" looked like.
      * @param sessionId - the conversation to read and write.
      * @returns the choice in force, the last failure, and the writer.
      */
@@ -716,10 +704,11 @@ window.__ModuleLoader__.load({
      * input box instead of through Settings. The *catalog* it offers comes from the
      * settings namespace — the presets, and a change made on the settings page
      * shows up here with no wiring of its own — while which one is in force is read
-     * from this conversation's own file. So a switch here is one small request that
-     * the next model step honours, and no other conversation feels it.
-     * @param props - composed slot props carrying the bound settings scope and the
-     * session list.
+     * from this conversation's own file, named by the id the slot hands this chip.
+     * So a switch here is one small request that the next model step honours, and
+     * no other conversation feels it.
+     * @param props - composed slot props: the bound settings scope, and the
+     * `sessionId` standard prop of the session-scoped slot this chip fills.
      * @returns the chip element tree.
      */
     function PresetChip(props) {
@@ -728,7 +717,10 @@ window.__ModuleLoader__.load({
       const getSnapshot = React.useCallback(() => scope.getSnapshot(), [scope])
       const snapshot = React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
       const presets = React.useMemo(() => presetsOf(snapshot), [snapshot])
-      const sessionId = useCurrentSession(props.sessions)
+      // Which conversation this chip speaks for. The slot is session-scoped, so the
+      // framework resolved it before rendering: no lookup, and no way to read some
+      // other conversation's answer.
+      const sessionId = props.sessionId
       const session = useSessionChoice(sessionId)
       // The preset in force for this session, named by its own file. An id that
       // names nothing — a preset somebody just deleted — reads as no preset,
@@ -745,17 +737,20 @@ window.__ModuleLoader__.load({
       const items = presets.length === 0
         ? [{ id: 'no-presets', label: '还没有组合：设置 → 提示词 → 组合 里新建', disabled: true }]
         : [
-          { id: NO_PRESET, label: `不用组合（按每条开关）${current === NO_PRESET ? '（当前）' : ''}` },
+          // Every item is refused together while the page cannot write: "back to the
+          // per-entry switches" is a write like any other, and letting that one
+          // through only turns a disabled control into a failure message.
+          { id: NO_PRESET, label: `不用组合（按每条开关）${current === NO_PRESET ? '（当前）' : ''}`, disabled: !writable },
           ...presets.map((preset) => ({
             id: preset.id,
             label: `${preset.name}（${String(preset.entries.length)} 条）${current === preset.id ? '（当前）' : ''}`,
-            disabled: !writable || sessionId === undefined,
+            disabled: !writable,
           })),
         ]
 
       const choose = (id) => {
         setOpen(false)
-        if (id === current || id === 'no-presets' || sessionId === undefined) return
+        if (id === current || id === 'no-presets') return
         // Switching a preset carries that preset's own compaction instruction, the
         // way it always has: a preset answers "which prompts are in force" whole.
         // Both answers land in this session's file and nowhere else, so the write
@@ -779,11 +774,9 @@ window.__ModuleLoader__.load({
           'aria-expanded': open,
           title: session.failed !== null
             ? `切换失败：${session.failed}`
-            : sessionId === undefined
-              ? '先打开一个会话：组合是每个会话自己的选择'
-              : writable
-                ? '切换本会话的提示词组合（下一个模型步骤生效，别的会话不受影响）'
-                : '这个页面是只读的：局域网地址打开时设置通道退化为内存模式',
+            : writable
+              ? '切换本会话的提示词组合（下一个模型步骤生效，别的会话不受影响）'
+              : '这个页面是只读的：局域网地址打开时设置通道退化为内存模式',
           onClick: () => setOpen((wasOpen) => !wasOpen),
         }, h('span', { className: 'dsh-prompt-manager__composerChipLabel' },
           session.failed !== null ? '提示词 · 切换失败' : `提示词 · ${active === null ? '按开关' : active.name}`)),
@@ -802,8 +795,8 @@ window.__ModuleLoader__.load({
      * It writes this session's own file. The instruction belongs to the conversation,
      * not to the deployment: two conversations may summarise against two different
      * templates, and choosing one here cannot change what another one sends.
-     * @param props - composed slot props carrying the bound settings scope and the
-     * session list.
+     * @param props - composed slot props: the bound settings scope, and the
+     * `sessionId` standard prop of the session-scoped slot this chip fills.
      * @returns the chip element tree.
      */
     function CompactionChip(props) {
@@ -812,7 +805,9 @@ window.__ModuleLoader__.load({
       const getSnapshot = React.useCallback(() => scope.getSnapshot(), [scope])
       const snapshot = React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
       const entries = React.useMemo(() => entriesOf(snapshot), [snapshot])
-      const sessionId = useCurrentSession(props.sessions)
+      // Same seam as the chip beside it: the slot is session-scoped, so the id of the
+      // conversation being drawn for arrives as a prop rather than from a lookup.
+      const sessionId = props.sessionId
       const session = useSessionChoice(sessionId)
       const [open, setOpen] = React.useState(false)
 
@@ -832,17 +827,20 @@ window.__ModuleLoader__.load({
       const items = choices.length === 0
         ? [{ id: 'no-entries', label: '还没有压缩指令：设置 → 提示词 → 新增压缩指令', disabled: true }]
         : [
-          { id: NO_PRESET, label: `不用：DSH 自带的压缩指令${current === NO_PRESET ? '（当前）' : ''}` },
+          // Refused together with the rest while the page cannot write, for the same
+          // reason as the preset chip's no-preset item: going back to DSH's own
+          // instruction is a write too.
+          { id: NO_PRESET, label: `不用：DSH 自带的压缩指令${current === NO_PRESET ? '（当前）' : ''}`, disabled: !writable },
           ...choices.map((entry) => ({
             id: entry.id,
             label: `${entry.title}${current === entry.id ? '（当前）' : ''}`,
-            disabled: !writable || sessionId === undefined,
+            disabled: !writable,
           })),
         ]
 
       const choose = (id) => {
         setOpen(false)
-        if (id === current || id === 'no-entries' || sessionId === undefined) return
+        if (id === current || id === 'no-entries') return
         // One field of one session's file, patched rather than replaced: the preset
         // that session is using stays exactly as it is.
         session.write({ compaction: id })
@@ -863,11 +861,9 @@ window.__ModuleLoader__.load({
           'aria-expanded': open,
           title: session.failed !== null
             ? `切换失败：${session.failed}`
-            : sessionId === undefined
-              ? '先打开一个会话：压缩指令是每个会话自己的选择'
-              : !writable
-                ? '这个页面是只读的：局域网地址打开时设置通道退化为内存模式'
-                : '切换本会话的压缩指令（下一次压缩生效，别的会话不受影响）',
+            : !writable
+              ? '这个页面是只读的：局域网地址打开时设置通道退化为内存模式'
+              : '切换本会话的压缩指令（下一次压缩生效，别的会话不受影响）',
           onClick: () => setOpen((wasOpen) => !wasOpen),
         }, h('span', { className: 'dsh-prompt-manager__composerChipLabel' },
           session.failed !== null ? '压缩 · 切换失败' : `压缩 · ${chosen === null ? 'DSH 原文' : chosen.title}`)),
@@ -2709,9 +2705,12 @@ window.__ModuleLoader__.load({
     // `settingsScope` is a hard requirement: this section is nothing but the
     // index it serves, so a host without the settings domain mounts nothing
     // rather than rendering controls that cannot persist.
-    // `sessions` carries the open session's id, which is what tells one chip
-    // instance from another and which conversation's choice to read.
-    const inject = ['slots', 'settingsScope', 'sessions']
+    //
+    // `sessions` is deliberately not injected: both chips take the conversation's
+    // id from the session-scoped slot they are drawn in, which is the same answer
+    // without depending on a list snapshot — 0.1.6 dropped the `current` field the
+    // 3.2.1 bundle read there, and that is what broke the switches.
+    const inject = ['slots', 'settingsScope']
 
     /**
      * Register the settings section and the composer chip.
@@ -2723,11 +2722,6 @@ window.__ModuleLoader__.load({
      */
     function apply(ctx) {
       const scope = ctx.settingsScope.bind({ namespace: NAMESPACE })
-      // The open session is read from the session controller's own list rather
-      // than guessed at, and it is threaded to the chips beside the scope: a chip
-      // instance is drawn for whatever conversation the composer belongs to, and
-      // the list is the only thing that knows which one that is.
-      const sessions = ctx.sessions === undefined ? undefined : ctx.sessions.list
       ctx.effect(() => {
         const tag = injectStyle()
         return () => { if (tag !== null) tag.remove() }
@@ -2741,17 +2735,19 @@ window.__ModuleLoader__.load({
       }, (props) => h(Boundary, null, h(PromptSection, props))))
       // One injection, two entries: the row is a list, and the effect an `inject`
       // callback returns may be the iterable of disposers both registrations hand back.
+      // The row is session-scoped, so each chip is handed the id of the conversation
+      // the composer belongs to; the props are passed through as they arrive.
       ctx.slots.inject(PRESET_SLOT, () => [
         ctx.slots.register({
           name: PRESET_SLOT,
           id: NAMESPACE,
           order: 10,
-        }, (props) => h(Boundary, { label: '提示词组合' }, h(PresetChip, { ...props, scope, sessions }))),
+        }, (props) => h(Boundary, { label: '提示词组合' }, h(PresetChip, { ...props, scope }))),
         ctx.slots.register({
           name: PRESET_SLOT,
           id: COMPACTION_CHIP_ID,
           order: 11,
-        }, (props) => h(Boundary, { label: '压缩指令' }, h(CompactionChip, { ...props, scope, sessions }))),
+        }, (props) => h(Boundary, { label: '压缩指令' }, h(CompactionChip, { ...props, scope }))),
       ])
     }
 

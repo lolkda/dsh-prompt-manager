@@ -268,28 +268,18 @@ const scope = {
 const CHOICES = new Map()
 
 /**
- * The session list the `sessions` service provides, as the chips consume it.
+ * Which conversation the chips are drawn for.
  *
- * `current` is the open conversation, and it is the only thing that tells one
- * chip instance apart from another — which is why `apply` threads this list to
- * every chip it registers.
+ * The slot is session-scoped, so this is a prop the framework resolves — the
+ * `sessionId` standard source of `ui-session` — and a case below changes it the
+ * way a person changes conversations: by mounting the chip for another one.
+ *
+ * It used to be a fake session-list store with a `current` field, which is what
+ * hid the 3.2.1 breakage: `current` stopped existing in DSH 0.1.6, so the real
+ * chip got `undefined` for every conversation while this suite kept handing it a
+ * store that answered.
  */
-const sessionStore = {
-  current: undefined,
-  listeners: new Set(),
-  getSnapshot() {
-    return { current: this.current }
-  },
-  subscribe(listener) {
-    this.listeners.add(listener)
-    return () => { this.listeners.delete(listener) }
-  },
-  /** Show a different conversation, and tell the chips the way the real store does. */
-  open(sessionId) {
-    this.current = sessionId
-    for (const listener of this.listeners) listener()
-  },
-}
+let chipSessionId = 'session-open'
 
 /**
  * Whether an element type is a mountable component: a plain function, or a
@@ -590,18 +580,18 @@ function materialize(React) {
   assert.equal(exports.name, 'dsh-prompt-manager', 'the client plugin must expose its cordis name')
   assert.ok(exports.inject.includes('slots'), 'the client plugin must inject the slot service')
   assert.ok(exports.inject.includes('settingsScope'), 'the client plugin must inject the settings scope service')
-  assert.ok(
-    exports.inject.includes('sessions'),
-    'and the session list, which is the only thing that says which conversation a chip is drawing for',
+  assert.deepEqual(
+    exports.inject,
+    ['slots', 'settingsScope'],
+    'and nothing else: which conversation a chip draws for comes from the session-scoped slot it fills, '
+      + 'never from the session list — whose `current` field 0.1.6 removed, which is what left every '
+      + 'switch on the composer row disabled',
   )
   assert.equal(typeof exports.apply, 'function', 'the client plugin must expose apply')
 
   const registrations = []
   const injections = []
   const ctx = {
-    // The service the plugin injects to find out which conversation it is
-    // drawing for. `apply` reads `.list` off it and hands that to each chip.
-    sessions: { list: sessionStore },
     settingsScope: {
       bind: (spec) => {
         assert.equal(spec.namespace, 'prompt-manager', 'the section must bind the prompt-manager namespace')
@@ -1203,15 +1193,27 @@ const chipMenuNode = () => inspect(chipRenderer.tree, MENU).nodes[0]
 const chipText = () => textOf(chipMenuNode().props.anchor)
 const chipMenu = () => chipMenuNode()
 
-/** What the slot hands a chip: the settings scope, plus the session list that
- * `apply` read off the injected `sessions` service. */
-const chipProps = () => ({ scope, sessions: sessionStore })
+/** What the slot hands a chip: the settings scope, plus the `sessionId` standard
+ * prop of the session-scoped slot it fills. */
+const chipProps = () => ({ scope, sessionId: chipSessionId })
 /** The last choice request sent since one point in the log. */
 const lastChoice = (after) => requests.slice(after).filter((request) => request.url.includes('/session/')).at(-1)
 
+// The seam the chips have to use. `conversation.input.right` is declared
+// `scope: 'session'`, so the renderer hands every entry the conversation it draws
+// for as the `sessionId` prop; 3.2.1 read it off the session list instead
+// (`sessions.list.getSnapshot().current`), 0.1.6 removed that field, and every
+// item in both menus silently came out disabled. A source read is the only way
+// this suite can hold the bundle to a prop the framework supplies at render time.
+assert.equal(
+  /getSnapshot\(\)\.current\b/.test(readFileSync(BUNDLE, 'utf8')),
+  false,
+  'the bundle must not read the `current` field off the session list: it is gone, and reading it disables every switch',
+)
+
 scope.state = { ...scope.state, value: { ...scope.state.value, presets: PRESETS } }
 CHOICES.clear()
-sessionStore.open('session-open')
+chipSessionId = 'session-open'
 chipRenderer.mount(chipRegistration.component, chipProps())
 await chipRenderer.settle()
 assert.ok(chipText().includes('提示词 · 按开关'), 'a conversation that chose nothing must read as the switches deciding')
@@ -1254,7 +1256,7 @@ assert.ok(chipText().includes('CTF 作业'), 'the chip must show the preset this
 assert.ok(item(chipMenu(), 'ctf').label.includes('（当前）'), 'and mark it in the menu')
 
 // The point of the whole change: the same bundle, a different conversation.
-sessionStore.open('session-other')
+chipSessionId = 'session-other'
 chipRenderer.mount(chipRegistration.component, chipProps())
 await chipRenderer.settle()
 assert.ok(chipText().includes('提示词 · 按开关'), 'another conversation must not inherit a choice made in the first one')
@@ -1263,27 +1265,23 @@ assert.ok(!item(chipMenu(), 'ctf').label.includes('（当前）'), 'and marking 
 
 // Back to the first conversation, and its choice is still there: the choice is a
 // file, not a value this component holds.
-sessionStore.open('session-open')
+chipSessionId = 'session-open'
 chipRenderer.mount(chipRegistration.component, chipProps())
 await chipRenderer.settle()
 assert.ok(chipText().includes('CTF 作业'), 'and coming back reads the same stored choice again')
 
 // A page whose settings channel is process-local can offer the catalog but not make
-// a choice: the same refusal every write on this page makes.
+// a choice: the same refusal every write on this page makes. Every item is refused,
+// including the way back to the per-entry switches — that is a write too.
 scope.state = { ...scope.state, mode: 'memory', writable: false }
 chipRenderer.mount(chipRegistration.component, chipProps())
 await chipRenderer.settle()
 assert.equal(item(chipMenu(), 'ctf').disabled, true, 'a memory-mode page must refuse to switch a preset')
+assert.equal(item(chipMenu(), '').disabled, true, 'and refuse the way back to the per-entry switches as well')
 scope.state = { ...scope.state, mode: 'host', writable: true }
 
-// With no conversation open the control cannot speak for anyone.
-sessionStore.open(undefined)
-chipRenderer.mount(chipRegistration.component, chipProps())
-await chipRenderer.settle()
-assert.equal(item(chipMenu(), 'ctf').disabled, true, 'with no conversation open there is nothing to choose for')
-
 // A deployment with no presets still renders: the chip says where to make one.
-sessionStore.open('session-open')
+chipSessionId = 'session-open'
 scope.state = { ...scope.state, value: { ...scope.state.value, presets: [] } }
 chipRenderer.mount(chipRegistration.component, chipProps())
 await chipRenderer.settle()
@@ -1307,7 +1305,7 @@ assert.ok(compactionChipRegistration !== undefined, 'the composer row must also 
 const compactionChipMenu = () => inspect(compactionChipRenderer.tree, MENU).nodes[0]
 const compactionChipText = () => textOf(compactionChipMenu().props.anchor)
 /** The same props the slot hands this chip. */
-const compactionChipProps = () => ({ scope, sessions: sessionStore })
+const compactionChipProps = () => ({ scope, sessionId: chipSessionId })
 
 scope.state = {
   ...scope.state,
@@ -1316,7 +1314,7 @@ scope.state = {
   value: { ...scope.state.value, entries: ENTRIES, presets: PRESETS },
 }
 CHOICES.clear()
-sessionStore.open('session-open')
+chipSessionId = 'session-open'
 compactionChipRenderer.mount(compactionChipRegistration.component, compactionChipProps())
 await compactionChipRenderer.settle()
 assert.ok(
@@ -1353,7 +1351,7 @@ assert.ok(compactionChipText().includes('压缩指令（中文版）'), 'the chi
 
 // The instruction is the conversation's, so a second one is unaffected by it —
 // the same isolation the preset chip just demonstrated.
-sessionStore.open('session-other')
+chipSessionId = 'session-other'
 compactionChipRenderer.mount(compactionChipRegistration.component, compactionChipProps())
 await compactionChipRenderer.settle()
 assert.ok(
@@ -1364,7 +1362,7 @@ assert.ok(item(compactionChipMenu(), '').label.includes('（当前）'), 'with t
 
 // Clearing is the same patch with the empty id, which is how a conversation goes
 // back to what DSH ships.
-sessionStore.open('session-open')
+chipSessionId = 'session-open'
 compactionChipRenderer.mount(compactionChipRegistration.component, compactionChipProps())
 await compactionChipRenderer.settle()
 const clearRequestsBefore = requests.length
@@ -1383,6 +1381,11 @@ assert.equal(
   item(compactionChipMenu(), 'compact-zh').disabled,
   true,
   'a memory-mode page must refuse to switch the compaction instruction',
+)
+assert.equal(
+  item(compactionChipMenu(), '').disabled,
+  true,
+  'and refuse the way back to DSH\'s own instruction, which is a write as well',
 )
 scope.state = { ...scope.state, mode: 'host', writable: true }
 

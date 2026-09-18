@@ -5,6 +5,14 @@
 
 ---
 
+## 0. 3.2.2 修正：芯片的会话 id 从哪来（先读这段）
+
+本文 §4.5 与 §7 里"芯片去读 `sessions.list` 快照的 `current`"这件事**是错的**，3.2.1 照它实现，然后在 DSH 升到 **0.1.6-alpha.2** 之后两颗芯片全部点不动（菜单能开、组合项全灰）。原因：**`0.1.6-alpha.2` 把 `SessionListState.current` 删了**（`0.1.6-alpha.1` 与 `0.1.5-rc.1` 都还有这个字段），读不到就是 `undefined`，而芯片在 `undefined` 时把菜单项标 `disabled`。
+
+正确的做法（3.2.2 已改）：**槽会自己把会话 id 交出来**。`conversation.input.right` 声明是 `{ kind: 'list', scope: 'session' }`，渲染时 `ui-session` 的标准来源会给每个条目注入 `sessionId` 属性（`props: ["sessionId"]`，0.1.5 起就有），`renderSlot(name, {})` 传的 owner props 里没有它**不等于**注册方拿不到它 —— 那是两套 share（owner props 与 framework standard kit），当时把后者漏了。所以芯片现在直接 `props.sessionId`，插件也不再注入 `sessions` 服务。
+
+---
+
 ## 1. 目标（用户要的最终效果）
 
 现在"用哪套组合、用哪条压缩指令"是**全机一份**：在 A 会话切一下，B 会话也跟着变。目标改成：
@@ -79,12 +87,12 @@
 
 ### 4.5 `client/client.js`
 
-- 新 hook：`useCurrentSession()`（读 `ctx.get('sessions').list` 的 `getSnapshot().current` + `subscribe`）、`useSessionChoice(sessionId)`（`GET/POST /session/<id>`，写回服务端返回的 stored choice）；常量 `EMPTY_CHOICE`、`failureText()`。
-- 两颗芯片（`PresetChip` / `CompactionChip`）改成：`sessionId = useCurrentSession()` → `session = useSessionChoice(sessionId)` → 生效值来自 `session.value`；菜单项在 `sessionId === undefined` 时禁用；标题文案改成"本会话…（别的会话不受影响）"。
+- 新 hook：`useCurrentSession()`（读 `ctx.get('sessions').list` 的 `getSnapshot().current` + `subscribe`）~~、`useSessionChoice(sessionId)`~~ —— **`useCurrentSession` 已在 3.2.2 删除，见 §0**；`useSessionChoice(sessionId)`（`GET/POST /session/<id>`，写回服务端返回的 stored choice）保留；常量 `EMPTY_CHOICE`、`failureText()`。
+- 两颗芯片（`PresetChip` / `CompactionChip`）改成：`sessionId = useCurrentSession()` → `session = useSessionChoice(sessionId)` → 生效值来自 `session.value`；菜单项在 `sessionId === undefined` 时禁用；标题文案改成"本会话…（别的会话不受影响）"。（**3.2.2 起**：`sessionId = props.sessionId`，槽给的那个；`undefined` 分支随之消失 —— 严格 session 槽没这个 id 根本不会渲染。）
 - 切组合时一起写压缩指令：`session.write({ preset: id, compaction: picked.compaction })` —— 保留原来"组合整体切换"的语义。
 - 设置页撤掉的入口：组合页 ⋯ 菜单的"设为当前/取消当前"、条目行里压缩条目的"设为当前/取消当前"、压缩编辑器里那颗"设为当前"按钮、"当前组合生效中"横幅（换成一句说明）、两处"组合：注入/不注入"标注（换成 `[]`）；`injected` 重新定义为"这条自己的开关"。
-- 插件 `inject` 变 `['slots', 'settingsScope', 'sessions']`。
-- `package.json` 的 `dsh.client.inject` 加了 `"@deepseek-ai/dsh-api-session-controller"`（`sessions` 服务的提供者就是它的客户端半边）。
+- 插件 `inject` 变 `['slots', 'settingsScope', 'sessions']`。（**3.2.2 起**改回 `['slots', 'settingsScope']`，见 §0。）
+- `package.json` 的 `dsh.client.inject` 加了 `"@deepseek-ai/dsh-api-session-controller"`（`sessions` 服务的提供者就是它的客户端半边）。（**3.2.2 起**去掉，同上。）
 
 ### 4.6 `test/smoke.mjs`（部分改完）
 
@@ -174,8 +182,8 @@ for (const preset of presetList) {
 - **DSH 自己注册了 `{{cwd}}` / `{{provider}}` / `{{model}}`**（`dsh-agent-loop/lib/index.js:1534-1536`：`ctx.systemPrompt.variable("cwd", (context) => context.agent?.session.header.cwd)`）。本插件**不能**再注册同名（同层重名抛错，跨层会被遮蔽）。
 - **settings 是部署级**：`SettingsScope<T>` 只是"一个命名空间的 owner 句柄"，层序 = 默认值 → 组合 base → 用户层，没有 per-session 层。
 - **不能用 agent presets 做这件事**：preset 决定会话的工具与提示词，**只在 agent 还没产出任何东西时**才能换（`dsh-agent-presets` 明写），它的芯片是"暂存到下一个会话生效"。所以必须插件自己存 per-session 状态。
-- **客户端怎么拿当前会话 id**：服务名 `sessions`（由 `@deepseek-ai/dsh-api-session-controller` 的客户端半边 `provide("sessions", ...)`），`sessions.list` 是快照 store，`.current` 就是当前会话 id（`dsh-client-ui-conversation` 里就是这么读的）。
-- composer 槽 `conversation.input.right` 虽然声明成 `scope: "session"`，但宿主 `renderSlot(name, {})` **不把 sessionId 交给注册方**，所以芯片必须自己去读 `sessions`。
+- ~~**客户端怎么拿当前会话 id**：服务名 `sessions`（由 `@deepseek-ai/dsh-api-session-controller` 的客户端半边 `provide("sessions", ...)`），`sessions.list` 是快照 store，`.current` 就是当前会话 id（`dsh-client-ui-conversation` 里就是这么读的）。~~ **错，见 §0**：`current` 在 `0.1.6-alpha.2` 已被删除，这条路会让芯片拿到 `undefined`。
+- ~~composer 槽 `conversation.input.right` 虽然声明成 `scope: "session"`，但宿主 `renderSlot(name, {})` **不把 sessionId 交给注册方**，所以芯片必须自己去读 `sessions`。~~ **错，见 §0**：`renderSlot` 的 owner props 与框架的 standard kit 是两套 share；`scope: "session"` 的槽会给每个条目注入 `sessionId` 属性。
 - **本轮不再依赖的先例**：`SessionHeader.cwd` 是会话创建时冻结的绝对路径（`{{cwd}}` 的值来自它）。
 
 ## 8. 环境与工具注意
