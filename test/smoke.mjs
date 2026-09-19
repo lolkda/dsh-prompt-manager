@@ -205,8 +205,12 @@ async function assembleWith(config, promptConfig, plugins = []) {
   for (const plugin of plugins) await ctx.plugin(plugin)
   await ctx.plugin({ name, inject, apply }, { storeDir: STORE_ROOT, ...config })
   await settle()
-  const read = async (sessionId = SESSION) => {
-    const assembly = await ctx.systemPrompt.assemble({ agent: { session: { id: sessionId } } })
+  const read = async (
+    sessionId = SESSION,
+    cwd = join(STORE_ROOT, 'workspaces', sessionId),
+    options = { provider: 'test-provider', model: 'test-default-model' },
+  ) => {
+    const assembly = await ctx.systemPrompt.assemble({ agent: { session: { id: sessionId, header: { cwd } }, options } })
     return { assembly, prompt: renderPrompt(assembly) }
   }
   const first = await read()
@@ -244,7 +248,17 @@ const extraRoots = []
 try {
   // ── a fresh install carries the built-in environment prompt ─────────────────
 
-  const fresh = await assembleWith({}, BARE)
+  // DSH's agent-loop owns these providers; use their contracts without mounting
+  // the entire agent runtime. The actual registry and prompt-manager render below.
+  const fresh = await assembleWith({}, BARE, [{
+    name: 'session-variables',
+    inject: ['systemPrompt'],
+    apply: (ctx) => {
+      ctx.systemPrompt.variable('cwd', (context) => context.agent?.session.header.cwd)
+      ctx.systemPrompt.variable('model', (context) => context.agent?.options.model)
+      ctx.systemPrompt.variable('provider', (context) => context.agent?.options.provider)
+    },
+  }])
   assert.ok(
     fresh.prompt.includes('# Machine environment'),
     `a fresh install must inject the built-in environment prompt, got: ${fresh.prompt.slice(0, 120)}`,
@@ -264,6 +278,86 @@ try {
   assert.ok(
     !/\{\{(?![a-z][a-z0-9_]*\}\})/.test(packaged),
     'the built-in body must not carry a malformed variable reference',
+  )
+
+  // ── the built-in environment follows each session's workspace ──────────────
+
+  assert.ok(
+    fresh.prompt.includes(`This session's working directory is \`${join(STORE_ROOT, 'workspaces', SESSION)}\``),
+    'the built-in environment must tell the model this session\'s working directory',
+  )
+  assert.ok(packaged.includes('{{cwd}}'), 'the shipped template must reference DSH\'s session variable')
+  assert.equal(Object.hasOwn(environmentFacts(), 'cwd'), false, 'cwd must not become a mount-time machine fact')
+
+  const cwdA = 'F:\\工作区 A\\project'
+  const cwdB = '/srv/工作区 B/project'
+  const [workspaceA, workspaceB] = await Promise.all([
+    fresh.read('session-workspace-a', cwdA),
+    fresh.read('session-workspace-b', cwdB),
+  ])
+  for (const [result, own, other] of [[workspaceA, cwdA, cwdB], [workspaceB, cwdB, cwdA]]) {
+    assert.ok(
+      result.prompt.includes(`This session's working directory is \`${own}\``),
+      'the environment must preserve this session\'s absolute path, including spaces, Unicode and separators',
+    )
+    assert.ok(!result.prompt.includes(other), 'concurrent sessions must not share workspace paths')
+    assert.ok(!result.prompt.includes(process.cwd()), 'the host process directory must not stand in for the session workspace')
+    assert.ok(!result.prompt.includes('{{cwd}}'), 'the model must receive the resolved directory, not the variable token')
+  }
+  assert.equal(
+    (await fresh.read('session-workspace-a', cwdA)).prompt,
+    workspaceA.prompt,
+    'reassembling A after B must keep A\'s own directory',
+  )
+  assert.ok(
+    !fresh.warnings.some((warning) => warning.includes('cwd')),
+    'the plugin must neither contest DSH\'s cwd registration nor report it as unresolved',
+  )
+
+  // ── the built-in environment follows the current agent's model ────────────
+
+  assert.ok(
+    fresh.prompt.includes('This agent\'s current model is `test-default-model` (provider: `test-provider`).'),
+    'the built-in environment must tell the model which model this agent selected',
+  )
+  for (const variable of ['model', 'provider']) {
+    assert.ok(packaged.includes(`{{${variable}}}`), 'the shipped body must use DSH\'s dynamic model selection variables')
+    assert.equal(Object.hasOwn(environmentFacts(), variable), false, 'a model selection must not become a mount-time machine fact')
+  }
+
+  const optionsA = { provider: 'provider-a', model: 'vendor/model-a-v1' }
+  const optionsB = { provider: 'provider-b', model: 'model-b:latest' }
+  const [modelA, modelB] = await Promise.all([
+    fresh.read('session-model-a', cwdA, optionsA),
+    fresh.read('session-model-b', cwdB, optionsB),
+  ])
+  for (const [result, own, other] of [[modelA, optionsA, optionsB], [modelB, optionsB, optionsA]]) {
+    assert.ok(
+      result.prompt.includes(`This agent's current model is \`${own.model}\` (provider: \`${own.provider}\`).`),
+      'each session must receive its own exact model ID and provider, not a display alias or startup default',
+    )
+    assert.ok(!result.prompt.includes(other.model), 'concurrent sessions must not share model selections')
+    assert.ok(!result.prompt.includes(other.provider), 'concurrent sessions must not share providers')
+    assert.ok(!result.prompt.includes('{{model}}'), 'the model name must be resolved before it reaches the agent')
+  }
+
+  optionsA.model = 'model-a-next'
+  optionsA.provider = 'provider-next'
+  const switchedModel = await fresh.read('session-model-a', cwdA, optionsA)
+  assert.ok(
+    switchedModel.prompt.includes('This agent\'s current model is `model-a-next` (provider: `provider-next`).'),
+    'switching a model must update the next assembly without remounting the plugin',
+  )
+  assert.ok(!switchedModel.prompt.includes('vendor/model-a-v1'), 'the previous model must not remain in the environment')
+  assert.equal((await fresh.read('session-model-b', cwdB, optionsB)).prompt, modelB.prompt, 'switching A must leave B unchanged')
+  const siblingModel = await fresh.read('session-model-a', cwdA, { provider: 'child-provider', model: 'child-model' })
+  assert.ok(
+    siblingModel.prompt.includes('This agent\'s current model is `child-model` (provider: `child-provider`).'),
+    'the assembly must use the current agent, even when another agent uses the same session',
+  )
+  assert.ok(
+    !fresh.warnings.some((warning) => warning.includes('model') || warning.includes('provider')),
+    'the plugin must not contest DSH\'s model variables or report them as unresolved',
   )
 
   // ── the settings index drives the prompt ────────────────────────────────────

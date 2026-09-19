@@ -1,6 +1,15 @@
 # Machine environment
 
-Detected on the machine running the DSH host process, and refreshed whenever the prompt plugin mounts. Every value below is measured rather than assumed — when one of them conflicts with what you observe, trust the observation.
+System and tool facts are detected on the machine running the DSH host process, and refreshed whenever the prompt plugin mounts. The working directory and model selection are resolved separately for the current agent and session each time the prompt is assembled. When any value conflicts with what you observe, trust the observation.
+
+## Working directory
+
+- This session's working directory is `{{cwd}}`.
+- Resolve workspace-relative paths against this directory, not the DSH installation directory or the host process's startup directory.
+
+## Current model
+
+- This agent's current model is `{{model}}` (provider: `{{provider}}`).
 
 ## System
 
