@@ -231,7 +231,7 @@ window.__ModuleLoader__.load({
     }
 
     /** Where a variable's value came from, in the page's own words. */
-    const SOURCE_LABELS = { environment: '系统', config: '配置', probe: '探测', script: '脚本' }
+    const SOURCE_LABELS = { environment: '系统', config: '配置', probe: '探测', script: '脚本', dsh: 'DSH 原生' }
 
     /** Valid variable names, mirroring the registry's own rule. */
     const VARIABLE_NAME = /^[a-z][a-z0-9_]*$/
@@ -953,9 +953,9 @@ window.__ModuleLoader__.load({
       // every answer the page gives about it differs: when an edit lands, what
       // its switch would mean, and how it stops being one.
       const compactionDraft = draft !== null && draft.kind === 'compaction'
-      // The variables in force, and the scripts that supply them, as the Host
-      // last reported them. The list is what a body may reference, so it is also
-      // what the editor uses to catch a reference that would fail assembly.
+      // The Host's catalogue includes plugin-owned values and DSH-native context
+      // references. It is not the whole runtime registry: another plugin may
+      // provide names that only the actual assembly can resolve.
       const variables = variableReport !== null && Array.isArray(variableReport.variables) ? variableReport.variables : []
       const scripts = variableReport !== null && Array.isArray(variableReport.scripts) ? variableReport.scripts : []
       const knownVariables = variables.map((variable) => variable.name)
@@ -1332,7 +1332,7 @@ window.__ModuleLoader__.load({
         if (missing.length > 0) parts.push(`组合里还记着 ${missing.join('、')}，本机没有这些条目`)
         const unregistered = Array.isArray(report.unregistered) ? report.unregistered : []
         if (unregistered.length > 0) {
-          parts.push(`${unregistered.map((name) => `{{${name}}}`).join(' ')} 还没注册，会按字面量渲染`)
+          parts.push(`${unregistered.map((name) => `{{${name}}}`).join(' ')} 未列入当前变量目录，请确认会话组装时是否有来源提供`)
         }
         return `${parts.join('；')}。导入不会自动启用这个组合。`
       }
@@ -1820,10 +1820,14 @@ window.__ModuleLoader__.load({
               onClick: () => insertVariable(name),
             }, `{{${name}}}`)),
           ]),
+          variables.some((variable) => variable.source === 'dsh')
+            ? h('p', { key: 'native-vars', className: 'dsh-prompt-manager__note' },
+              'DSH 原生变量按当前 agent / 会话动态解析，无需另写脚本注册。此处预览只渲染 Markdown，不代入某个会话的目录或模型。')
+            : null,
           unknownInDraft.length === 0 ? null : h('span', {
             key: 'unknown',
             className: 'dsh-prompt-manager__status dsh-prompt-manager__status--error',
-          }, `这些变量还没有注册：${unknownInDraft.map((name) => `{{${name}}}`).join(' ')}（宿主会把它按字面量渲染并记一条警告；去「变量」页建一条脚本提供它，或把引用删掉）`),
+          }, `这些引用未列入当前变量目录：${unknownInDraft.map((name) => `{{${name}}}`).join(' ')}（可能由其他插件提供；若会话组装时仍无法解析，宿主才会保留字面量并记录警告）`),
           malformedInDraft.length === 0 ? null : h('span', {
             key: 'malformed',
             className: 'dsh-prompt-manager__status dsh-prompt-manager__status--error',
@@ -2075,7 +2079,8 @@ window.__ModuleLoader__.load({
         }, [
           h('div', { key: 'main', className: 'dsh-prompt-manager__cardMain', style: { cursor: 'default' } }, [
             h('span', { key: 'name', className: 'dsh-prompt-manager__title' }, `{{${variable.name}}}`),
-            h('span', { key: 'value', className: 'dsh-prompt-manager__meta' }, variable.value),
+            h('span', { key: 'value', className: 'dsh-prompt-manager__meta' },
+              variable.source === 'dsh' ? '按当前 agent / 会话动态解析' : variable.value),
             h('span', { key: 'refs', className: 'dsh-prompt-manager__meta' },
               variable.referencedBy.length === 0
                 ? '还没有提示词引用它'
@@ -2136,7 +2141,7 @@ window.__ModuleLoader__.load({
             h(Button, { key: 'refresh', disabled: busy, onClick: () => { void refreshScripts() } }, '重新测量'),
           ]),
           h('p', { key: 'lede', className: 'dsh-prompt-manager__intro' },
-            '变量是提示词里那段大括号引用的来源：系统事实由插件注册，脚本由你写。一条脚本打印一个 JSON，键就是变量名，所以一条脚本能提供多个变量；它跑在独立子进程里，超时或报错都伤不到 DSH 本身。'),
+            '变量是提示词里那段大括号引用的来源：系统事实由插件注册，DSH 原生变量按当前 agent / 会话动态解析，脚本由你写。原生变量只显示用途，不显示某个会话的实际值。一条脚本打印一个 JSON，键就是变量名；它跑在独立子进程里，超时或报错都伤不到 DSH 本身。'),
           variableReport !== null && typeof variableReport.error === 'string'
             ? h('p', { key: 'error', className: 'dsh-prompt-manager__status dsh-prompt-manager__status--error' }, variableReport.error)
             : null,

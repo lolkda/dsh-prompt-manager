@@ -1099,7 +1099,8 @@ assert.ok(
 inspect(renderer.tree, 'textarea').nodes[0].props.onChange({ target: { value: 'x={{neverregistered}} y={{never-registered}}' } })
 await renderer.settle()
 const flagged = inspect(renderer.tree).text
-assert.ok(flagged.includes('这些变量还没有注册'), 'a reference with no registered variable is flagged')
+assert.ok(flagged.includes('这些引用未列入当前变量目录'), 'a reference absent from the catalogue is flagged without claiming it cannot resolve')
+assert.ok(flagged.includes('若会话组装时仍无法解析'), 'the warning must distinguish catalogue absence from an actual assembly failure')
 assert.ok(flagged.includes('{{neverregistered}}'), 'and the warning names it, before assembly can fail on it')
 assert.ok(flagged.includes('这些引用的写法不对'), 'a reference that is not a variable name at all is flagged too')
 assert.ok(flagged.includes('{{never-registered}}'), 'with the offending text quoted back')
@@ -2110,6 +2111,40 @@ assert.equal(
   false,
   'and it carries no minimum width for a wrap threshold to key off',
 )
+
+// ── DSH context variables are insertable references, not global snapshots ────
+
+const beforeNativeVariables = VARIABLES
+VARIABLES = [...VARIABLES, ...['cwd', 'model', 'provider'].map((name) => ({
+  name, source: 'dsh', detail: `上下文变量 ${name}`, referencedBy: ['第一条'],
+}))]
+scope.state = { ...scope.state, status: 'ready', writable: true, mode: 'host', value: { entries: ENTRIES, presets: PRESETS } }
+windowStub.confirm = () => true
+const nativeRenderer = createRenderer()
+const nativeSection = materialize(nativeRenderer.React).registrations[0].component
+nativeRenderer.mount(nativeSection, { scope })
+await nativeRenderer.settle()
+openRow(nativeRenderer.tree, '第一条').props.onClick()
+await nativeRenderer.settle()
+inspect(nativeRenderer.tree, 'textarea').nodes[0].props.onChange({ target: { value: '' } })
+await nativeRenderer.settle()
+for (const name of ['cwd', 'model', 'provider']) {
+  button(nativeRenderer.tree, `{{${name}}}`).props.onClick()
+  await nativeRenderer.settle()
+  assert.ok(inspect(nativeRenderer.tree, 'textarea').nodes[0].props.value.includes(`{{${name}}}`), 'each native reference must be insertable into the actual draft')
+}
+assert.ok(!inspect(nativeRenderer.tree).text.includes('这些引用未列入当前变量目录'), 'DSH context references must not produce the unknown-variable warning')
+assert.ok(inspect(nativeRenderer.tree).text.includes('按当前 agent / 会话动态解析'), 'the editor must explain that native values are resolved at assembly time')
+button(nativeRenderer.tree, '← 返回').props.onClick()
+await nativeRenderer.settle()
+inspect(nativeRenderer.tree, 'button').nodes.find((node) => textOf(node).startsWith('变量（')).props.onClick()
+await nativeRenderer.settle()
+for (const name of ['cwd', 'model', 'provider']) {
+  const row = rowFor(nativeRenderer.tree, `{{${name}}}`)
+  assert.ok(textOf(row).includes('DSH 原生'), 'the catalogue must identify the real owner of native references')
+  assert.ok(textOf(row).includes('按当前 agent / 会话动态解析'), 'a native row must not look like an empty or globally measured value')
+}
+VARIABLES = beforeNativeVariables
 
 console.log('client ok')
 console.log(`  bundle      factory id ${PACKAGE_NAME}, materialized and driven against stub modules`)

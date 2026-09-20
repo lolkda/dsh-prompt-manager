@@ -130,19 +130,19 @@ export interface Config {
      */
     compaction?: boolean;
 }
-/** Where one prompt variable's value came from. */
+/** Where one plugin-owned prompt variable's value came from. */
 export type VariableSource = 'environment' | 'config' | 'probe' | 'script';
 /** One prompt variable, as the settings page sees it. */
 export interface VariableView {
     /** The `{{name}}` reference. */
     name: string;
-    /** The value every assembly currently sees. */
-    value: string;
-    /** Which layer supplied it. */
-    source: VariableSource;
-    /** Owning script name, for a script variable. */
+    /** A profile-wide value, omitted for DSH's per-agent/per-session references. */
+    value?: string | undefined;
+    /** Which layer supplies it; `dsh` denotes context-dependent native references. */
+    source: VariableSource | 'dsh';
+    /** Owning script name, or an explanation of a native reference. */
     detail?: string | undefined;
-    /** When the value was last written. */
+    /** When a profile-wide value was last written; absent for native references. */
     updatedAt?: string | undefined;
     /** Titles of the prompt entries whose bodies reference this variable. */
     referencedBy: string[];

@@ -250,7 +250,8 @@ try {
 
   // DSH's agent-loop owns these providers; use their contracts without mounting
   // the entire agent runtime. The actual registry and prompt-manager render below.
-  const fresh = await assembleWith({}, BARE, [{
+  const nativeRoutes = []
+  const fresh = await assembleWith({}, BARE, [fakeWebServer(nativeRoutes), {
     name: 'session-variables',
     inject: ['systemPrompt'],
     apply: (ctx) => {
@@ -359,6 +360,31 @@ try {
     !fresh.warnings.some((warning) => warning.includes('model') || warning.includes('provider')),
     'the plugin must not contest DSH\'s model variables or report them as unresolved',
   )
+
+  // ── native references belong in the catalogue, never as global values ──────
+
+  const nativeNames = ['cwd', 'model', 'provider']
+  const readNativeApi = async (endpoint) => {
+    const response = fakeResponse()
+    await nativeRoutes[0].handler(fakeRequest({ url: `${ROUTE_PREFIX}/${endpoint}` }), response)
+    assert.equal(response.state.status, 200)
+    return response.json()
+  }
+  const nativeCatalog = (await readNativeApi('variables')).variables.filter((variable) => nativeNames.includes(variable.name))
+  assert.deepEqual(nativeCatalog.map((variable) => variable.name), nativeNames, 'the editor catalogue must include all three DSH context variables')
+  for (const variable of nativeCatalog) {
+    assert.equal(variable.source, 'dsh', 'a native reference must be identified as DSH-owned, not a plugin registration')
+    assert.equal(Object.hasOwn(variable, 'value'), false, 'a global catalogue must not expose the last session or model value')
+    assert.equal(Object.hasOwn(variable, 'updatedAt'), false, 'native references have no mount-time measurement')
+    assert.ok(typeof variable.detail === 'string' && variable.detail.length > 0)
+    assert.deepEqual(variable.referencedBy, ['机器环境'], 'native references must participate in reference tracking')
+  }
+  await fresh.read('session-catalogue', '/private/context-not-for-settings', { provider: 'catalogue-provider', model: 'catalogue-model' })
+  assert.deepEqual((await readNativeApi('variables')).variables.filter((variable) => nativeNames.includes(variable.name)), nativeCatalog, 'assembling a different agent must not freeze its values into the settings catalogue')
+  const nativeStatus = await readNativeApi('status')
+  for (const variable of nativeNames) {
+    assert.equal(Object.hasOwn(nativeStatus.variables, variable), false, 'the status value map must contain real global values only')
+  }
 
   // ── the settings index drives the prompt ────────────────────────────────────
 
@@ -1060,6 +1086,21 @@ try {
   assert.equal(routeSettings.state.value.entries.find((entry) => entry.id === 'compact-zh-2').kind, 'compaction', 'the legacy body must stay an independent compression entry')
   assert.equal(readFileSync(join(LIVE_ROUTES, 'sections', 'compact-zh-2.md'), 'utf8'), '压缩正文', 'import must preserve the original compression body')
   assert.deepEqual((await call({ url: `${ROUTE_PREFIX}/session/session-pack-manual` })).json(), manualChoice, 'pack operations must leave the existing manual session choice unchanged')
+
+  // Native references in an imported body are known without becoming plugin
+  // globals. A genuinely unknown name must still be reported independently.
+  const nativeImported = await call({
+    method: 'POST',
+    url: `${ROUTE_PREFIX}/pack/import`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({
+      format: 'dsh-prompt-manager-pack', version: 1,
+      preset: { id: 'contextual', name: '会话变量', entries: ['contextual'] },
+      entries: [{ id: 'contextual', title: '会话变量', body: '{{cwd}} {{model}} {{provider}} {{truly_unknown}}' }],
+    }),
+  })
+  assert.equal(nativeImported.state.status, 200)
+  assert.deepEqual(nativeImported.json().unregistered, ['truly_unknown'], 'pack imports must not misreport DSH native references as unregistered')
 
   // ── a compaction instruction is an entry kind, not a section ─────────────────
   //

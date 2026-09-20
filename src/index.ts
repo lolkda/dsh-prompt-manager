@@ -210,20 +210,30 @@ export interface Config {
   compaction?: boolean
 }
 
-/** Where one prompt variable's value came from. */
+/** Where one plugin-owned prompt variable's value came from. */
 export type VariableSource = 'environment' | 'config' | 'probe' | 'script'
+
+/**
+ * Known DSH agent-loop references. Catalogue metadata only: the plugin must not
+ * register providers for them or turn one agent's values into profile globals.
+ */
+const DSH_CONTEXT_VARIABLES = {
+  cwd: '当前会话的工作目录，不是宿主启动目录',
+  model: '当前 agent 选用的模型 ID，切换模型后随下一次组装更新',
+  provider: '当前 agent 选用的模型提供方 ID',
+} as const
 
 /** One prompt variable, as the settings page sees it. */
 export interface VariableView {
   /** The `{{name}}` reference. */
   name: string
-  /** The value every assembly currently sees. */
-  value: string
-  /** Which layer supplied it. */
-  source: VariableSource
-  /** Owning script name, for a script variable. */
+  /** A profile-wide value, omitted for DSH's per-agent/per-session references. */
+  value?: string | undefined
+  /** Which layer supplies it; `dsh` denotes context-dependent native references. */
+  source: VariableSource | 'dsh'
+  /** Owning script name, or an explanation of a native reference. */
   detail?: string | undefined
-  /** When the value was last written. */
+  /** When a profile-wide value was last written; absent for native references. */
   updatedAt?: string | undefined
   /** Titles of the prompt entries whose bodies reference this variable. */
   referencedBy: string[]
@@ -1051,7 +1061,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   }
 
   /**
-   * Variable names the given bodies reference that this plugin does not supply.
+   * References absent from the plugin-owned and known DSH-native catalogue.
    *
    * A report, never a refusal: another row may register a name, and a name that
    * is merely unregistered today is a variable somebody is still about to write.
@@ -1065,7 +1075,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     for (const body of bodies) {
       for (const match of body.matchAll(/\{\{([a-z][a-z0-9_]*)\}\}/g)) {
         const reference = match[1]
-        if (reference === undefined || variables.has(reference)) continue
+        if (reference === undefined || variables.has(reference) || Object.hasOwn(DSH_CONTEXT_VARIABLES, reference)) continue
         if (!found.includes(reference)) found.push(reference)
       }
     }
@@ -1267,20 +1277,29 @@ export function apply(ctx: Context, config: Config = {}): void {
   isReferenced = (variable) => referencesIn().has(variable)
 
   /**
-   * The variables in force, each with what references it.
-   * @returns one view per variable, sorted by name.
+   * The variable catalogue: plugin-owned values and DSH's native references.
+   * Context-dependent values are deliberately absent from this global view.
+   * @returns one view per name, sorted by name.
    */
   function variableViews(): VariableView[] {
     const references = referencesIn()
-    return [...variables.entries()]
-      .map(([name, record]) => ({
+    const own = [...variables.entries()].map(([name, record]) => ({
+      name,
+      value: record.value,
+      source: record.source,
+      detail: record.detail,
+      updatedAt: record.updatedAt,
+      referencedBy: references.get(name) ?? [],
+    }))
+    const native = Object.entries(DSH_CONTEXT_VARIABLES)
+      .filter(([name]) => !variables.has(name))
+      .map(([name, detail]) => ({
         name,
-        value: record.value,
-        source: record.source,
-        detail: record.detail,
-        updatedAt: record.updatedAt,
+        source: 'dsh' as const,
+        detail,
         referencedBy: references.get(name) ?? [],
       }))
+    return [...own, ...native]
       .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
   }
 
