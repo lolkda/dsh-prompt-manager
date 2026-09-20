@@ -99,13 +99,75 @@ try {
     /** When set, `importPack` refuses with it instead of creating anything. */
     refusal: null,
   }
-  const ctx = {
-    inject: (deps, callback) => callback({ webServer: { register: (route) => { routes.push(route); return () => {} } } }),
-    effect: (execute) => {
-      const disposer = execute()
-      return typeof disposer === 'function' ? disposer : () => {}
-    },
+  /**
+   * A composition, modelled the way cordis actually behaves.
+   *
+   * Rows are siblings: each one provides its services into the composition, and
+   * a plugin only ever sees the ones it *declared*. Reading anything else throws
+   * `cannot get property "x" without inject` — which is exactly what the real
+   * `web` profile does to a route that tries to poke at `connection` without
+   * asking for it. A service mounted after the plugin mounted reaches the plugin
+   * that declared it, which is what "read live" has to mean.
+   *
+   * @returns the composition: its routes, the trust authority's log, a mount for
+   * that authority, and a caller bound to the registered handler.
+   */
+  function compose() {
+    const provided = new Map([
+      ['webServer', { register: (route) => { routes.push(route); return () => {} } }],
+    ])
+    const waiting = []
+    const asked = []
+
+    /** The scope one `inject` callback receives: declared names only. */
+    const scopeFor = (deps) => new Proxy({}, {
+      get: (_target, prop) => {
+        if (typeof prop !== 'string' || !deps.includes(prop) || !provided.has(prop)) {
+          throw new Error(`cannot get property ${JSON.stringify(String(prop))} without inject`)
+        }
+        return provided.get(prop)
+      },
+    })
+
+    /** Mount one service, and wake every inject that was waiting on it. */
+    const provide = (name, value) => {
+      provided.set(name, value)
+      for (let index = waiting.length - 1; index >= 0; index -= 1) {
+        if (!waiting[index].deps.every((dep) => provided.has(dep))) continue
+        const [entry] = waiting.splice(index, 1)
+        entry.callback(scopeFor(entry.deps))
+      }
+    }
+
+    installPromptRoutes({
+      inject: (deps, callback) => {
+        if (deps.every((dep) => provided.has(dep))) {
+          callback(scopeFor(deps))
+          return () => {}
+        }
+        waiting.push({ deps, callback })
+        return () => {}
+      },
+      effect: (execute) => {
+        const disposer = execute()
+        return typeof disposer === 'function' ? disposer : () => {}
+      },
+    }, host)
+
+    return {
+      asked,
+      /** Mount the harness's browser trust, the way the `connection` row does. */
+      mountTrust: (answer) => provide('connection', {
+        requestRejection: (request) => { asked.push(request); return answer(request) },
+      }),
+      call: async (options) => {
+        const response = fakeResponse()
+        await routes.at(-1).handler(fakeRequest(options), response)
+        return response
+      },
+    }
   }
+
   /** What the fake engine recorded, and how it answers. */
   const engine = {
     calls: [],
@@ -196,7 +258,8 @@ try {
   /** What the compaction seam reports; `undefined` means the feature is off here. */
   let compactionStats
 
-  installPromptRoutes(ctx, {
+  /** The host half the route drives; reused by every composition below. */
+  const host = {
     store,
     // The real host hands the live per-session store in; the route only ever reads
     // and writes files through it, so the real one is what a test should drive.
@@ -245,7 +308,9 @@ try {
       }
     },
     compaction: () => compactionStats,
-  })
+  }
+
+  const composition = compose()
 
   assert.equal(routes.length, 1, 'the plugin must register exactly one route')
   assert.equal(routes[0].kind, 'prefix', 'the route must be a prefix route')
@@ -373,6 +438,106 @@ try {
     const allowed = await call({ url: `${ROUTE_PREFIX}/status`, host })
     assert.equal(allowed.state.status, 200, `${host} must be accepted as a loopback host name`)
   }
+
+  // ── the LAN deployment: the harness's own browser trust decides ─────────────
+  // `dsh web` behind @lolkda/dsh-web-lan binds 0.0.0.0 and hands the browser a
+  // session cookie, so the page opened from another device is authenticated but
+  // not loopback. The store has to ride the same decision `/api` rides: without
+  // that, every store call is refused and the settings page shows the raw
+  // refusal instead of bodies, variables, sources and presets.
+  const lan = compose()
+  lan.mountTrust(() => undefined)
+  const lanRead = await lan.call({
+    url: `${ROUTE_PREFIX}/status`,
+    remoteAddress: '192.168.1.5',
+    host: '192.168.1.100:3080',
+    origin: 'http://192.168.1.100:3080',
+  })
+  assert.equal(lanRead.state.status, 200, 'a LAN page whose session the harness accepts must reach the store')
+  assert.equal(lanRead.json().dir, SECTIONS, 'and must get the same answer a loopback page gets')
+  assert.equal(lan.asked.length, 1, 'the harness must be the thing that decided')
+
+  const lanWrite = await lan.call({
+    method: 'PUT',
+    url: `${ROUTE_PREFIX}/body/lan-note`,
+    remoteAddress: '192.168.1.5',
+    host: '192.168.1.100:3080',
+    origin: 'http://192.168.1.100:3080',
+    body: JSON.stringify({ body: 'FROM-THE-LAN', fileSha1: null }),
+  })
+  assert.equal(lanWrite.state.status, 200, 'an accepted session may write')
+  assert.equal(store.read('lan-note').body, 'FROM-THE-LAN', 'and the body lands on disk')
+
+  const lanCrossOrigin = await lan.call({
+    method: 'PUT',
+    url: `${ROUTE_PREFIX}/body/lan-note`,
+    remoteAddress: '192.168.1.5',
+    host: '192.168.1.100:3080',
+    origin: 'http://evil.example',
+    body: JSON.stringify({ body: 'NOPE', fileSha1: null }),
+  })
+  assert.equal(lanCrossOrigin.state.status, 403, 'an accepted session still owes same-origin on a write')
+  assert.equal(store.read('lan-note').body, 'FROM-THE-LAN', 'and a cross-origin write changes nothing')
+
+  const noSession = compose()
+  noSession.mountTrust(() => 401)
+  const noSessionRead = await noSession.call({
+    url: `${ROUTE_PREFIX}/status`,
+    remoteAddress: '192.168.1.5',
+    host: '192.168.1.100:3080',
+  })
+  assert.equal(noSessionRead.state.status, 401, 'a LAN page without a session is told to get one, not told to come back on loopback')
+  assert.equal(noSessionRead.json().code, 'no-session', 'and the refusal names the missing session')
+
+  const foreignHost = compose()
+  foreignHost.mountTrust(() => 403)
+  const foreignRead = await foreignHost.call({
+    url: `${ROUTE_PREFIX}/status`,
+    remoteAddress: '10.0.0.5',
+    host: 'evil.example:3080',
+  })
+  assert.equal(foreignRead.state.status, 403, 'a Host the deployment does not serve stays refused')
+  assert.equal(foreignRead.json().code, 'host-not-trusted', 'and the refusal says which rule held')
+
+  // A loopback peer keeps the strict local path: a rebound name is refused
+  // before the harness is ever asked, even when the harness would accept it.
+  const askedBefore = lan.asked.length
+  const localRebound = await lan.call({ url: `${ROUTE_PREFIX}/status`, host: 'evil.example:3080', origin: 'http://evil.example:3080' })
+  assert.equal(localRebound.state.status, 403, 'a loopback peer with a rebound Host is refused')
+  assert.equal(localRebound.json().code, 'host-not-loopback', 'and the refusal names the host rule')
+  assert.equal(lan.asked.length, askedBefore, 'the harness must not be consulted for a loopback request')
+
+  // The authority is read per request, so a Connection mounted after the route
+  // was registered still admits (and fences) later requests.
+  const late = compose()
+  const beforeMount = await late.call({
+    url: `${ROUTE_PREFIX}/status`,
+    remoteAddress: '192.168.1.5',
+    host: '192.168.1.100:3080',
+  })
+  assert.equal(beforeMount.state.status, 403, 'a composition with no trust authority stays loopback-only')
+  assert.equal(beforeMount.json().code, 'no-trust-authority', 'and says which rule held')
+  late.mountTrust(() => undefined)
+  const afterMount = await late.call({
+    url: `${ROUTE_PREFIX}/status`,
+    remoteAddress: '192.168.1.5',
+    host: '192.168.1.100:3080',
+  })
+  assert.equal(afterMount.state.status, 200, 'a Connection mounted later is picked up on the next request')
+
+  // The route must reach the authority the way the composition offers it: a
+  // sibling row's service is only visible to a plugin that declared it. Poking
+  // at the scope for a name nobody asked for throws, and a route that swallowed
+  // that would refuse every LAN request with no-trust-authority — which is
+  // exactly what shipped once.
+  const declared = compose()
+  declared.mountTrust(() => undefined)
+  const declaredRead = await declared.call({
+    url: `${ROUTE_PREFIX}/status`,
+    remoteAddress: '192.168.1.5',
+    host: '192.168.1.100:3080',
+  })
+  assert.equal(declaredRead.state.status, 200, 'the trust authority must be reached by declaring it, not by reaching into the webServer scope')
 
   const crossOrigin = await call({
     method: 'PUT',
@@ -1032,12 +1197,12 @@ try {
   assert.deepEqual(warnings, [], `no warning expected, got: ${warnings.join(' | ')}`)
 
   console.log('routes ok')
-  console.log('  gates       loopback peer + loopback host + same-origin writes only, unusable ids refused')
+  console.log('  gates       loopback local path (host name checked), deployment trust for every other peer, same-origin writes only')
   console.log('  fencing     409 on absent-or-changed override, 200 on a matching hash')
   console.log('  statuses    400 malformed/oversized, 404 unknown path, 405 wrong method, 422 bad reference')
   console.log('  health      status reports the compaction seam only when the feature is on')
   console.log(`  presets     preset id allocation, ${String(MAX_PRESETS)} preset cap, blank title refused`)
-  console.log('  gates       403 for a rebound host, a foreign origin, and a non-loopback peer')
+  console.log('  gates       403 for a rebound host, a foreign origin, an unserved Host, and a composition with no trust authority; 401 without a session')
   console.log('  sources     add / list / check / apply / revert / forget, subscribed bodies read-only')
   console.log('  variables   list with provenance and references, draft run, saved run, refresh')
   console.log('  scripts     read / save with fence / delete, 422 on an unusable run, host-only writes')

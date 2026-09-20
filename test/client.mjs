@@ -463,6 +463,20 @@ function materialize(React) {
     async (url, init) => {
       const method = init?.method ?? 'GET'
       requests.push({ url, method, body: init?.body, seq: step++ })
+      if (writeRefusal !== null && method !== 'GET') {
+        return {
+          ok: false,
+          status: writeRefusal.status,
+          json: async () => ({ error: writeRefusal.error, code: writeRefusal.code }),
+        }
+      }
+      if (storeRefusal !== null && (url.endsWith('/status') || url.endsWith('/sources') || url.endsWith('/variables'))) {
+        return {
+          ok: false,
+          status: storeRefusal.status,
+          json: async () => ({ error: storeRefusal.error, code: storeRefusal.code }),
+        }
+      }
       // One conversation's choice. The Host merges a patch into the file that
       // session already has, so this answers with the merged choice and never
       // touches the settings document the rest of these cases write through.
@@ -650,6 +664,20 @@ function textOf(node) {
   })
   return parts.join(' ')
 }
+
+/**
+ * When set, the stub answers the store reads with this refusal instead of data.
+ *
+ * The page's own honesty is what is under test: a store it cannot reach is a
+ * different fact from a store that is reachable and not writable.
+ */
+let storeRefusal = null
+
+/**
+ * When set, the stub refuses the store's *writes* with this refusal while reads
+ * keep working — the session that was there when the page loaded is gone.
+ */
+let writeRefusal = null
 
 const renderer = createRenderer()
 const { registrations, injections } = materialize(renderer.React)
@@ -2146,6 +2174,79 @@ for (const name of ['cwd', 'model', 'provider']) {
 }
 VARIABLES = beforeNativeVariables
 
+// ── a store the page cannot reach: say so, and invent nothing ────────────────
+
+storeRefusal = {
+  status: 403,
+  code: 'host-not-trusted',
+  error: 'this Host is not in trustedHosts, so the prompt store refuses it',
+}
+const refusedRenderer = createRenderer()
+const refusedSection = materialize(refusedRenderer.React).registrations[0].component
+refusedRenderer.mount(refusedSection, { scope })
+await refusedRenderer.settle()
+const refused = inspect(refusedRenderer.tree)
+
+assert.ok(
+  !refused.text.includes('this Host is not in trustedHosts'),
+  'a refused read must not be reported by quoting the Host\'s English refusal as the answer',
+)
+assert.ok(refused.text.includes('提示词存储读不到'), 'the page must say the store could not be read')
+assert.ok(refused.text.includes('没有被部署信任'), 'and say which rule the Host applied')
+assert.ok(
+  !refused.text.includes('压缩指令：已关闭'),
+  'a read that failed must not be turned into the claim that the compaction seam is switched off',
+)
+assert.equal(
+  button(refusedRenderer.tree, '新增提示词').props.disabled,
+  true,
+  'editing must be off while the store is unreachable — an enabled editor would fail on every save',
+)
+storeRefusal = null
+
+// ── a write refused because the session is gone: say it in Chinese ───────────
+
+// The page loaded with a session and then lost it (the Host restarted, the
+// cookie expired). Reads still work; the save comes back 401 with the Host's
+// English sentence, which is not an answer for someone reading a Chinese page.
+writeRefusal = {
+  status: 401,
+  code: 'no-session',
+  error: 'the prompt store needs the browser session /api uses: open the URL printed by dsh web',
+}
+const lostRenderer = createRenderer()
+const lostSection = materialize(lostRenderer.React).registrations[0].component
+lostRenderer.mount(lostSection, { scope })
+await lostRenderer.settle()
+openRow(lostRenderer.tree, '第一条').props.onClick()
+await lostRenderer.settle()
+inspect(lostRenderer.tree, 'textarea').nodes[0].props.onChange({ target: { value: '# changed' } })
+await lostRenderer.settle()
+button(lostRenderer.tree, '保存修改').props.onClick()
+await lostRenderer.settle()
+const lost = inspect(lostRenderer.tree)
+
+assert.ok(
+  !lost.text.includes('the prompt store needs the browser session'),
+  'a refused save must not report the Host\'s English sentence as the answer either',
+)
+assert.ok(lost.text.includes('这一页没有浏览器会话'), 'the save refusal must be said in the page\'s own words')
+
+// A second call site: allocating an id is its own request, and it answers the
+// same way. Two sites are driven on purpose — the copy lives in one helper, and
+// a site that kept quoting the Host would be a regression nothing else catches.
+button(lostRenderer.tree, '← 返回').props.onClick()
+await lostRenderer.settle()
+button(lostRenderer.tree, '新增提示词').props.onClick()
+await lostRenderer.settle()
+const lostAdd = inspect(lostRenderer.tree)
+assert.ok(
+  !lostAdd.text.includes('the prompt store needs the browser session'),
+  'the add control must not quote the Host either',
+)
+assert.ok(lostAdd.text.includes('这一页没有浏览器会话'), 'and must answer in the page\'s own words')
+writeRefusal = null
+
 console.log('client ok')
 console.log(`  bundle      factory id ${PACKAGE_NAME}, materialized and driven against stub modules`)
 console.log(`  section     settings.section id=prompt-manager order=${String(meta.order)}`)
@@ -2165,3 +2266,5 @@ console.log('  subscribe   sources page, add/fork, read-only subscribed bodies, 
 console.log('  variables   list with provenance, copy-reference, new script from template, no insert into another body')
 console.log('  scripts     save and enable, test run stays a draft, the editor inserts a reference at the caret')
 console.log('  addrow      a fixed two-column grid, so the controls cannot re-flow when the panel width shifts')
+console.log('  refused     an unreachable store disables editing and says why, instead of quoting the Host or inventing facts')
+console.log('  lost-session a save refused for a missing session answers in the page\'s words, not the Host\'s English')

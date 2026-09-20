@@ -222,12 +222,29 @@ window.__ModuleLoader__.load({
         const detail = data && typeof data.error === 'string' ? data.error : `${method} ${path} failed (${response.status})`
         const error = new Error(detail)
         error.status = response.status
+        // Which rule refused it, when the Host named one: the page answers in its
+        // own words per code instead of quoting the Host's English sentence.
+        error.code = data && typeof data === 'object' && typeof data.code === 'string' ? data.code : undefined
         // A refused save carries the run that refused it, so the editor can show
         // what the script actually printed rather than only that it was refused.
         error.report = data && typeof data === 'object' ? data.report : undefined
         throw error
       }
       return data
+    }
+
+    /**
+     * Why the store could not be read, in the page's own words.
+     *
+     * The Host names the rule it applied; quoting its English sentence at a
+     * person reading a Chinese page explains nothing, and saying nothing at all
+     * leaves them with an empty panel and no idea which side to fix.
+     */
+    const STORE_REFUSALS = {
+      'no-session': '这一页没有浏览器会话：用 dsh web 打印出来的地址重新打开。',
+      'host-not-trusted': '这个地址没有被部署信任：把它加进 trustedHosts，或改用本机地址打开。',
+      'no-trust-authority': '这个组合没有挂 Connection，提示词存储只服务本机：请在本机打开这一页。',
+      'host-not-loopback': '提示词存储只接受本机主机名（127.0.0.1 / localhost / [::1]）。',
     }
 
     /** Where a variable's value came from, in the page's own words. */
@@ -634,8 +651,21 @@ window.__ModuleLoader__.load({
     /** What a session that has chosen nothing gets: no preset, DSH's own instruction. */
     const EMPTY_CHOICE = { preset: '', compaction: '' }
 
-    /** The text one failed request is reported as. */
+    /**
+     * The text one failed request is reported as.
+     *
+     * The Host names the rule it refused with; quoting its English sentence at a
+     * person reading a Chinese page explains nothing, so a known code is said in
+     * the page's own words. Anything else — a save refused for a stale hash, a
+     * script that would not run — already comes back in the language the page is
+     * written in, and is passed through.
+     *
+     * @param error - whatever the failed call rejected with.
+     * @returns a sentence for a person.
+     */
     function failureText(error) {
+      const known = STORE_REFUSALS[error?.code]
+      if (known !== undefined) return known
       return error && error.message ? error.message : String(error)
     }
 
@@ -917,13 +947,17 @@ window.__ModuleLoader__.load({
       const refreshStore = React.useCallback(() => {
         return request('GET', '/status')
           .then((next) => { setStore(next) })
-          .catch((error) => { setStore({ writable: false, dir: '', ids: [], error: error.message }) })
+          // "Could not read it" is its own state, not a store with zero
+          // everything: a fabricated `writable: false` would disable editing for
+          // a store that is perfectly writable, and a fabricated empty index
+          // would claim there are no prompts.
+          .catch((error) => { setStore({ ok: false, code: error?.code, status: error?.status, error: failureText(error) }) })
       }, [])
 
       const refreshSources = React.useCallback(() => {
         return request('GET', '/sources')
           .then((next) => { setSources(Array.isArray(next.sources) ? next.sources : []) })
-          .catch((error) => { setStatus({ kind: 'error', text: error.message }) })
+          .catch((error) => { setStatus({ kind: 'error', text: failureText(error) }) })
       }, [])
 
       /** Read the variables in force and the scripts that supply them. */
@@ -931,7 +965,7 @@ window.__ModuleLoader__.load({
         return request('GET', '/variables')
           .then((next) => { setVariableReport(next) })
           .catch((error) => {
-            setVariableReport({ variables: [], scripts: [], error: error.message })
+            setVariableReport({ variables: [], scripts: [], error: failureText(error) })
           })
       }, [])
 
@@ -941,7 +975,10 @@ window.__ModuleLoader__.load({
         void refreshVariables()
       }, [refreshSources, refreshStore, refreshVariables])
 
-      const writable = snapshot.writable !== false && (store === null || store.writable !== false)
+      // An unreachable store is not a writable one: leaving the editor lit would
+      // let a person type a whole draft and only find out on save.
+      const storeUnreachable = store !== null && store.ok === false
+      const writable = snapshot.writable !== false && !storeUnreachable && (store === null || store.writable !== false)
       // A brand-new entry has no saved side yet and is therefore always dirty.
       const dirty = draft !== null && (saved === null
         || draft.title !== saved.title || draft.order !== saved.order || draft.body !== saved.body)
@@ -992,7 +1029,7 @@ window.__ModuleLoader__.load({
           setStatus(null)
           setView('editor')
         } catch (error) {
-          setStatus({ kind: 'error', text: error.message })
+          setStatus({ kind: 'error', text: failureText(error) })
           setDraft(null)
           setSaved(null)
         } finally {
@@ -1050,7 +1087,7 @@ window.__ModuleLoader__.load({
           setStatus({ kind: 'info', text: `已分配 id ${allocated.id}，保存后才会出现在提示词里。` })
           setView('editor')
         } catch (error) {
-          setStatus({ kind: 'error', text: error.message })
+          setStatus({ kind: 'error', text: failureText(error) })
         } finally {
           setBusy(false)
         }
@@ -1094,7 +1131,7 @@ window.__ModuleLoader__.load({
           })
           setView('editor')
         } catch (error) {
-          setStatus({ kind: 'error', text: error.message })
+          setStatus({ kind: 'error', text: failureText(error) })
         } finally {
           setBusy(false)
         }
@@ -1153,7 +1190,7 @@ window.__ModuleLoader__.load({
           })
           await refreshStore()
         } catch (error) {
-          setStatus({ kind: 'error', text: error.message })
+          setStatus({ kind: 'error', text: failureText(error) })
         } finally {
           setBusy(false)
         }
@@ -1228,7 +1265,7 @@ window.__ModuleLoader__.load({
           setStatus({ kind: 'info', text: `组合「${label}」已保存。` })
           setView('presets')
         } catch (error) {
-          setStatus({ kind: 'error', text: error.message })
+          setStatus({ kind: 'error', text: failureText(error) })
         } finally {
           setBusy(false)
         }
@@ -1246,7 +1283,7 @@ window.__ModuleLoader__.load({
           await scope.set('presets', presets.filter((candidate) => candidate.id !== preset.id))
           setStatus({ kind: 'info', text: `已删除组合「${preset.name}」。` })
         } catch (error) {
-          setStatus({ kind: 'error', text: error.message })
+          setStatus({ kind: 'error', text: failureText(error) })
         } finally {
           setBusy(false)
         }
@@ -1280,7 +1317,7 @@ window.__ModuleLoader__.load({
           saveFile(name, text)
           setStatus({ kind: 'info', text: `已导出组合「${preset.name}」：${name}` })
         } catch (error) {
-          setStatus({ kind: 'error', text: error.message })
+          setStatus({ kind: 'error', text: failureText(error) })
         } finally {
           setBusy(false)
         }
@@ -1308,7 +1345,7 @@ window.__ModuleLoader__.load({
           const report = await request('POST', '/pack/import', payload)
           setStatus({ kind: 'info', text: describeImport(report) })
         } catch (error) {
-          setStatus({ kind: 'error', text: error.message })
+          setStatus({ kind: 'error', text: failureText(error) })
         } finally {
           setBusy(false)
         }
@@ -1382,7 +1419,7 @@ window.__ModuleLoader__.load({
           setPicked(changedPaths(outcome))
           await refreshSources()
         } catch (error) {
-          setStatus({ kind: 'error', text: error.message })
+          setStatus({ kind: 'error', text: failureText(error) })
         } finally {
           setBusy(false)
         }
@@ -1401,7 +1438,7 @@ window.__ModuleLoader__.load({
           })
           await refreshSources()
         } catch (error) {
-          setStatus({ kind: 'error', text: error.message })
+          setStatus({ kind: 'error', text: failureText(error) })
         } finally {
           setBusy(false)
         }
@@ -1417,7 +1454,7 @@ window.__ModuleLoader__.load({
           setStatus({ kind: 'info', text: `「${slug}」应用了 ${String(applied.length)} 个文件；新条目默认关闭，打开后才会注入。` })
           await refreshSources()
         } catch (error) {
-          setStatus({ kind: 'error', text: error.message })
+          setStatus({ kind: 'error', text: failureText(error) })
         } finally {
           setBusy(false)
         }
@@ -1432,7 +1469,7 @@ window.__ModuleLoader__.load({
           setStatus({ kind: 'info', text: `「${slug}」还原了 ${String(reverted.length)} 个文件。` })
           await refreshSources()
         } catch (error) {
-          setStatus({ kind: 'error', text: error.message })
+          setStatus({ kind: 'error', text: failureText(error) })
         } finally {
           setBusy(false)
         }
@@ -1454,7 +1491,7 @@ window.__ModuleLoader__.load({
           await refreshSources()
           setStatus({ kind: 'info', text: `已删除来源「${slug}」。` })
         } catch (error) {
-          setStatus({ kind: 'error', text: error.message })
+          setStatus({ kind: 'error', text: failureText(error) })
         } finally {
           setBusy(false)
         }
@@ -1497,7 +1534,7 @@ window.__ModuleLoader__.load({
           setStatus({ kind: 'info', text: `已 fork 成 ${allocated.id}，改完点保存；原订阅条目继续跟随更新。` })
           await refreshStore()
         } catch (error) {
-          setStatus({ kind: 'error', text: error.message })
+          setStatus({ kind: 'error', text: failureText(error) })
         } finally {
           setBusy(false)
         }
@@ -1508,7 +1545,7 @@ window.__ModuleLoader__.load({
         setBusy(true)
         Promise.resolve(scope.set('entries', nextEntries))
           .then(() => setStatus({ kind: 'info', text: enabled ? `已启用「${entry.title}」。` : `已关闭「${entry.title}」。` }))
-          .catch((error) => setStatus({ kind: 'error', text: error.message }))
+          .catch((error) => setStatus({ kind: 'error', text: failureText(error) }))
           .finally(() => setBusy(false))
       }, [entries, scope])
 
@@ -1532,7 +1569,7 @@ window.__ModuleLoader__.load({
             await refreshStore()
             setStatus({ kind: 'info', text: `已删除「${entry.title}」。` })
           })
-          .catch((error) => setStatus({ kind: 'error', text: error.message }))
+          .catch((error) => setStatus({ kind: 'error', text: failureText(error) }))
           .finally(() => setBusy(false))
       }, [entries, refreshStore, scope, selectedId])
 
@@ -1590,7 +1627,7 @@ window.__ModuleLoader__.load({
           setStatus(null)
           setView('script')
         } catch (error) {
-          setStatus({ kind: 'error', text: error.message })
+          setStatus({ kind: 'error', text: failureText(error) })
         } finally {
           setBusy(false)
         }
@@ -1620,7 +1657,7 @@ window.__ModuleLoader__.load({
             : { kind: 'error', text: report.problems.join('；') })
         } catch (error) {
           setRunReport(error.report === undefined ? null : error.report)
-          setStatus({ kind: 'error', text: error.message })
+          setStatus({ kind: 'error', text: failureText(error) })
         } finally {
           setBusy(false)
         }
@@ -1654,7 +1691,7 @@ window.__ModuleLoader__.load({
           })
         } catch (error) {
           setRunReport(error.report === undefined ? null : error.report)
-          setStatus({ kind: 'error', text: error.message })
+          setStatus({ kind: 'error', text: failureText(error) })
         } finally {
           setBusy(false)
         }
@@ -1675,7 +1712,7 @@ window.__ModuleLoader__.load({
               text: `${String(failed.length)} 条脚本失败了：${failed.map((report) => `${report.name}（${report.problems.join('，')}）`).join('；')}`,
             })
         } catch (error) {
-          setStatus({ kind: 'error', text: error.message })
+          setStatus({ kind: 'error', text: failureText(error) })
         } finally {
           setBusy(false)
         }
@@ -1705,7 +1742,7 @@ window.__ModuleLoader__.load({
           }
           setStatus({ kind: 'info', text: `已删除脚本「${name}」。它提供的变量留在最后一次的值上。` })
         } catch (error) {
-          setStatus({ kind: 'error', text: error.message })
+          setStatus({ kind: 'error', text: failureText(error) })
         } finally {
           setBusy(false)
         }
@@ -1731,7 +1768,7 @@ window.__ModuleLoader__.load({
             }
             : { kind: 'error', text: report.problems.join('；') })
         } catch (error) {
-          setStatus({ kind: 'error', text: error.message })
+          setStatus({ kind: 'error', text: failureText(error) })
         } finally {
           setBusy(false)
         }
@@ -2498,6 +2535,9 @@ window.__ModuleLoader__.load({
        * @returns the text for the status line under the controls.
        */
       const compactionReport = () => {
+        // A failed read says nothing about the feature: reporting it as "off"
+        // would be this page making up a fact about the deployment.
+        if (storeUnreachable) return '压缩指令：读不到（提示词存储不可达）'
         if (store === null || store.compaction === undefined || store.compaction === null) {
           return '压缩指令：已关闭（配置项 compaction: false）'
         }
@@ -2556,7 +2596,13 @@ window.__ModuleLoader__.load({
           '单条的开关键只在那个会话选了「不用组合」时起作用。',
           '压缩指令同理：本页只管有哪些压缩指令，用哪条在那个会话输入框那行的「压缩」芯片里选。',
         ]),
-        store !== null && store.writable === false
+        storeUnreachable
+          ? h('p', { key: 'unreachable', className: 'dsh-prompt-manager__status dsh-prompt-manager__status--error' }, [
+            '提示词存储读不到，编辑器已禁用；开关和排序仍然可用。',
+            typeof store.error === 'string' && store.error.length > 0 ? store.error : '',
+          ].filter((part) => part.length > 0).join(' '))
+          : null,
+        store !== null && store.ok !== false && store.writable === false
           ? h('p', { key: 'unwritable', className: 'dsh-prompt-manager__status dsh-prompt-manager__status--error' }, '正文目录不可写，编辑器已禁用；开关和排序仍然可用。')
           : null,
         h('div', { key: 'list', className: 'dsh-prompt-manager__block' }, [

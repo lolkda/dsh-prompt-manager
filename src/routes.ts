@@ -4,10 +4,13 @@
  *
  * Bodies cannot ride the settings transport, because they are markdown files a
  * person also edits directly. This route is therefore the only write path from
- * the page, and it is fenced twice: loopback peers only, and same-origin
- * requests only for anything that mutates. A stale editor is refused with 409
- * through the hash the page read, so two open drafts cannot silently overwrite
- * each other.
+ * the page, and it is fenced the way `/api` is: a loopback peer keeps the local
+ * contract (no session needed, but the Host must be a loopback name), and any
+ * other peer is handed to the composition's own browser trust — the deployment
+ * decides how wide it serves, and this route follows that decision instead of
+ * inventing a narrower one. Anything that mutates is additionally same-origin.
+ * A stale editor is refused with 409 through the hash the page read, so two open
+ * drafts cannot silently overwrite each other.
  *
  * Everything else the page edits — the entry index, the presets, the
  * subscriptions, the outbound settings — is a settings field, and this route
@@ -65,6 +68,27 @@ interface WebServerFace {
     path: string
     handler: (request: IncomingMessage, response: ServerResponse) => void | Promise<void>
   }): () => void
+}
+
+/**
+ * The harness's client-trust authority, the same call `/api` makes.
+ *
+ * Declared structurally rather than imported: a composition that mounts the
+ * Connection service fences with it, and one that mounts nothing keeps the
+ * local-only path. `requestRejection` answers `undefined` for a request it
+ * accepts, `401` without a browser session, and `403` for a Host this
+ * deployment does not serve.
+ */
+export interface TrustFace {
+  requestRejection(request: IncomingMessage): 401 | 403 | undefined
+}
+
+/** A refusal answered before any route logic runs. */
+interface Refusal {
+  status: 401 | 403
+  /** Which rule held, so the page can say why instead of quoting a status. */
+  code: 'host-not-loopback' | 'no-trust-authority' | 'no-session' | 'host-not-trusted'
+  error: string
 }
 
 /** What the route needs from the plugin that owns the index. */
@@ -144,11 +168,26 @@ export interface PromptRouteHost {
  * @param host - body resolution, id allocation, and logging.
  */
 export function installPromptRoutes(ctx: Context, host: PromptRouteHost): void {
+  // The trust authority belongs to another row — the `connection` row — and a
+  // sibling's service is visible only to a plugin that *declares* it. Reaching
+  // into the `webServer` scope for a name nobody asked for throws
+  // (`cannot get property "connection" without inject`), and a route that
+  // swallowed that threw away every LAN request as `no-trust-authority`.
+  // Declaring it keeps the deployment's own decision: a composition that mounts
+  // no Connection simply never runs this callback, and the route stays local.
+  let trust: TrustFace | undefined
+  ctx.inject(['connection'], (scoped) => {
+    trust = (scoped as unknown as { connection?: TrustFace }).connection
+    return () => { trust = undefined }
+  })
   ctx.inject(['webServer'], (scoped) => {
     const webServer = (scoped as unknown as { webServer?: WebServerFace }).webServer
     if (webServer === undefined) return
+    // Read per request rather than at mount: a Connection that appears after this
+    // callback ran still fences the next request.
+    const trustOf = (): TrustFace | undefined => trust
     try {
-      const off = webServer.register({ kind: 'prefix', path: ROUTE_PREFIX, handler: createHandler(host) })
+      const off = webServer.register({ kind: 'prefix', path: ROUTE_PREFIX, handler: createHandler(host, trustOf) })
       ctx.effect(() => off, 'dsh-prompt-manager: prompt store route')
     } catch (error) {
       host.warn(`cannot register ${ROUTE_PREFIX}: ${messageOf(error)}`)
@@ -161,22 +200,15 @@ export function installPromptRoutes(ctx: Context, host: PromptRouteHost): void {
  * @param host - body resolution, id allocation, and logging.
  * @returns the handler registered on {@link ROUTE_PREFIX}.
  */
-function createHandler(host: PromptRouteHost): (request: IncomingMessage, response: ServerResponse) => Promise<void> {
+function createHandler(
+  host: PromptRouteHost,
+  trustOf: () => TrustFace | undefined,
+): (request: IncomingMessage, response: ServerResponse) => Promise<void> {
   return async (request, response) => {
     try {
-      if (!isLoopback(request)) {
-        sendJson(response, 403, { error: 'the prompt store is reachable from loopback clients only' })
-        return
-      }
-      // The peer address alone does not settle where the request came from: a
-      // page served by a name that resolves to this machine reaches the same
-      // socket, and presents a `Host` and a matching `Origin` of its own. Only
-      // loopback host names answer here, so a rebound name cannot get in.
-      if (!isLoopbackHost(request.headers.host)) {
-        sendJson(response, 403, {
-          error: 'the prompt store answers loopback host names only (127.0.0.1, localhost, [::1])',
-          code: 'host-not-loopback',
-        })
+      const refusal = decide(request, trustOf)
+      if (refusal !== undefined) {
+        sendJson(response, refusal.status, { error: refusal.error, code: refusal.code })
         return
       }
       const method = request.method ?? 'GET'
@@ -773,6 +805,55 @@ function handleFailure(host: PromptRouteHost, error: unknown, response: ServerRe
   }
   host.warn(`prompt route failed: ${messageOf(error)}`)
   sendJson(response, 500, { error: messageOf(error) })
+}
+
+/**
+ * Who decides this request is allowed, before any route logic runs.
+ *
+ * The peer address alone does not settle where the request came from: a page
+ * served by a name that resolves to this machine reaches the same socket, and
+ * presents a `Host` and a matching `Origin` of its own. So a loopback peer keeps
+ * the local contract — no browser session required, which is what the README's
+ * curl self-check relies on — and must still name a loopback Host, so a rebound
+ * name cannot get in. Every other peer is the deployment's call: the
+ * composition's browser trust answers for it exactly as it answers for `/api`.
+ *
+ * @param request - the incoming request.
+ * @param trustOf - the trust authority, read live; `undefined` when none is mounted.
+ * @returns the refusal to answer, or `undefined` to continue to the routes.
+ */
+function decide(request: IncomingMessage, trustOf: () => TrustFace | undefined): Refusal | undefined {
+  if (isLoopback(request)) {
+    return isLoopbackHost(request.headers.host)
+      ? undefined
+      : {
+        status: 403,
+        code: 'host-not-loopback',
+        error: 'the prompt store answers loopback host names only (127.0.0.1, localhost, [::1])',
+      }
+  }
+  const trust = trustOf()
+  // No authority to delegate to: refuse rather than invent a trust decision.
+  if (trust === undefined) {
+    return {
+      status: 403,
+      code: 'no-trust-authority',
+      error: 'the prompt store is reachable from loopback clients only (this composition mounts no Connection service)',
+    }
+  }
+  const rejection = trust.requestRejection(request)
+  if (rejection === undefined) return undefined
+  return rejection === 401
+    ? {
+      status: 401,
+      code: 'no-session',
+      error: 'the prompt store needs the browser session /api uses: open the URL printed by dsh web',
+    }
+    : {
+      status: 403,
+      code: 'host-not-trusted',
+      error: 'this Host is not in trustedHosts, so the prompt store refuses it',
+    }
 }
 
 /**

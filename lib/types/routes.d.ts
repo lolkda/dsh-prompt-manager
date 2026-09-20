@@ -4,10 +4,13 @@
  *
  * Bodies cannot ride the settings transport, because they are markdown files a
  * person also edits directly. This route is therefore the only write path from
- * the page, and it is fenced twice: loopback peers only, and same-origin
- * requests only for anything that mutates. A stale editor is refused with 409
- * through the hash the page read, so two open drafts cannot silently overwrite
- * each other.
+ * the page, and it is fenced the way `/api` is: a loopback peer keeps the local
+ * contract (no session needed, but the Host must be a loopback name), and any
+ * other peer is handed to the composition's own browser trust — the deployment
+ * decides how wide it serves, and this route follows that decision instead of
+ * inventing a narrower one. Anything that mutates is additionally same-origin.
+ * A stale editor is refused with 409 through the hash the page read, so two open
+ * drafts cannot silently overwrite each other.
  *
  * Everything else the page edits — the entry index, the presets, the
  * subscriptions, the outbound settings — is a settings field, and this route
@@ -17,6 +20,7 @@
  * @module @lolkda/dsh-prompt-manager/routes
  */
 import type { Context } from '@deepseek-ai/cordis';
+import type { IncomingMessage } from 'node:http';
 import type { ResolvedBody } from './entries.js';
 import { PromptStore } from './store.js';
 import { type PromptScripts } from './scripts.js';
@@ -27,6 +31,18 @@ import { type SessionChoices } from './sessions.js';
 import type { VariableView } from './index.js';
 /** The single prefix every route below lives under. */
 export declare const ROUTE_PREFIX = "/dsh-prompt-manager";
+/**
+ * The harness's client-trust authority, the same call `/api` makes.
+ *
+ * Declared structurally rather than imported: a composition that mounts the
+ * Connection service fences with it, and one that mounts nothing keeps the
+ * local-only path. `requestRejection` answers `undefined` for a request it
+ * accepts, `401` without a browser session, and `403` for a Host this
+ * deployment does not serve.
+ */
+export interface TrustFace {
+    requestRejection(request: IncomingMessage): 401 | 403 | undefined;
+}
 /** What the route needs from the plugin that owns the index. */
 export interface PromptRouteHost {
     /** Body files. */
