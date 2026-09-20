@@ -366,18 +366,15 @@ window.__ModuleLoader__.load({
     function presetsOf(snapshot) {
       const value = snapshot && snapshot.value
       const list = value && Array.isArray(value.presets) ? value.presets : []
+      const compressionIds = new Set(entriesOf(snapshot).filter(isCompaction).map((entry) => entry.id))
       return list
         .filter((preset) => preset !== null && typeof preset === 'object' && typeof preset.id === 'string')
         .map((preset) => ({
           id: preset.id,
           name: typeof preset.name === 'string' && preset.name.length > 0 ? preset.name : preset.id,
           entries: Array.isArray(preset.entries)
-            ? preset.entries.filter((id) => typeof id === 'string')
+            ? preset.entries.filter((id) => typeof id === 'string' && !compressionIds.has(id))
             : [],
-          // Kept rather than dropped: every preset record this page rewrites is
-          // built from these normalized ones, so dropping the field here would
-          // clear the compaction choice of every preset the user did not touch.
-          compaction: typeof preset.compaction === 'string' ? preset.compaction : '',
         }))
     }
 
@@ -388,9 +385,6 @@ window.__ModuleLoader__.load({
         const left = before[index]
         const right = after[index]
         if (left.id !== right.id || left.name !== right.name) return true
-        // The compaction choice is part of the preset, so a save that only
-        // changed it is a save, not a no-op.
-        if (left.compaction !== right.compaction) return true
         if (left.entries.length !== right.entries.length) return true
         for (let member = 0; member < left.entries.length; member += 1) {
           if (left.entries[member] !== right.entries[member]) return true
@@ -751,12 +745,9 @@ window.__ModuleLoader__.load({
       const choose = (id) => {
         setOpen(false)
         if (id === current || id === 'no-presets') return
-        // Switching a preset carries that preset's own compaction instruction, the
-        // way it always has: a preset answers "which prompts are in force" whole.
-        // Both answers land in this session's file and nowhere else, so the write
-        // is this conversation's and no other conversation can feel it.
-        const picked = presets.find((preset) => preset.id === id)
-        session.write({ preset: id, compaction: picked === undefined ? '' : picked.compaction })
+        // Each control owns one field. A preset selects sections only; changing
+        // or cancelling it must preserve the session's manual compression choice.
+        session.write({ preset: id })
       }
 
       return h(SlotMenu, {
@@ -1180,12 +1171,11 @@ window.__ModuleLoader__.load({
        */
       const openPreset = React.useCallback((preset) => {
         setPresetDraft(preset === null
-          ? { id: null, name: '', members: [], compaction: NO_PRESET }
+          ? { id: null, name: '', members: [] }
           : {
             id: preset.id,
             name: preset.name,
             members: [...preset.entries],
-            compaction: preset.compaction,
           })
         setStatus(null)
         setView('preset')
@@ -1218,25 +1208,22 @@ window.__ModuleLoader__.load({
         try {
           const held = presetDraft.id
           const id = held !== null ? held : (await request('POST', '/preset/id', { title: label })).id
-          // Every record travels through this write, so each one is rebuilt from
-          // the draft only when it is the draft: an untouched combo keeps its own
-          // members and its own compaction instruction.
+          // Only section membership belongs to a preset. The normalized records
+          // also omit obsolete compression bindings from an older document.
           const next = held !== null
             ? presets.map((preset) => (preset.id === held
-              ? { id, name: label, entries: presetDraft.members, compaction: presetDraft.compaction }
+              ? { id, name: label, entries: presetDraft.members }
               : preset))
             : [...presets, {
               id,
               name: label,
               entries: presetDraft.members,
-              compaction: presetDraft.compaction,
             }]
           if (presetsDiffer(presets, next)) await scope.set('presets', next)
           setPresetDraft({
             id,
             name: label,
             members: presetDraft.members,
-            compaction: presetDraft.compaction,
           })
           setStatus({ kind: 'info', text: `组合「${label}」已保存。` })
           setView('presets')
@@ -2186,21 +2173,6 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * The compaction instruction one id names, as this page says it.
-       *
-       * An empty id is not a missing choice but a real one — the instruction DSH
-       * ships — and an id nothing holds is named rather than passed off as that
-       * built-in text, which is what a bare empty control would do.
-       * @param id - the entry id a combo (or the root field) names.
-       * @returns the text to render.
-       */
-      const compactionTitleOf = (id) => {
-        if (id.length === 0) return 'DSH 自带'
-        const known = entries.find((entry) => entry.id === id && isCompaction(entry))
-        return known !== undefined ? known.title : `（条目不存在：${id}）`
-      }
-
-      /**
        * The preset editor: a name, and the entries this preset selects.
        *
        * The checklist is the whole entry index rather than only the ones switched
@@ -2209,29 +2181,10 @@ window.__ModuleLoader__.load({
        */
       if (view === 'preset' && presetDraft !== null) {
         const members = presetDraft.members
-        // A combo selects sections; the compaction instruction is selected by its
-        // own control, because a combo also names it explicitly. Listing it here
-        // would let one be ticked into a member list that never injects it.
+        // Presets select ordinary sections only. Compression is chosen manually
+        // in the session's separate control, never in this editor.
         const selectable = entries.filter((entry) => !isCompaction(entry))
         const missing = members.filter((id) => !entries.some((entry) => entry.id === id))
-        // The other half of what a combo decides. Sorted by the same order the
-        // list page shows, so the two pages cannot disagree about which entry
-        // comes first, and the built-in instruction is a choice like any other
-        // rather than the absence of one.
-        const compactionChoices = [
-          { id: NO_PRESET, label: 'DSH 自带' },
-          ...entries
-            .filter((entry) => isCompaction(entry))
-            .sort((left, right) => (left.order ?? 0) - (right.order ?? 0))
-            .map((entry) => ({ id: entry.id, label: entry.title })),
-        ]
-        if (presetDraft.compaction.length > 0
-          && !compactionChoices.some((choice) => choice.id === presetDraft.compaction)) {
-          compactionChoices.push({
-            id: presetDraft.compaction,
-            label: `（条目不存在：${presetDraft.compaction}）`,
-          })
-        }
         const rows = selectable.map((entry) => {
           const checked = members.includes(entry.id)
           return h('label', { key: entry.id, className: 'dsh-prompt-manager__member' }, [
@@ -2264,7 +2217,7 @@ window.__ModuleLoader__.load({
               : h('span', { key: 'id', className: 'dsh-prompt-manager__badge' }, presetDraft.id),
           ]),
           h('p', { key: 'lede', className: 'dsh-prompt-manager__intro' },
-            '勾选这个组合要注入的提示词。启用组合后由它决定注入哪些条目，每条自己的开关会暂时不生效；取消组合就回到那些开关。'),
+            '勾选这个组合要注入的普通提示词。启用组合后由它决定注入哪些条目，每条自己的开关会暂时不生效；取消组合就回到那些开关。压缩提示词不属于组合，请在会话的「压缩」芯片中手动指定，切换组合不会改变它。'),
           h('div', { key: 'name', className: 'dsh-prompt-manager__surface' }, [
             h('div', { key: 'fields', className: 'dsh-prompt-manager__fields' }, [
               h('label', { key: 'name', className: 'dsh-prompt-manager__field dsh-prompt-manager__field--grow' }, [
@@ -2277,15 +2230,7 @@ window.__ModuleLoader__.load({
                   onChange: (event) => setPresetDraft({ ...presetDraft, name: event.target.value }),
                 }),
               ]),
-              h('label', { key: 'compaction', className: 'dsh-prompt-manager__field' }, [
-                '压缩指令（这个组合压缩时用哪条）',
-                h('select', {
-                  key: 'select',
-                  value: presetDraft.compaction,
-                  disabled: busy,
-                  onChange: (event) => setPresetDraft({ ...presetDraft, compaction: event.target.value }),
-                }, compactionChoices.map((choice) => h('option', { key: choice.id, value: choice.id }, choice.label))),
-              ]),
+
             ]),
             h('div', { key: 'actions', className: 'dsh-prompt-manager__actions' }, [
               h(Button, {
@@ -2307,7 +2252,7 @@ window.__ModuleLoader__.load({
             ]),
           ]),
           selectable.length === 0
-            ? h('div', { key: 'empty', className: 'dsh-prompt-manager__empty' }, '还没有可勾选的 system prompt 段落：先在列表页「新增提示词」。压缩指令由上面这个选择框决定。')
+            ? h('div', { key: 'empty', className: 'dsh-prompt-manager__empty' }, '还没有可勾选的 system prompt 段落：先在列表页「新增提示词」。压缩指令不属于组合，请在会话里手动指定。')
             : h('div', { key: 'members', className: 'dsh-prompt-manager__members' }, rows),
           missing.length === 0
             ? null
@@ -2336,9 +2281,7 @@ window.__ModuleLoader__.load({
                 preset.entries.length === 0
                   ? '没有选中任何条目（启用它等于一条都不注入）'
                   : `${String(preset.entries.length)} 条 · ${preset.entries.slice(0, 4).map(titleOfEntry).join('、')}${preset.entries.length > 4 ? '…' : ''}`,
-                // Which compaction instruction the combo would use, on the same
-                // line as its members: both are what enabling it decides.
-                ` · 压缩指令：${compactionTitleOf(preset.compaction)}`,
+
               ]),
             ]),
             h('div', { key: 'side', className: 'dsh-prompt-manager__cardSide' }, [
@@ -2374,7 +2317,7 @@ window.__ModuleLoader__.load({
             h('h2', { key: 'title', className: 'dsh-prompt-manager__headTitle' }, '组合'),
           ]),
           h('p', { key: 'lede', className: 'dsh-prompt-manager__intro' },
-            '一个组合 = 挑一组提示词。用哪个组合由每个会话自己选：在会话输入框那行的「提示词」芯片里切，切完只影响那个会话，下一个模型步骤生效。它管选哪些，不管顺序（顺序仍是每条自己的）。'),
+            '一个组合 = 挑一组普通提示词。用哪个组合由每个会话自己选：在会话输入框那行的「提示词」芯片里切，切完只影响那个会话，下一个模型步骤生效。它管选哪些，不管顺序（顺序仍是每条自己的）。压缩指令在会话里手动指定，不随组合切换。'),
           presets.length === 0
             ? h('div', { key: 'empty', className: 'dsh-prompt-manager__empty' }, '还没有组合。点「新建组合」挑几条提示词试试。')
             : h('div', { key: 'cards', className: 'dsh-prompt-manager__list' }, cards),

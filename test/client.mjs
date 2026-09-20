@@ -1243,8 +1243,8 @@ assert.equal(chosePreset.method, 'POST', 'as a write')
 assert.equal(chosePreset.url, `${ROUTE}/session/session-open`, 'naming this conversation and no other')
 assert.deepEqual(
   JSON.parse(chosePreset.body),
-  { preset: 'ctf', compaction: 'compact-zh' },
-  'with the preset and the instruction that preset carries: switching one switches the whole set',
+  { preset: 'ctf' },
+  'a preset switch must write only the preset, even when legacy settings carry a compaction binding',
 )
 assert.equal(writes.length, chipWritesBefore, 'and it must not touch the settings document at all')
 
@@ -1395,6 +1395,53 @@ compactionChipRenderer.mount(compactionChipRegistration.component, compactionChi
 await compactionChipRenderer.settle()
 assert.deepEqual(compactionChipMenu().props.items.map((entry) => entry.id), ['no-entries'], 'with none there is one hint')
 assert.equal(compactionChipMenu().props.items[0].disabled, true, 'and it is not selectable')
+// ── both composer controls stay independent while mounted together ───────────
+
+const independentSession = 'session-independent'
+CHOICES.clear()
+CHOICES.set('session-neighbour', { preset: 'plain', compaction: 'compact-custom' })
+scope.state = { ...scope.state, status: 'ready', writable: true, mode: 'host', value: {
+  entries: [...ENTRIES, { id: 'compact-custom', title: '独立压缩 Y', order: 100, enabled: false, kind: 'compaction' }],
+  presets: PRESETS,
+} }
+const pairedRenderer = createRenderer()
+const pairedRegistrations = materialize(pairedRenderer.React).registrations
+const pairedPreset = pairedRegistrations.find((entry) => entry.meta.name === 'conversation.input.right' && entry.meta.id === 'prompt-manager')
+const pairedCompaction = pairedRegistrations.find((entry) => entry.meta.id === 'prompt-manager-compaction')
+pairedRenderer.mount(() => [
+  createElement(pairedPreset.component, { scope, sessionId: independentSession }),
+  createElement(pairedCompaction.component, { scope, sessionId: independentSession }),
+], {})
+await pairedRenderer.settle()
+const pairedMenus = () => inspect(pairedRenderer.tree, MENU).nodes
+const pairedCompressionLabel = () => textOf(pairedMenus()[1].props.anchor)
+assert.equal(pairedMenus().length, 2, 'the regression must exercise both composer controls together')
+pairedMenus()[0].props.onSelect('ctf')
+await pairedRenderer.settle()
+assert.deepEqual(CHOICES.get(independentSession), { preset: 'ctf', compaction: '' }, 'a legacy preset must not auto-select any compression')
+assert.ok(pairedCompressionLabel().includes('DSH'), 'the displayed default must agree with the stored default')
+pairedMenus()[1].props.onSelect('compact-custom')
+await pairedRenderer.settle()
+assert.deepEqual(CHOICES.get(independentSession), { preset: 'ctf', compaction: 'compact-custom' }, 'manual compression changes must keep the preset')
+for (const presetId of ['plain', 'ctf', '', 'ctf']) {
+  const before = requests.length
+  pairedMenus()[0].props.onSelect(presetId)
+  await pairedRenderer.settle()
+  assert.deepEqual(JSON.parse(lastChoice(before).body), { preset: presetId }, 'changing or cancelling a preset must patch only its own field')
+  assert.deepEqual(CHOICES.get(independentSession), { preset: presetId, compaction: 'compact-custom' }, 'manual compression must survive every preset transition')
+  assert.ok(pairedCompressionLabel().includes('独立压缩 Y'), 'the compression label must still agree with the stored selection')
+}
+pairedMenus()[1].props.onSelect('')
+await pairedRenderer.settle()
+assert.deepEqual(CHOICES.get(independentSession), { preset: 'ctf', compaction: '' }, 'only the compression control may restore the DSH default')
+pairedMenus()[0].props.onSelect('plain')
+await pairedRenderer.settle()
+pairedMenus()[0].props.onSelect('ctf')
+await pairedRenderer.settle()
+assert.equal(CHOICES.get(independentSession).compaction, '', 'the manually selected default must also survive preset switches')
+assert.ok(pairedCompressionLabel().includes('DSH'), 'both controls must remain consistent without remounting')
+assert.deepEqual(CHOICES.get('session-neighbour'), { preset: 'plain', compaction: 'compact-custom' }, 'other conversations must remain unchanged')
+
 // ── the presets page ─────────────────────────────────────────────────────────
 
 // The page is driven from a document this case states outright: earlier cases in
@@ -1448,6 +1495,7 @@ await presetRenderer.settle()
 const presetNameField = inspect(presetRenderer.tree, 'input').nodes
   .find((node) => String(node.props.placeholder ?? '').includes('CTF 作业'))
 assert.ok(presetNameField !== undefined, 'the editor must offer a name field')
+assert.equal(inspect(presetRenderer.tree, 'select').nodes.length, 0, 'a new preset must not offer any compression selector')
 presetNameField.props.onChange({ target: { value: '交付检查' } })
 await presetRenderer.settle()
 
@@ -1469,6 +1517,7 @@ const stored = writes.slice(saveBefore).find((write) => write.field === 'presets
 assert.ok(stored !== undefined, 'and write the preset list')
 assert.equal(stored.value.length, PRESETS.length + 1, 'the new preset must be appended to the list')
 assert.equal(stored.value.at(-1).id, 'new-preset', 'under the id the Host allocated')
+assert.equal(Object.hasOwn(stored.value.at(-1), 'compaction'), false, 'a new preset must be stored without a compression field')
 assert.equal(stored.value.at(-1).name, '交付检查', 'and the name that was typed')
 assert.deepEqual(stored.value.at(-1).entries, [ENTRIES[0].id], 'with exactly the members that were ticked')
 assert.ok(allocation.seq < stored.seq, 'the id has to exist before the list carrying it is written')
@@ -1922,108 +1971,52 @@ compactRenderer.mount(compactSection, { scope })
 await compactRenderer.settle()
 await toList()
 
-// ── a combo picks the compaction instruction too ──────────────────────────────
+// ── presets expose sections only, including when old metadata is present ─────
 
-// A combo answers both halves of the question — which sections inject, and which
-// compaction instruction is used — so a card has to show both, and the editor has
-// to be able to change either without disturbing the other combos.
-scope.state = { ...scope.state, value: { entries: ENTRIES, presets: PRESETS, activePreset: '', compaction: '' } }
+scope.state = { ...scope.state, value: {
+  entries: ENTRIES,
+  presets: [
+    { id: 'ctf', name: 'CTF 作业', entries: ['alpha', 'beta', 'compact-zh'], compaction: 'compact-zh' },
+    { id: 'plain', name: '日常', entries: [], compaction: 'compact-zh' },
+  ],
+} }
 const comboRenderer = createRenderer()
 const comboSection = materialize(comboRenderer.React).registrations[0].component
 comboRenderer.mount(comboSection, { scope })
 await comboRenderer.settle()
-button(comboRenderer.tree, `组合（${String(PRESETS.length)}）`).props.onClick()
+button(comboRenderer.tree, '组合（2）').props.onClick()
 await comboRenderer.settle()
+assert.ok(!textOf(rowFor(comboRenderer.tree, 'CTF 作业')).includes('压缩指令'), 'a preset card must not claim ownership of compression')
+assert.ok(!textOf(rowFor(comboRenderer.tree, '日常')).includes('压缩指令'), 'nor may an empty preset claim to select default compression')
+assert.ok(textOf(rowFor(comboRenderer.tree, '日常')).includes('没有选中任何条目'), 'empty section selections remain meaningful')
 
-assert.ok(
-  textOf(rowFor(comboRenderer.tree, 'CTF 作业')).includes('压缩指令：压缩指令（中文版）'),
-  'a combo card says which compaction instruction it would use',
-)
-const emptyComboCard = rowFor(comboRenderer.tree, '日常')
-assert.ok(
-  textOf(emptyComboCard).includes('压缩指令：DSH 自带'),
-  'and an empty choice reads as the instruction DSH ships, not as a blank',
-)
-assert.ok(
-  textOf(emptyComboCard).includes('没有选中任何条目'),
-  'while the note about a combo that selects no sections is still there',
-)
-
-// The editor of one combo: the same checklist, plus one control for the other half.
 openRow(comboRenderer.tree, 'CTF 作业').props.onClick()
 await comboRenderer.settle()
-const comboSelect = inspect(comboRenderer.tree, 'select').nodes[0]
-assert.ok(comboSelect !== undefined, 'the combo editor offers a control for the compaction instruction')
-assert.deepEqual(
-  inspect(comboSelect, 'option').nodes.map((option) => textOf(option)),
-  ['DSH 自带', '压缩指令（中文版）'],
-  'whose choices are the built-in instruction and every compaction entry',
-)
-assert.equal(comboSelect.props.value, 'compact-zh', 'showing the one this combo already names')
-
-// Editing one combo must not clear another combo's choice: the whole preset list
-// is rewritten on save, so every record the page did not touch has to travel
-// through it exactly as it arrived.
-scope.state = {
-  ...scope.state,
-  value: {
-    ...scope.state.value,
-    presets: [
-      { id: 'ctf', name: 'CTF 作业', entries: ['alpha', 'beta'], compaction: 'compact-zh' },
-      { id: 'plain', name: '日常', entries: [], compaction: 'compact-zh' },
-    ],
-  },
-}
-comboRenderer.mount(comboSection, { scope })
-await comboRenderer.settle()
+assert.equal(inspect(comboRenderer.tree, 'select').nodes.length, 0, 'the preset editor must have no compression selector')
+assert.ok(inspect(comboRenderer.tree).text.includes('手动指定'), 'the editor must explain where compression is selected instead')
+const choicesBeforePresetEdit = JSON.stringify([...CHOICES])
 const stageBefore = writes.length
-inspect(comboRenderer.tree, 'select').nodes[0].props.onChange({ target: { value: '' } })
+const comboName = inspect(comboRenderer.tree, 'input').nodes.find((node) => node.props.placeholder === '例如：CTF 作业')
+comboName.props.onChange({ target: { value: 'CTF 作业（修改）' } })
 await comboRenderer.settle()
-assert.equal(writes.length, stageBefore, 'the control stages the choice; 保存组合 is what writes it')
+assert.equal(writes.length, stageBefore, 'editing stages the name until 保存组合')
 button(comboRenderer.tree, '保存组合').props.onClick()
 await comboRenderer.settle()
 const savedPresets = writes.slice(stageBefore).find((write) => write.field === 'presets')
-assert.ok(savedPresets !== undefined, 'saving a combo writes the whole preset list')
-assert.equal(
-  savedPresets.value.find((preset) => preset.id === 'ctf').compaction,
-  '',
-  'with the instruction this combo now names',
-)
-assert.equal(
-  savedPresets.value.find((preset) => preset.id === 'plain').compaction,
-  'compact-zh',
-  'and the combo nobody touched keeps the instruction it had',
-)
-assert.equal(
-  savedPresets.value.find((preset) => preset.id === 'ctf').entries.length,
-  2,
-  'with its members untouched as well',
-)
+assert.deepEqual(savedPresets.value, [
+  { id: 'ctf', name: 'CTF 作业（修改）', entries: ['alpha', 'beta'] },
+  { id: 'plain', name: '日常', entries: [] },
+], 'saving must keep section membership and remove all old compression bindings')
+assert.equal(JSON.stringify([...CHOICES]), choicesBeforePresetEdit, 'editing preset definitions must not rewrite session compression choices')
+assert.ok(scope.state.value.entries.some((entry) => entry.id === 'compact-zh' && entry.kind === 'compaction'), 'removing a preset binding must not delete the independent compression entry')
 
-// Saving lands back on the list, which is where the new choice has to be visible.
-assert.ok(
-  textOf(rowFor(comboRenderer.tree, 'CTF 作业')).includes('压缩指令：DSH 自带'),
-  'and the card follows the change by itself',
-)
-
-// A preset may name an instruction that is gone — a hand-edited document, or a
-// body somebody removed. Saying so beats a blank control that reads as "DSH 自带".
-scope.state = {
-  ...scope.state,
-  value: {
-    ...scope.state.value,
-    presets: [{ id: 'ctf', name: 'CTF 作业', entries: ['alpha'], compaction: 'gone' }],
-  },
-}
+scope.state = { ...scope.state, value: { ...scope.state.value, presets: [{ id: 'ctf', name: 'CTF 作业', entries: ['alpha'], compaction: 'gone' }] } }
 comboRenderer.mount(comboSection, { scope })
 await comboRenderer.settle()
 openRow(comboRenderer.tree, 'CTF 作业').props.onClick()
 await comboRenderer.settle()
-assert.ok(
-  inspect(inspect(comboRenderer.tree, 'select').nodes[0], 'option').nodes
-    .some((option) => textOf(option).includes('gone')),
-  'a choice that names nothing is shown as such rather than silently as the built-in text',
-)
+assert.equal(inspect(comboRenderer.tree, 'select').nodes.length, 0, 'a stale legacy pointer must not restore the removed selector')
+assert.ok(!inspect(comboRenderer.tree).text.includes('gone'), 'unused legacy compression metadata is ignored')
 
 // ── what the Host reports about compaction ────────────────────────────────────
 
@@ -2127,7 +2120,7 @@ console.log(`  list        ${String(ENTRIES.length)} rows, switches, kebab menus
 console.log('  views       row menu -> editor page -> save -> back to the list')
 console.log('  compaction  a row of its own kind: own badge, no switch, and nothing here that could make it current')
 console.log('  kind        a draft that starts empty, written only on save, and a kind that no click can change')
-console.log('  combos      a combo picks one compaction instruction, and saving it leaves the other combos alone')
+console.log('  combos      sections only; no compression selector; manual compression survives preset changes and cancellation')
 console.log('  report      replacements and matches told apart, local time, and the feature switched off')
 console.log('  presets     list, editor, member checklist, an id from the Host, and no way to set one as current')
 console.log('  packs       export downloads what the Host built, import reports every id it had to change')

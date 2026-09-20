@@ -159,7 +159,7 @@ const empty = parsePack({
 })
 assert.equal(empty.ok, true, 'a preset with no members is a valid pack')
 assert.deepEqual(empty.pack.entries, [], 'and it carries nothing')
-assert.deepEqual(planImport(empty.pack, { entryIds: [], presetIds: [] }).plan.preset, { id: 'blank', name: 'blank', entries: [], compaction: '' }, 'importing it creates an empty preset')
+assert.deepEqual(planImport(empty.pack, { entryIds: [], presetIds: [] }).plan.preset, { id: 'blank', name: 'blank', entries: [] }, 'importing an empty preset must not create a compression setting')
 
 // A pack is data: a prompt of the right shape, not a program.
 const withScripts = parsePack({
@@ -199,7 +199,7 @@ assert.deepEqual(free.plan.noBody, ['CTF 沙箱契约'], 'a subscribed member is
 assert.deepEqual(free.plan.missingMembers, ['gone-entry'], 'a member the pack could not carry is reported')
 assert.deepEqual(
   free.plan.preset,
-  { id: 'ctf', name: 'ctf', entries: ['env', 'lolkda-dsh-prompt-pack-ctf', 'gone-entry'], compaction: '' },
+  { id: 'ctf', name: 'ctf', entries: ['env', 'lolkda-dsh-prompt-pack-ctf', 'gone-entry'] },
   'membership survives, including the id that may come back with a source',
 )
 
@@ -216,7 +216,7 @@ assert.deepEqual(
 assert.deepEqual(collided.plan.renamed, [{ from: 'env', to: 'env-2' }], 'and the rename is reported')
 assert.deepEqual(
   collided.plan.preset,
-  { id: 'ctf-2', name: 'ctf', entries: ['env-2', 'lolkda-dsh-prompt-pack-ctf', 'gone-entry'], compaction: '' },
+  { id: 'ctf-2', name: 'ctf', entries: ['env-2', 'lolkda-dsh-prompt-pack-ctf', 'gone-entry'] },
   'the preset follows the entries that moved, keeps its name, and takes a free id',
 )
 assert.equal(collided.plan.entries[0].renamedFrom, 'env', 'the entry remembers what it was called')
@@ -298,12 +298,8 @@ const exact = planImport(pack, {
 })
 assert.equal(exact.ok, true, 'a pack that exactly fills the last slots is accepted')
 
-// ── a preset carries the compaction instruction it put in force ───────────────
+// ── presets carry sections only; legacy compression bodies stay independent ──
 
-// The pointer is a preset's, not the machine's: a set of prompts that switches
-// without it would arrive on another machine with half of itself on the previous
-// selection. So it travels with the preset, and it is an id — which means an
-// import has to move it exactly like a member id.
 const compactionMember = {
   id: 'compact-zh',
   title: '压缩指令',
@@ -312,73 +308,54 @@ const compactionMember = {
   kind: 'compaction',
   body: '你是压缩引擎，按八节模板输出。',
 }
-
-const carrying = buildPack({
+const legacyPack = {
+  ...pack,
   preset: { id: 'ctf', name: 'ctf', entries: ['env', 'compact-zh'], compaction: 'compact-zh' },
+  entries: [local, compactionMember],
+  missing: [],
+}
+const sectionsOnly = buildPack({
+  preset: legacyPack.preset,
   members: [local, compactionMember],
   pluginName: '@lolkda/dsh-prompt-manager',
   pluginVersion: '9.9.9',
 })
-assert.equal(carrying.preset.compaction, 'compact-zh', 'the pointer must travel with the preset it belongs to')
-assert.equal(carrying.entries[1].kind, 'compaction', 'and the member must still say what it is on the other side')
-assert.equal(
-  buildPack({
-    preset: { id: 'p', name: 'p', entries: ['env'], compaction: '' },
-    members: [local],
-    pluginName: '@lolkda/dsh-prompt-manager',
-    pluginVersion: '9.9.9',
-  }).preset.compaction,
-  undefined,
-  'a preset that names no instruction must carry no pointer field at all, so a machine that uses none exports unchanged bytes',
-)
+assert.deepEqual(sectionsOnly.preset, { id: 'ctf', name: 'ctf', entries: ['env'] }, 'new exports must omit legacy compression bindings and members')
+assert.deepEqual(sectionsOnly.entries, [local], 'a preset export must not carry an independent compaction body')
+const reread = parsePack(JSON.parse(JSON.stringify(sectionsOnly)))
+assert.equal(reread.ok, true, 'a section-only pack must read back')
+assert.deepEqual(reread.pack, sectionsOnly, 'the section-only format must round-trip unchanged')
 
-const reread = parsePack(JSON.parse(JSON.stringify(carrying)))
-assert.equal(reread.ok, true, 'a pack this build wrote must read back')
-assert.equal(reread.pack.preset.compaction, 'compact-zh', 'with its pointer intact')
-assert.equal(reread.pack.entries[1].kind, 'compaction', 'and the kind of the member that carries it')
+const legacyRead = parsePack(legacyPack)
+assert.equal(legacyRead.ok, true, 'old version-1 packs must remain readable')
+assert.deepEqual(legacyRead.pack.preset, { id: 'ctf', name: 'ctf', entries: ['env'] }, 'old compression metadata must not bind the imported preset')
+assert.equal(legacyRead.pack.entries[1].kind, 'compaction', 'a legacy compression body must not become a normal section')
+assert.equal(legacyRead.pack.entries[1].body, compactionMember.body, 'legacy bodies are preserved for manual selection')
 
-const pointerless = parsePack({
+const manualImport = planImport(legacyPack, { entryIds: [], presetIds: [] })
+assert.equal(manualImport.ok, true)
+assert.deepEqual(manualImport.plan.preset, { id: 'ctf', name: 'ctf', entries: ['env'] }, 'the import planner must also exclude compression membership')
+assert.equal(manualImport.plan.entries[1].kind, 'compaction', 'legacy compression is imported as a standalone entry')
+const movedManual = planImport(legacyRead.pack, { entryIds: ['compact-zh'], presetIds: [] })
+assert.equal(movedManual.ok, true)
+assert.equal(movedManual.plan.entries[1].id, 'compact-zh-2', 'standalone compression still receives a collision-free id')
+assert.equal(movedManual.plan.entries[1].renamedFrom, 'compact-zh')
+assert.deepEqual(movedManual.plan.preset, { id: 'ctf', name: 'ctf', entries: ['env'] }, 'renaming compression must never reattach it to the preset')
+
+const danglingLegacy = parsePack({
   format: PACK_FORMAT,
   version: PACK_VERSION,
-  preset: { id: 'x', name: 'x', entries: ['a'] },
+  preset: { id: 'x', name: 'x', entries: ['a'], compaction: 'gone-instruction' },
   entries: [{ id: 'a', title: 'a', body: 'hello' }],
 })
-assert.equal(pointerless.ok, true, 'a pack from before this field existed is still a pack')
-assert.equal(pointerless.pack.preset.compaction, undefined, 'and it resolves without inventing a pointer')
-assert.equal(pointerless.pack.entries[0].kind, undefined, 'nor a kind for an entry that is not one')
-
-const freePointer = planImport(carrying, { entryIds: [], presetIds: [] })
-assert.equal(freePointer.ok, true, 'a pack with a pointer fits like any other')
-assert.equal(freePointer.plan.preset.compaction, 'compact-zh', 'and the pointer lands as written when nothing had to move')
-assert.equal(freePointer.plan.entries[1].kind, 'compaction', 'the compaction member is created as one')
-assert.equal(freePointer.plan.compactionDropped, undefined, 'with nothing dropped')
-
-const movedPointer = planImport(carrying, { entryIds: ['compact-zh'], presetIds: [] })
-assert.equal(movedPointer.ok, true, 'a taken id for the instruction is not an error either')
-assert.equal(movedPointer.plan.entries[1].id, 'compact-zh-2', 'the instruction takes a free id')
-assert.equal(
-  movedPointer.plan.preset.compaction,
-  'compact-zh-2',
-  'and the pointer follows it, exactly as a member id does',
-)
-assert.equal(movedPointer.plan.entries[1].renamedFrom, 'compact-zh', 'the rename is recorded as usual')
-assert.deepEqual(movedPointer.plan.renamed, [{ from: 'compact-zh', to: 'compact-zh-2' }], 'and reported')
-
-// The one case an import cannot carry: the pointer named something the pack
-// itself never had. Carrying the id anyway would leave the preset pointing at an
-// entry that does not exist here — reported, and cleared to "the stock one".
-const danglingPointer = planImport(
-  parsePack({
-    format: PACK_FORMAT,
-    version: PACK_VERSION,
-    preset: { id: 'x', name: 'x', entries: ['a'], compaction: 'gone-instruction' },
-    entries: [{ id: 'a', title: 'a', body: 'hello' }],
-  }).pack,
-  { entryIds: [], presetIds: [] },
-)
-assert.equal(danglingPointer.ok, true, 'a pointer to nothing is not a reason to refuse the whole pack')
-assert.equal(danglingPointer.plan.preset.compaction, '', 'the preset is imported naming no instruction')
-assert.equal(danglingPointer.plan.compactionDropped, 'gone-instruction', 'and the report says which one was let go')
+assert.equal(danglingLegacy.ok, true, 'an unused legacy pointer must not prevent import')
+const danglingPlan = planImport(danglingLegacy.pack, { entryIds: [], presetIds: [] })
+assert.deepEqual(danglingPlan.plan.preset, { id: 'x', name: 'x', entries: ['a'] }, 'a legacy pointer must be ignored rather than copied or defaulted')
+assert.equal(Object.hasOwn(danglingPlan.plan, 'compactionDropped'), false, 'a preset import no longer reports a compression binding')
+const compressionOnly = parsePack({ ...legacyPack, preset: { ...legacyPack.preset, entries: ['compact-zh'] }, entries: [compactionMember] })
+assert.equal(compressionOnly.ok, true)
+assert.deepEqual(compressionOnly.pack.preset.entries, [], 'an old compression-only selection must become an empty section preset')
+assert.equal(compressionOnly.pack.entries[0].kind, 'compaction', 'its independent compression entry is not lost')
 
 // ── writing the bodies ────────────────────────────────────────────────────────
 
@@ -422,4 +399,5 @@ console.log('  build       local bodies inline, subscriptions by reference, miss
 console.log('  parse       format and version named, bad entries refused by position, unrenderable bodies refused')
 console.log('  recover     unusable ids and orders recovered instead of refused')
 console.log('  plan        free ids kept, taken ids renamed with the preset following, capacity checked first')
+console.log('  compression new exports contain sections only; legacy compression bodies import as standalone entries')
 console.log('  bodies      written in pack order, subscriptions skipped, everything taken back on failure')

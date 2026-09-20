@@ -100,12 +100,6 @@ export interface PackPreset {
   name: string
   /** Member ids, referring to {@link PromptPack.entries}. */
   entries: string[]
-  /**
-   * Id of the compaction instruction the preset put in force, when it named one.
-   * That id refers to {@link PromptPack.entries} like a member does, so an import
-   * has to move it with them.
-   */
-  compaction?: string | undefined
 }
 
 /** A pack this build understands. */
@@ -221,15 +215,6 @@ export interface PackImportPlan {
   sourceDropped: string[]
   /** Preset members the pack itself could not carry (already gone at export). */
   missingMembers: string[]
-  /**
-   * Id of the compaction instruction the pack named that could not come along,
-   * present only when that happened.
-   *
-   * The pack named an entry it does not carry, so the pointer would address
-   * nothing here. The preset is imported naming no instruction instead, which is
-   * a working state — the stock one — and this is how the page says so.
-   */
-  compactionDropped?: string | undefined
 }
 
 /** The result of planning an import. */
@@ -273,16 +258,14 @@ export type PackParseResult = { ok: true; pack: PromptPack } | PackRefusal
  * @returns the pack, ready to be serialized.
  */
 export function buildPack(input: PackExportInput): PromptPack {
-  const members: PackEntry[] = input.members.map((member) => {
+  const compressionIds = new Set(input.members.filter((member) => member.kind === 'compaction').map((member) => member.id))
+  const members: PackEntry[] = input.members.filter((member) => member.kind !== 'compaction').map((member) => {
     const carried: PackEntry = {
       id: member.id,
       title: member.title,
       order: member.order,
       enabled: member.enabled,
     }
-    // Written only when it is one, so an entry that is not a compaction
-    // instruction exports exactly the bytes it did before this field existed.
-    if (member.kind === 'compaction') carried.kind = 'compaction'
     if (member.body !== undefined) {
       carried.body = member.body
       if (member.origin !== undefined) carried.origin = member.origin
@@ -294,12 +277,8 @@ export function buildPack(input: PackExportInput): PromptPack {
   const preset: PackPreset = {
     id: input.preset.id,
     name: input.preset.name,
-    entries: [...input.preset.entries],
+    entries: input.preset.entries.filter((id) => !compressionIds.has(id)),
   }
-  // Same rule for the pointer: a pack from a deployment that never made a
-  // compaction entry stays byte-for-byte what it always was.
-  const pointer = input.preset.compaction.trim()
-  if (pointer.length > 0) preset.compaction = pointer
   return {
     format: PACK_FORMAT,
     version: PACK_VERSION,
@@ -307,7 +286,7 @@ export function buildPack(input: PackExportInput): PromptPack {
     generator: { plugin: input.pluginName, pluginVersion: input.pluginVersion },
     preset,
     entries: members,
-    missing: [...(input.missing ?? [])],
+    missing: (input.missing ?? []).filter((id) => !compressionIds.has(id)),
   }
 }
 
@@ -387,11 +366,6 @@ export function parsePack(raw: unknown): PackParseResult {
   const membersRaw = presetRaw['entries']
   if (!Array.isArray(membersRaw)) return refuse('bad-preset', 'preset.entries 必须是字符串数组')
   const memberIds = membersRaw.filter((member): member is string => typeof member === 'string')
-  // An unusable pointer is read as no pointer rather than refusing the pack: a
-  // preset that names no compaction instruction is a working preset, so nothing
-  // is lost by ignoring a field this build cannot act on.
-  const compactionRaw = textOf(presetRaw['compaction'])?.trim() ?? ''
-  const pointer = isEntryId(compactionRaw) ? compactionRaw : undefined
 
   const listRaw = root['entries']
   if (!Array.isArray(listRaw)) return refuse('bad-entry', 'entries 必须是一个数组')
@@ -439,9 +413,10 @@ export function parsePack(raw: unknown): PackParseResult {
     entries.push(entry)
   }
 
+  const compressionIds = new Set(entries.filter((entry) => entry.kind === 'compaction').map((entry) => entry.id))
   const missingRaw = root['missing']
   const missing = Array.isArray(missingRaw)
-    ? missingRaw.filter((id): id is string => typeof id === 'string')
+    ? missingRaw.filter((id): id is string => typeof id === 'string' && !compressionIds.has(id))
     : []
 
   return {
@@ -454,12 +429,9 @@ export function parsePack(raw: unknown): PackParseResult {
       preset: {
         id: textOf(presetRaw['id']) ?? '',
         name: presetName.slice(0, MAX_TITLE_LENGTH),
-        entries: memberIds,
-        // Absent when the pack names none: the page reads a pack back through
-        // the same field it writes, so "no instruction" must stay absent rather
-        // than become an id.
-        ...(pointer === undefined ? {} : { compaction: pointer }),
+        entries: memberIds.filter((id) => !compressionIds.has(id)),
       },
+      // Legacy compression bodies remain independent entries for manual use.
       entries,
       missing,
     },
@@ -530,16 +502,9 @@ export function planImport(
     : entryIdFor(pack.preset.name, presetUsed)
   const moved = new Map(renamed.map(({ from, to }) => [from, to]))
   const carried = new Set(pack.entries.map((entry) => entry.id))
-  const missingMembers = pack.preset.entries.filter((id) => !carried.has(id))
-
-  // The pointer is an id, so it moves with the entry it names. One that names
-  // something the pack never carried cannot move — there is nothing here to
-  // address — so the preset is imported naming no instruction, which is a
-  // working state, and the id is reported rather than quietly kept.
-  const wantedPointer = pack.preset.compaction ?? ''
-  const pointer = wantedPointer.length === 0 || !carried.has(wantedPointer)
-    ? ''
-    : moved.get(wantedPointer) ?? wantedPointer
+  const compressionIds = new Set(pack.entries.filter((entry) => entry.kind === 'compaction').map((entry) => entry.id))
+  const memberIds = pack.preset.entries.filter((id) => !compressionIds.has(id))
+  const missingMembers = memberIds.filter((id) => !carried.has(id))
 
   return {
     ok: true,
@@ -548,14 +513,12 @@ export function planImport(
       preset: {
         id: presetId,
         name: pack.preset.name,
-        entries: pack.preset.entries.map((id) => moved.get(id) ?? id),
-        compaction: pointer,
+        entries: memberIds.map((id) => moved.get(id) ?? id),
       },
       renamed,
       noBody,
       sourceDropped,
       missingMembers,
-      ...(wantedPointer.length > 0 && pointer.length === 0 ? { compactionDropped: wantedPointer } : {}),
     },
   }
 }

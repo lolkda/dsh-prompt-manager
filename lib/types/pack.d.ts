@@ -83,12 +83,6 @@ export interface PackPreset {
     name: string;
     /** Member ids, referring to {@link PromptPack.entries}. */
     entries: string[];
-    /**
-     * Id of the compaction instruction the preset put in force, when it named one.
-     * That id refers to {@link PromptPack.entries} like a member does, so an import
-     * has to move it with them.
-     */
-    compaction?: string | undefined;
 }
 /** A pack this build understands. */
 export interface PromptPack {
@@ -196,15 +190,6 @@ export interface PackImportPlan {
     sourceDropped: string[];
     /** Preset members the pack itself could not carry (already gone at export). */
     missingMembers: string[];
-    /**
-     * Id of the compaction instruction the pack named that could not come along,
-     * present only when that happened.
-     *
-     * The pack named an entry it does not carry, so the pointer would address
-     * nothing here. The preset is imported naming no instruction instead, which is
-     * a working state — the stock one — and this is how the page says so.
-     */
-    compactionDropped?: string | undefined;
 }
 /** The result of planning an import. */
 export type PackImportResult = {

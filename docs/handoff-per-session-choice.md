@@ -1,5 +1,7 @@
 # 交接：把「哪套提示词生效」做成按会话隔离（dsh-prompt-manager）
 
+> 历史记录：本文中“切组合时一起写压缩指令”的设计已被后续改动取消。当前组合只包含普通提示词，切换/取消组合只写 `preset`；压缩提示词在会话中手动指定。旧组合的压缩字段被忽略，已保存的会话选择不清空。当前行为以 [README](../README.md#组合) 为准。
+
 > 给下一个 Agent 读。仓库：`F:\环境\dsh-ctf-prompt`（`@lolkda/dsh-prompt-manager`，当前 package.json 版本 **3.1.9**，未提交的工作区里有本次改动）。
 > 本文位置：`docs/handoff-per-session-choice.md`（仓库内）。它是本次改动的**工作交接**，不属于包内容 —— `package.json` 的 `files` 不含 `docs/`，所以不会被 npm 发布，但会随提交进 git。收尾时删掉即可。
 

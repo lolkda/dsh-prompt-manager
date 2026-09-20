@@ -1000,7 +1000,7 @@ try {
   )
   assert.deepEqual(
     routeSettings.state.value.presets.at(-1),
-    { id: 'ctf-2', name: 'ctf', entries: ['local-one-2', 'pack-ctf-2', 'gone-entry', 'fresh-one'], compaction: '' },
+    { id: 'ctf-2', name: 'ctf', entries: ['local-one-2', 'pack-ctf-2', 'gone-entry', 'fresh-one'] },
     'the imported preset lands beside the one already here, its membership following the renames',
   )
   assert.equal(
@@ -1020,47 +1020,46 @@ try {
   assert.equal(refused.state.status, 400, 'a pack with an unusable entry is refused')
   assert.equal(JSON.stringify(routeSettings.state.value.entries), entriesBefore, 'and the index is untouched')
 
-  // ── a preset's compaction instruction travels with the pack ─────────────────
+  // ── exporting and importing a preset never changes manual compression ──────
 
-  // The pointer is not a membership, which is exactly what makes it easy to lose:
-  // a pack carrying the pointer without the body would arrive at the other
-  // machine naming an instruction that machine cannot produce.
   writeBody('compact-zh', '压缩正文', LIVE_ROUTES)
   routeSettings.state.value = {
     entries: [
       ...routeSettings.state.value.entries,
       { id: 'compact-zh', title: '压缩指令', order: 90, enabled: false, kind: 'compaction' },
     ],
-    presets: [{ id: 'ctf', name: 'ctf', entries: ['local-one'], compaction: 'compact-zh' }],
+    presets: [{ id: 'ctf', name: 'ctf', entries: ['local-one', 'compact-zh'], compaction: 'compact-zh' }],
     activePreset: 'ctf',
   }
   routeSettings.state.watcher()
+  const manualChoice = (await call({
+    method: 'POST',
+    url: `${ROUTE_PREFIX}/session/session-pack-manual`,
+    origin: 'http://127.0.0.1:3080',
+    body: JSON.stringify({ compaction: 'compact-zh' }),
+  })).json()
+  assert.equal(manualChoice.compaction, 'compact-zh')
   const carrying = (await call({ url: `${ROUTE_PREFIX}/pack/export?preset=ctf` })).json()
-  assert.equal(carrying.preset.compaction, 'compact-zh', 'the pointer travels with the preset it belongs to')
-  assert.deepEqual(
-    carrying.entries.map((entry) => [entry.id, entry.kind]),
-    [['local-one', undefined], ['compact-zh', 'compaction']],
-    'and the instruction it names is carried as a member, still marked as one',
-  )
-  assert.equal(carrying.entries[1].body, '压缩正文', 'with its body, which nothing else could reproduce')
+  assert.deepEqual(carrying.preset, { id: 'ctf', name: 'ctf', entries: ['local-one'] }, 'export must remove old compression bindings and mistaken compression membership')
+  assert.deepEqual(carrying.entries.map((entry) => entry.id), ['local-one'], 'an independent compression body must not be exported with the preset')
 
+  const legacy = {
+    ...carrying,
+    preset: { ...carrying.preset, entries: ['local-one', 'compact-zh'], compaction: 'compact-zh' },
+    entries: [...carrying.entries, { id: 'compact-zh', title: '压缩指令', order: 90, enabled: false, kind: 'compaction', body: '压缩正文' }],
+  }
   const landed = await call({
     method: 'POST',
     url: `${ROUTE_PREFIX}/pack/import`,
     origin: 'http://127.0.0.1:3080',
-    body: JSON.stringify(carrying),
+    body: JSON.stringify(legacy),
   })
-  assert.equal(landed.state.status, 200, `importing a pack that carries an instruction must land, got ${landed.state.body}`)
-  assert.equal(
-    landed.json().preset.compaction,
-    'compact-zh-2',
-    'the imported preset points at the id its instruction actually took',
-  )
-  assert.equal(
-    routeSettings.state.value.entries.find((entry) => entry.id === 'compact-zh-2').kind,
-    'compaction',
-    'and the entry lands as a compaction instruction rather than as a section',
-  )
+  assert.equal(landed.state.status, 200, `legacy compression bodies must remain importable, got ${landed.state.body}`)
+  assert.equal(Object.hasOwn(landed.json().preset, 'compaction'), false, 'import must not recreate a preset compression binding')
+  assert.ok(!landed.json().preset.entries.includes('compact-zh-2'), 'the imported compression entry must stay outside the preset')
+  assert.equal(routeSettings.state.value.entries.find((entry) => entry.id === 'compact-zh-2').kind, 'compaction', 'the legacy body must stay an independent compression entry')
+  assert.equal(readFileSync(join(LIVE_ROUTES, 'sections', 'compact-zh-2.md'), 'utf8'), '压缩正文', 'import must preserve the original compression body')
+  assert.deepEqual((await call({ url: `${ROUTE_PREFIX}/session/session-pack-manual` })).json(), manualChoice, 'pack operations must leave the existing manual session choice unchanged')
 
   // ── a compaction instruction is an entry kind, not a section ─────────────────
   //
@@ -1086,17 +1085,9 @@ try {
   assert.equal(kinds[2].kind, undefined, 'an unknown kind must read as a section rather than dropping the entry')
 
   const chosen = parsePresets([{ id: 'ctf', name: 'ctf', entries: ['plain'], compaction: 'compact-zh' }])
-  assert.equal(chosen[0].compaction, 'compact-zh', 'a preset must carry the compaction instruction it selects')
-  assert.equal(
-    parsePresets([{ id: 'bare', name: 'bare', entries: [] }])[0].compaction,
-    '',
-    'a preset that names none must read as the stock instruction',
-  )
-  assert.equal(
-    parsePresets([{ id: 'bad', name: 'bad', entries: [], compaction: 7 }])[0].compaction,
-    '',
-    'an unusable pointer must read as none',
-  )
+  assert.deepEqual(chosen, [{ id: 'ctf', name: 'ctf', entries: ['plain'] }], 'legacy compression fields must be ignored when reading presets')
+  assert.deepEqual(parsePresets([{ id: 'bare', name: 'bare', entries: [] }]), [{ id: 'bare', name: 'bare', entries: [] }], 'new presets must not gain a default compression field')
+  assert.deepEqual(parsePresets([{ id: 'bad', name: 'bad', entries: [], compaction: 7 }]), [{ id: 'bad', name: 'bad', entries: [] }], 'even malformed legacy compression metadata is irrelevant to a preset')
 
   // The real schema, skipped only when schemastery itself is unresolvable — an
   // assertion failure here must never be swallowed into "skipped".
@@ -1116,8 +1107,12 @@ try {
       presets: [{ id: 'ctf', name: 'ctf', entries: [], compaction: 'compact-zh' }],
     })
     assert.equal(stored.entries[0].kind, 'compaction', 'the schema must resolve a stored compaction entry')
-    assert.equal(stored.compaction, 'compact-zh', 'and the pointer that puts it in force')
-    assert.equal(stored.presets[0].compaction, 'compact-zh', 'and the preset that selects it')
+    assert.equal(stored.compaction, 'compact-zh', 'legacy root metadata remains readable without deciding a session choice')
+    assert.equal(Object.hasOwn(parsePresets(stored.presets)[0], 'compaction'), false, 'a legacy document must resolve to a section-only preset')
+    const wire = compactSchema.toJSON()
+    const presetListSchema = wire.refs[wire.refs[wire.uid].dict.presets]
+    const presetSchema = wire.refs[presetListSchema.inner]
+    assert.deepEqual(Object.keys(presetSchema.dict).sort(), ['entries', 'id', 'name'], 'the settings wire must expose no compression field on a preset')
     const plainDoc = compactSchema({ entries: [{ id: 'plain', title: 'x', order: 10, enabled: true }] })
     assert.equal(plainDoc.entries[0].kind, undefined, 'a stored section entry must not gain a kind')
     assert.equal(plainDoc.compaction, '', 'a document without a pointer must read as the stock instruction')

@@ -23,11 +23,10 @@
  * may register variables as well; a name this plugin cannot take is reported and
  * skipped rather than failing the mount.
  *
- * Which entries reach the prompt is decided per assembly: the preset named by
- * `activePreset` answers it whole while one is in force, and each entry's own
- * `enabled` flag answers it otherwise. Both are settings fields, so the composer
- * chip in the browser switches the set with one write and the next model step
- * sees it.
+ * Which sections reach the prompt is decided per assembly: the session's chosen
+ * preset answers it while one is in force, and each entry's own `enabled` flag
+ * answers it otherwise. Compression is a separate manual session choice; a
+ * preset switch never changes it.
  *
  * @module @lolkda/dsh-prompt-manager
  */

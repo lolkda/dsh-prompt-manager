@@ -60,7 +60,7 @@ export interface PromptEntry {
      * What this entry feeds. Absent means a system-prompt section, which is what
      * every entry was before this field existed; `compaction` means the body
      * replaces the instruction a context compaction sends to its summarizer, so it
-     * registers no section and only the document's `compaction` pointer puts it in
+     * registers no section and only the session's manual `compaction` choice puts it in
      * force.
      *
      * Written only when it is `compaction`: a stored `kind: 'section'` on every
@@ -85,13 +85,6 @@ export interface PromptPreset {
     name: string;
     /** Ids of the entries this preset injects. */
     entries: string[];
-    /**
-     * Id of the compaction instruction this preset puts in force, or `''` for the
-     * one DSH ships. A preset answers "which prompts are in force" as a whole, and
-     * the compaction instruction is one of them, so switching a preset switches
-     * this too rather than leaving half the prompt on the previous set.
-     */
-    compaction: string;
 }
 /** One entry resolved against the store, a subscription, or the package. */
 export interface ResolvedBody {

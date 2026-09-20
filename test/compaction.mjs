@@ -461,10 +461,9 @@ try {
 
   // Both of the old global pointers are still sitting in the document here, and
   // both name a *different* instruction: the root `compaction` field and the
-  // preset's own field. Neither may move what this session sends. A preset switch
-  // writes the session's choice alongside the preset id (that is one request from
-  // the composer chip), so consulting the document here would be reading state
-  // this session never chose.
+  // preset's obsolete field. Neither may move what this session sends. Preset
+  // switches now write only the preset id, and compression changes only when
+  // this session manually selects it.
   const OTHER = 'session-compaction-other'
   writeBody('compact-preset', 'PRESET-BODY')
   settings.state.value = {

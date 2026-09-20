@@ -73,7 +73,7 @@ export interface PromptEntry {
    * What this entry feeds. Absent means a system-prompt section, which is what
    * every entry was before this field existed; `compaction` means the body
    * replaces the instruction a context compaction sends to its summarizer, so it
-   * registers no section and only the document's `compaction` pointer puts it in
+   * registers no section and only the session's manual `compaction` choice puts it in
    * force.
    *
    * Written only when it is `compaction`: a stored `kind: 'section'` on every
@@ -99,13 +99,6 @@ export interface PromptPreset {
   name: string
   /** Ids of the entries this preset injects. */
   entries: string[]
-  /**
-   * Id of the compaction instruction this preset puts in force, or `''` for the
-   * one DSH ships. A preset answers "which prompts are in force" as a whole, and
-   * the compaction instruction is one of them, so switching a preset switches
-   * this too rather than leaving half the prompt on the previous set.
-   */
-  compaction: string
 }
 
 /** One entry resolved against the store, a subscription, or the package. */
@@ -304,7 +297,7 @@ export function parseEntries(raw: unknown): PromptEntry[] {
 function toPreset(raw: unknown): PromptPreset | undefined {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
   const record = raw as Record<string, unknown>
-  const { id, name, entries, compaction } = record
+  const { id, name, entries } = record
   if (!isEntryId(id)) return undefined
   const label = typeof name === 'string' ? name.trim() : ''
   const chosen: string[] = []
@@ -320,15 +313,12 @@ function toPreset(raw: unknown): PromptPreset | undefined {
       if (chosen.length >= MAX_PRESET_ENTRIES) break
     }
   }
-  // Same rule as a member id: a pointer naming an entry the index does not carry
-  // right now is kept, because the entry may come back. Only an unusable value is
-  // read as "the stock instruction".
-  const pointer = typeof compaction === 'string' ? compaction.trim() : ''
+  // Old compaction metadata is deliberately ignored. Only a session's manual
+  // choice may select a compression instruction; presets select sections.
   return {
     id,
     name: label.length === 0 ? id : label.slice(0, MAX_TITLE_LENGTH),
     entries: chosen,
-    compaction: isEntryId(pointer) ? pointer : '',
   }
 }
 
@@ -412,9 +402,6 @@ export function buildIndexSchema(factory: SchemaFactory): unknown {
     id: factory.string().required(),
     name: factory.string().default(''),
     entries: factory.array(factory.string()).default([]),
-    // No default, for the same reason as an entry's `source`: a preset that
-    // never named a compaction instruction must not gain a pointer field.
-    compaction: factory.string(),
   })
   const proxy = factory.object({
     kind: factory.string().default('none'),
