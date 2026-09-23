@@ -1,5 +1,9 @@
 # dsh-prompt-manager
 
+## 3.4.0-rc.1：DSH 0.1.7-rc.1 本地适配
+
+本版使用原生 `Config`/volatile 与 `configForms`，不修改 DSH 核心。Loader entry id 保持 `prompt-manager`，旧同名 `settings.yaml` 段由 DSH 自动导入 Profile patch，原文件保留为 `.imported`；正文、脚本、订阅与每会话选择的数据目录不变。设置被宿主拒绝时明确显示失败，正文已保存而索引失败时保持可重试，不误报成功。下文旧版本迁移章节中的旧 Settings API 与存储路径仅说明历史版本。
+
 [![ci](https://github.com/lolkda/dsh-prompt-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/lolkda/dsh-prompt-manager/actions/workflows/ci.yml)
 
 把提示词作为 **system prompt section** 注入 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH），并在 Web GUI 的 **设置 → 提示词** 里管理它们：开关、排序、新增、删除、改正文（markdown）。
@@ -10,7 +14,7 @@
 
 | 部分 | 存在哪 | 谁在改 |
 |---|---|---|
-| 索引（标题 / 顺序 / 开关） | `$DSH_HOME/settings.yaml` 的 `prompt-manager:` 段 | 设置页，或手改文件 |
+| 索引（标题 / 顺序 / 开关） | 当前 Profile patch 中 `id: prompt-manager` 的 volatile `config` | 设置页，或编辑 Profile 配置 |
 | 组合（只挑普通提示词成员） | 同一段里的 `presets` | 设置页的「组合」页 |
 | **哪个组合 / 哪条压缩指令生效** | `$DSH_HOME/prompt-manager/sessions/<会话 id>.json` | **每个会话各记各的**：会话输入框那一行的「提示词」/「压缩」芯片 |
 | 正文（markdown） | `$DSH_HOME/prompt-manager/sections/<id>.md` | 设置页，或任意编辑器 |
@@ -48,7 +52,7 @@ git clone https://github.com/lolkda/dsh-prompt-manager "$DSH_HOME/profiles/web/v
 
 ```yaml
 - insert:
-    - id: dsh-prompt-manager
+    - id: prompt-manager
       name: './vendor/dsh-prompt-manager/lib/index.js'
 ```
 
@@ -67,7 +71,7 @@ dsh plugin --profile web remove @lolkda/dsh-prompt-manager
 ### 装完怎么确认
 
 ```bash
-dsh --profile web --dump-config        # 组合出来的树里应该有一行 id: dsh-prompt-manager
+dsh --profile web --dump-config        # 组合出来的树里应该有一行 id: prompt-manager
 curl -s http://127.0.0.1:3080/dsh-prompt-manager/status | head -c 200
 ```
 
@@ -77,7 +81,7 @@ curl -s http://127.0.0.1:3080/dsh-prompt-manager/status | head -c 200
 
 按 DSH STORE 的四项访问轴逐项说明。汇总权限等级是 **`high`** —— 按商店的定义，"可访问任意网络、任意 Shell"即属此级，本插件两条都沾（下详）；这不是自谦也不是自夸，是照它的判定口径填的。**本插件不访问任何凭据**，理由见「凭据」一条。
 
-- **文件（`files`）**：读 `$DSH_HOME/settings.yaml` 的 `prompt-manager:` 段（条目索引与组合）、`$DSH_HOME/prompt-manager/`（正文、脚本、订阅快照）；写也只有这两处 —— settings 段由页面通过 `scope.update` 写，正文与脚本先写临时文件再 `rename`，不留半截文件。**不写 `$DSH_HOME` 之外的任何路径**，不读环境变量的敏感项，不碰会话文件（会话内容不经本插件）。
+- **文件（`files`）**：索引与组合由原生 Config/Settings 读写当前 Profile patch 中 `prompt-manager` entry 的配置；旧 `settings.yaml` 仅在 DSH 迁移时导入。正文、脚本、订阅快照保留在已配置的 storeDir（默认 `$DSH_HOME/prompt-manager/`），先写临时文件再 `rename`。不读环境变量敏感项，不读写 DSH 的会话日志。
 - **网络（`network`）**：只有订阅源会出网（`fetch` 拉 `prompt-manager.json` 与正文，可配 https 镜像）。探测命令与变量脚本可能自行出网，那是**你配置的命令**在做，不是插件在做。不开监听端口，不做任何回连或遥测。
 - **命令（`commands`）**：按你 settings 里的配置跑**探测命令**（默认 `pwsh`/`bash`/`git`/`node`/`python`，挂载时各跑一次）和**变量脚本**（`node <脚本文件>`，保存时 / 挂载时 / 你点「重新测量」时各跑一次）。命令、参数、脚本全部来自这份配置，**插件自己不带任何可执行文件**；删掉配置就没有任何进程被起。它们以 DSH 进程的权限运行，你怎么审自己写的脚本，就怎么审这里的配置。
 - **凭据（`credentials`）**：**不读取、不存储、不转发任何凭据。** 具体地：不读环境变量里的 token/key、不读 git 凭据助手、不读 `~/.npmrc` 之类凭据文件、不发带认证头的请求。仓库里出现 `token`/`credential`/`password` 字样的地方只有两类，都不是凭据访问：`client/client.js` 里的 "token" 指**变量占位符**（`{{名字}}` 这种东西，与 React 的 key）和 README 发布章节里"**不放**任何 npm token（改走 OIDC）"的说明；`src/source.ts` 与 `src/routes.ts` 各有一处**守卫**，作用是**拒绝**带凭据的镜像 URL（`url.username`/`url.password` 非空即报错）。换句话说，凭据相关代码在这里是**拒收**逻辑，不是采集逻辑。
@@ -102,7 +106,7 @@ curl -s http://127.0.0.1:3080/dsh-prompt-manager/status | head -c 200
 
 **生效时机是下一个模型步骤**：`systemPrompt.assemble()` 每个 agent step 调用一次，section 文本每次现算，所以开关、排序、正文都不需要重启。改插件代码另说，见文末「注意」。
 
-**持久化**：只有从 `http://127.0.0.1:...` 打开页面时索引才写进 `settings.yaml`；用局域网地址打开时 DSH 的设置通道退化为内存模式，页面会显示只读。
+**持久化**：由原生 `configForms` 的 `writable/mode` 决定是否可写；接受的修改进入当前 Profile patch。非本机浏览器默认可能使用只读内存表单，已安装且启用的 LAN 设置提供方可恢复经过宿主鉴权的写入。页面不会把拒绝或缺少接受回执当成保存成功。
 
 **删除**一条 = 先删正文文件、再从索引移除（顺序有意：文件删不掉时索引不动，条目还在、还能重试）。
 
@@ -247,7 +251,7 @@ $DSH_HOME/prompt-manager/
 | `probeTexts` | 英文占位符 | 探测没拿到版本时的文案，可覆盖 `missing` / `empty` / `timeout` / `skipped` |
 | `probeBudgetMs` | `8000` | 整轮探测的时间上限，超出的记 `skipped` |
 | `storeDir` | `$DSH_HOME/prompt-manager` | 存储根目录：正文在其中的 `sections/`，每会话选择在其中的 `sessions/`。`$DSH_HOME` 取值：显式 `storeDir` > 非空 `$DSH_HOME` > `~/.dsh` |
-| `compaction` | `true` | 允许把压缩指令换成会话手动选中的那条（见「压缩指令」一节）。默认值不改变任何行为：没配条目时压缩调用原样发出。设 `false` 可彻底关掉这个接缝 |
+| `compaction` | `true` | volatile 开关：`false` 禁用替换，`true`/缺省启用；字符串仅保留旧索引指针的兼容读取，不替任何会话做选择。每次解析均读取当前值，关闭后再开启不需要重挂。没有会话选择时压缩调用仍原样发出 |
 
 ## 内置条目
 
@@ -493,7 +497,7 @@ git tag v3.1.0 && git push origin main --follow-tags
 
 包内 `cordis.patch.yml` 只 `insert` 自己这一行，`id` 用插件自有、不与别家条目撞的 id（商城会拿它和所有既有条目的 `entryIds` 比对），并且**不允许**出现 `name: '@deepseek-ai/…'` 这种冒充官方组件的行。
 
-装成包来验证（不碰你自己的 profile）：`dsh plugin --profile pmcheck add git+file:///D:/path/to/checkout`，然后 `dsh --profile pmcheck --dump-config` 应该能看到 `id: dsh-prompt-manager` 那一行 —— 它是包内 `cordis.patch.yml` 自己插进去的，`pmcheck` 的 patch 文件从头到尾没动过。看完 `remove` 掉、删掉 `$DSH_HOME/profiles/pmcheck` 即可。
+装成包来验证（不碰你自己的 profile）：`dsh plugin --profile pmcheck add git+file:///D:/path/to/checkout`，然后 `dsh --profile pmcheck --dump-config` 应该能看到 `id: prompt-manager` 那一行 —— 它是包内 `cordis.patch.yml` 自己插进去的，`pmcheck` 的 patch 文件从头到尾没动过。看完 `remove` 掉、删掉 `$DSH_HOME/profiles/pmcheck` 即可。
 
 ## License
 

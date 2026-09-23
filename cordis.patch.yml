@@ -12,9 +12,9 @@
 # registered as variables) are what a fresh install wants. Disable or repoint them
 # in the profile's own cordis.patch.yml, which applies after every bundle layer.
 #
-# The entry id is plugin-owned and must not collide with another registry entry's
-# entry IDs, so it is the package's own name rather than the bare `prompt-manager`.
+# DSH 0.1.7 configuration forms use the Loader entry id as their namespace.
+# Keep the legacy `prompt-manager` namespace so saved preferences import natively.
 
 - insert:
-    - id: dsh-prompt-manager
+    - id: prompt-manager
       name: '@lolkda/dsh-prompt-manager'

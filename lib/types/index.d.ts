@@ -31,6 +31,9 @@
  * @module @lolkda/dsh-prompt-manager
  */
 import type { Context } from '@deepseek-ai/cordis';
+import { type PromptEntry, type PromptPreset } from './entries.js';
+import { type PromptSource } from './source.js';
+import type { ProxyConfig } from './net.js';
 import { type ProbeSpec, type ProbeTexts } from './probe.js';
 import { type ScriptOverride } from './scripts.js';
 export { MAX_BODY_BYTES, MAX_ENTRIES, MAX_PRESETS } from './entries.js';
@@ -127,8 +130,33 @@ export interface Config {
      * The default changes nothing: with no entry in force — which is every
      * deployment that never made one — every compaction call goes out exactly as
      * the engine built it.
+     *
+     * On 0.1.7 this key also carries the legacy index pointer to the entry holding
+     * the instruction, because the row config and the settings document are now
+     * one object. A string is that pointer; `false` is this switch.
      */
-    compaction?: boolean;
+    compaction?: LiveField<string | boolean>;
+    /**
+     * The entry index. Live: the Loader resolves it as a reference and a settings
+     * write commits into it, which is how the settings page edits the index.
+     * Defaults to the packaged entries, so a deployment that configures nothing
+     * still gets them.
+     */
+    entries?: LiveField<PromptEntry[]>;
+    /** Named combinations of entries. Live, like every index field. */
+    presets?: LiveField<PromptPreset[]>;
+    /**
+     * Index-level "which preset is in force" field. Retained for documents written
+     * before per-session choices existed; it decides nothing, and the settings page
+     * does not read it.
+     */
+    activePreset?: LiveField<string>;
+    /** Git sources whose snapshots supply subscribed entry bodies. Live. */
+    sources?: LiveField<PromptSource[]>;
+    /** Package mirror prefix substituted into a source's clone URL. Live. */
+    mirror?: LiveField<string>;
+    /** Proxy settings for the source fetcher. Live. */
+    proxy?: LiveField<ProxyConfig>;
 }
 /** Where one plugin-owned prompt variable's value came from. */
 export type VariableSource = 'environment' | 'config' | 'probe' | 'script';
@@ -147,6 +175,16 @@ export interface VariableView {
     /** Titles of the prompt entries whose bodies reference this variable. */
     referencedBy: string[];
 }
+/** One config field the Loader resolved as live: the value is read through `get()`. */
+interface VolatileField<T> {
+    /** The value in force right now. */
+    get(): T;
+}
+/**
+ * A config field that is a live reference when the Loader resolved this plugin's
+ * schema, and the plain value when a deployment composed no schema at all.
+ */
+type LiveField<T> = T | VolatileField<T>;
 /**
  * Facts about the running process, as prompt-variable values.
  *
@@ -175,6 +213,21 @@ export declare function resolveHarnessHome(): string;
  * @returns an absolute path, without the `sections` leaf.
  */
 export declare function resolveStoreDir(config?: Config): string;
+/**
+ * The row-config schema the Loader resolves for this plugin's entry.
+ *
+ * DSH 0.1.7-rc.1 deleted `settings.register`, so this plugin no longer owns a
+ * settings namespace: its own Loader entry is the namespace, and the index
+ * travels as the `volatile()` fields declared here. Exported at module scope
+ * because that is where the Loader looks — a plugin that exports no schema has
+ * no settings surface at all.
+ *
+ * `undefined` when schemastery cannot be resolved from this package, which is
+ * the same deployment that has no settings capability: the plugin still mounts
+ * and serves its composed configuration, and the index falls back to the
+ * packaged entries.
+ */
+export declare const Config: unknown;
 /**
  * Register the prompt sections, their variables, the settings index, and the
  * body-file route.

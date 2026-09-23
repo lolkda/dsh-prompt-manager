@@ -8,8 +8,9 @@
  * panel's narrow column is spent on one thing at a time.
  *
  * The index (title, order, enabled) rides the shared settings transport through
- * `ctx.settingsScope`; the bodies ride the plugin's own `/dsh-prompt-manager`
- * route, because they are markdown files on disk.
+ * `ctx.configForms.get(entryId)` — the entry id being this package's Loader row,
+ * which is also the settings namespace on DSH 0.1.7; the bodies ride the plugin's
+ * own `/dsh-prompt-manager` route, because they are markdown files on disk.
  *
  * Built in the client module system's lazy-CJS factory format by hand, so the
  * package needs no bundler: the factory only requests modules the shell's
@@ -670,6 +671,43 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * What to say when a settings write was not accepted.
+     *
+     * A write that did not land is not a failure to explain away: the value the
+     * person asked for is not confirmed, and the page must say which part did not
+     * land rather than reporting the change it did not make. `what` names that part
+     * in the page's own words, because the sentence before the colon differs at
+     * every call site — a toggle, a body that is already on disk, a preset list —
+     * while the reason and the way out are the same.
+     *
+     * @param what - the part that did not land.
+     * @returns a sentence for a person.
+     */
+    function refusalText(what) {
+      return `${what}：宿主没有接受这次保存（这一页读到的版本可能已经过期，或它没有写权限）。重试一次即可。`
+    }
+
+    /**
+     * Write one settings field and report whether the Host accepted it.
+     *
+     * The published peer is DSH 0.1.7-rc.1, whose form answers a boolean: `true`
+     * only for a write the Host accepted, `false` for one it refused (it rejects
+     * nothing, and a memory-mode form answers `false` too). Every write in this
+     * bundle goes through here, so exactly one place decides what "accepted" means
+     * and no caller can mistake anything else for a save — including the silence of
+     * a form that answers no verdict at all, which is outside the contract and is
+     * never read as a save.
+     *
+     * @param form - this plugin's settings form.
+     * @param field - the field to write.
+     * @param value - the complete next value of that field.
+     * @returns whether the Host accepted the write.
+     */
+    async function accepted(form, field, value) {
+      return (await form.set(field, value)) === true
+    }
+
+    /**
      * One session's stored choice, and the way to change it.
      *
      * The choice is a file the Host owns, one per session, so this is a request
@@ -1148,14 +1186,16 @@ window.__ModuleLoader__.load({
           // The body is on disk, so the fence the editor holds has to be the one
           // that write produced — a later save that reused the old hash would be
           // refused as stale, and the editor would be stuck on 409.
-          const next = {
+          const placed = {
             ...draft,
             source: typeof written.source === 'string' ? written.source : draft.source,
             fileSha1: typeof written.fileSha1 === 'string' ? written.fileSha1 : null,
-            isNew: false,
           }
-          setDraft(next)
-          setSaved(next)
+          // `isNew` means "this page made it and the index does not carry it yet",
+          // so it is cleared only once the index write is accepted. Clearing it
+          // here instead would make a refused index write permanent: the retry
+          // would look the id up in a list that never got it, find nothing to
+          // update, and skip the write — a body file no page can reach.
           const nextEntries = draft.isNew
             ? [...entries, compactionDraft
               // A new compaction record carries the switch a section would have,
@@ -1166,17 +1206,20 @@ window.__ModuleLoader__.load({
             : entries.map((entry) => entry.id === draft.id
               ? { ...entry, title: draft.title, order: draft.order }
               : entry)
-          if (indexChanged(entries, nextEntries)) {
-            try {
-              await scope.set('entries', nextEntries)
-            } catch (error) {
-              // Half a save is worth saying precisely: the prose is stored, only
-              // the index write failed, and pressing save again finishes it.
-              setStatus({ kind: 'error', text: `正文已保存，但索引没写进去：${error.message}（再点一次「保存修改」即可）` })
-              await refreshStore()
-              return
-            }
+          if (indexChanged(entries, nextEntries) && !await accepted(scope, 'entries', nextEntries)) {
+            // Half a save is worth saying precisely: the prose is stored, only the
+            // index write was refused, and pressing save again finishes it. The
+            // draft keeps its unsaved side, so the editor stays dirty and the
+            // retry appends the record the first attempt never wrote.
+            setDraft(placed)
+            setSaved(null)
+            setStatus({ kind: 'error', text: refusalText('正文已保存，但索引没写进去') })
+            await refreshStore()
+            return
           }
+          const next = { ...placed, isNew: false }
+          setDraft(next)
+          setSaved(next)
           // Saving a compaction instruction aims nothing. Which instruction a
           // conversation sends is that conversation's own choice, so this save
           // creates the entry and stops there: the composer's compaction chip is
@@ -1256,7 +1299,12 @@ window.__ModuleLoader__.load({
               name: label,
               entries: presetDraft.members,
             }]
-          if (presetsDiffer(presets, next)) await scope.set('presets', next)
+          if (presetsDiffer(presets, next) && !await accepted(scope, 'presets', next)) {
+            // The list is one field, so a refusal is all-or-nothing: nothing of
+            // this preset is stored, and the editor stays open on the draft.
+            setStatus({ kind: 'error', text: refusalText('组合没保存') })
+            return
+          }
           setPresetDraft({
             id,
             name: label,
@@ -1280,7 +1328,10 @@ window.__ModuleLoader__.load({
           // some conversation happens to have chosen leaves that conversation
           // reading an id that names nothing — which is exactly how the Host
           // already treats a preset somebody deleted, and it says so in its log.
-          await scope.set('presets', presets.filter((candidate) => candidate.id !== preset.id))
+          if (!await accepted(scope, 'presets', presets.filter((candidate) => candidate.id !== preset.id))) {
+            setStatus({ kind: 'error', text: refusalText('组合没删除') })
+            return
+          }
           setStatus({ kind: 'info', text: `已删除组合「${preset.name}」。` })
         } catch (error) {
           setStatus({ kind: 'error', text: failureText(error) })
@@ -1410,7 +1461,12 @@ window.__ModuleLoader__.load({
             mirror: typeof allocated.mirror === 'string' ? allocated.mirror : mirror,
             enabled: true,
           }]
-          await scope.set('sources', next)
+          if (!await accepted(scope, 'sources', next)) {
+            // The Host allocated a slug, but nothing recorded it: checking a source
+            // no page and no engine can see would only produce a report about it.
+            setStatus({ kind: 'error', text: refusalText('来源没添加') })
+            return
+          }
           setNewRepo('')
           setNewMirror('')
           setStatus({ kind: 'info', text: `已添加来源 ${allocated.id}，正在检查…` })
@@ -1483,10 +1539,16 @@ window.__ModuleLoader__.load({
           // only record what it already did. Deleting first keeps a failure from
           // leaving the page showing a source the engine still has.
           const outcome = await request('DELETE', `/sources/${encodeURIComponent(slug)}`)
-          await scope.set('entries', Array.isArray(outcome.entries)
+          if (!await accepted(scope, 'entries', Array.isArray(outcome.entries)
             ? outcome.entries
-            : entries.filter((entry) => entry.source !== slug))
-          await scope.set('sources', configured.filter((source) => source.id !== slug))
+            : entries.filter((entry) => entry.source !== slug))) {
+            setStatus({ kind: 'error', text: refusalText('来源的文件已删除，但索引没更新') })
+            return
+          }
+          if (!await accepted(scope, 'sources', configured.filter((source) => source.id !== slug))) {
+            setStatus({ kind: 'error', text: refusalText('索引已更新，但来源列表没更新') })
+            return
+          }
           if (report !== null && report.slug === slug) setReport(null)
           await refreshSources()
           setStatus({ kind: 'info', text: `已删除来源「${slug}」。` })
@@ -1507,7 +1569,12 @@ window.__ModuleLoader__.load({
           // The index goes first. If the body write then fails, what is left is a
           // visible entry with an empty body — which this editor can fix — where
           // the other order would leave a body file no page can reach.
-          await scope.set('entries', [...entries, { id: allocated.id, title, order: draft.order, enabled: false }])
+          if (!await accepted(scope, 'entries', [...entries, { id: allocated.id, title, order: draft.order, enabled: false }])) {
+            // The index goes first on purpose, so a refusal stops here: a copied
+            // body for an entry no index carries is a file no page can reach.
+            setStatus({ kind: 'error', text: refusalText('索引没写进去，fork 没完成') })
+            return
+          }
           const forked = {
             id: allocated.id,
             title,
@@ -1540,13 +1607,20 @@ window.__ModuleLoader__.load({
         }
       }, [draft, entries, refreshStore, scope])
 
-      const toggle = React.useCallback((entry, enabled) => {
+      const toggle = React.useCallback(async (entry, enabled) => {
         const nextEntries = entries.map((candidate) => candidate.id === entry.id ? { ...candidate, enabled } : candidate)
         setBusy(true)
-        Promise.resolve(scope.set('entries', nextEntries))
-          .then(() => setStatus({ kind: 'info', text: enabled ? `已启用「${entry.title}」。` : `已关闭「${entry.title}」。` }))
-          .catch((error) => setStatus({ kind: 'error', text: failureText(error) }))
-          .finally(() => setBusy(false))
+        try {
+          if (!await accepted(scope, 'entries', nextEntries)) {
+            setStatus({ kind: 'error', text: refusalText('索引没写进去') })
+            return
+          }
+          setStatus({ kind: 'info', text: enabled ? `已启用「${entry.title}」。` : `已关闭「${entry.title}」。` })
+        } catch (error) {
+          setStatus({ kind: 'error', text: failureText(error) })
+        } finally {
+          setBusy(false)
+        }
       }, [entries, scope])
 
       const remove = React.useCallback((entry) => {
@@ -1556,11 +1630,14 @@ window.__ModuleLoader__.load({
         // entry is still there to retry, rather than an index record pointing at
         // a file the page no longer shows.
         request('DELETE', `/body/${encodeURIComponent(entry.id)}`)
-          .then(() => scope.set('entries', entries.filter((candidate) => candidate.id !== entry.id)))
-          // Nothing else to release: a conversation that had chosen this entry
-          // keeps the id in its own file and reads it as naming nothing, which is
-          // what the Host does with any id an index no longer carries.
           .then(async () => {
+            if (!await accepted(scope, 'entries', entries.filter((candidate) => candidate.id !== entry.id))) {
+              setStatus({ kind: 'error', text: refusalText('正文文件已删除，但索引没更新') })
+              return
+            }
+            // Nothing else to release: a conversation that had chosen this entry
+            // keeps the id in its own file and reads it as naming nothing, which is
+            // what the Host does with any id an index no longer carries.
             if (selectedId === entry.id) {
               setDraft(null)
               setSaved(null)
@@ -2696,26 +2773,29 @@ window.__ModuleLoader__.load({
 
     const name = 'dsh-prompt-manager'
 
-    // `settingsScope` is a hard requirement: this section is nothing but the
+    // `configForms` is a hard requirement: this section is nothing but the
     // index it serves, so a host without the settings domain mounts nothing
-    // rather than rendering controls that cannot persist.
+    // rather than rendering controls that cannot persist. DSH 0.1.7 replaced the
+    // per-plugin `settingsScope` service with `configForms`, whose forms are
+    // keyed by Host entry id — which is why the namespace below is this
+    // package's Loader entry id.
     //
     // `sessions` is deliberately not injected: both chips take the conversation's
     // id from the session-scoped slot they are drawn in, which is the same answer
     // without depending on a list snapshot — 0.1.6 dropped the `current` field the
     // 3.2.1 bundle read there, and that is what broke the switches.
-    const inject = ['slots', 'settingsScope']
+    const inject = ['slots', 'configForms']
 
     /**
      * Register the settings section and the composer chip.
      *
-     * One bundle, one settings scope, two surfaces: the page where presets are
+     * One bundle, one settings form, two surfaces: the page where presets are
      * authored, and the control beside the input box that switches between them.
      * Both read the same namespace, so neither has to tell the other anything.
      * @param ctx - the browser plugin context.
      */
     function apply(ctx) {
-      const scope = ctx.settingsScope.bind({ namespace: NAMESPACE })
+      const scope = ctx.configForms.get(NAMESPACE)
       ctx.effect(() => {
         const tag = injectStyle()
         return () => { if (tag !== null) tag.remove() }

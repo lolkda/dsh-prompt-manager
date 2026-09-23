@@ -129,6 +129,12 @@ export interface SchemaNode {
     default(value: unknown): SchemaNode;
     /** Mark the field as mandatory. */
     required(value?: boolean): SchemaNode;
+    /**
+     * Mark the field live: the Loader hands it to the plugin as a reference and a
+     * settings write commits into that reference instead of remounting the row.
+     * Only a volatile field can be written through the settings service at all.
+     */
+    volatile(value?: boolean): SchemaNode;
 }
 /** The slice of the schemastery factory this plugin calls. */
 export interface SchemaFactory {
@@ -136,6 +142,8 @@ export interface SchemaFactory {
     object(shape: Record<string, SchemaNode>): SchemaNode;
     /** One array node whose elements all match `inner`. */
     array(inner: SchemaNode): SchemaNode;
+    /** One node accepting any of `list`. */
+    union(list: SchemaNode[]): SchemaNode;
     /** A string node. */
     string(): SchemaNode;
     /** A number node. */
@@ -215,4 +223,47 @@ export declare function activeCompactionOf(raw: unknown): string;
  * outbound settings the engine reads.
  */
 export declare function buildIndexSchema(factory: SchemaFactory): unknown;
+/**
+ * The row-config schema the Loader resolves for this plugin.
+ *
+ * DSH 0.1.7-rc.1 deleted `settings.register`, so a plugin no longer owns a
+ * settings namespace: the namespace is the plugin's own Loader entry, and the
+ * index it carries travels as `volatile()` Config fields. Every index field is
+ * therefore declared here and marked live — a field that is not volatile cannot
+ * be written through the settings service at all, and the browser half's
+ * `configForms.get(entryId)` has nothing to read without them.
+ *
+ * The built-in entries are the schema default, which is exactly what the old
+ * `base` layer meant: a deployment that never configured an index still gets the
+ * packaged sections.
+ *
+ * One key carries two meanings, because 0.1.7 forces the row config and the
+ * index into one object. `compaction` is the documented row switch (`false`
+ * turns the seam off, `true`/absent leaves it on) and, historically, the index's
+ * pointer to the entry holding the instruction. Both must keep validating: a
+ * boolean is the switch, a string is the legacy pointer, and nothing else. The
+ * legacy importer writes whole `settings.yaml` sections into this config, so
+ * refusing the string would strand every existing index in `settings.yaml.imported`.
+ *
+ * @param factory - the schemastery factory loaded at mount.
+ * @returns the schema the Loader resolves, with every index field live.
+ */
+export declare function buildConfigSchema(factory: SchemaFactory): unknown;
+/**
+ * The row switch for the compaction seam, read off the one field that carries it.
+ *
+ * `false` is the documented "another row owns this seam" answer; everything else
+ * — the default, a legacy index pointer, an unset value — leaves the seam on.
+ *
+ * @param value - the resolved `compaction` config field.
+ * @returns whether this plugin may replace the instruction.
+ */
+export declare function compactionSeamEnabled(value: unknown): boolean;
+/**
+ * The legacy index pointer at the `compaction` key, when the deployment wrote one.
+ *
+ * @param value - the resolved `compaction` config field.
+ * @returns the entry id the pointer names, or `''` when the field is the switch.
+ */
+export declare function compactionPointer(value: unknown): string;
 //# sourceMappingURL=entries.d.ts.map

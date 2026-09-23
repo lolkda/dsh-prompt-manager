@@ -220,8 +220,28 @@ let STATUS = {
   compaction: { matches: 2, replacements: 1, lastReplacedAt: '2026-09-12T03:00:00.000Z', characters: 1234 },
 }
 
-/** The fake settings scope the section binds. Its methods use `this`, exactly
- * like the real SettingsScopeController, so an unbound method reference fails
+/**
+ * Fields whose next settings write the Host refuses.
+ *
+ * DSH 0.1.7's form answers `false` for a refused write instead of rejecting, and
+ * it does not publish the value it refused. A fixture that always resolved and
+ * always published could not tell a save from a refusal, which is exactly how
+ * the false-success reports in this bundle went unnoticed.
+ */
+const refusedFields = new Set()
+
+/**
+ * Whether the form answers no verdict at all — the shape of a provider that is
+ * outside the published contract.
+ *
+ * DSH 0.1.7's form answers a boolean on every path, so this is a boundary rather
+ * than a mode: it stands for any form that takes a write and resolves nothing.
+ * Silence is not an acceptance, and the page must not read it as one.
+ */
+let answerlessWrites = false
+
+/** The fake settings form the section reads. Its methods use `this`, exactly
+ * like the real ConfigFormController, so an unbound method reference fails
  * the test instead of a browser. */
 const scope = {
   state: {
@@ -245,16 +265,28 @@ const scope = {
   },
   set(field, value) {
     writes.push({ field, value, seq: step++ })
-    // The real transport resolves and then republishes the document, so the
-    // snapshot a later read sees contains what was just written.
+    // A refusal is an answer, not an exception: the Host says no, and the value
+    // it said no to is not what the document now holds.
+    if (refusedFields.has(field)) return Promise.resolve(false)
+    // A form outside the contract takes the write and answers nothing. It cannot
+    // be told apart from one that stored nothing, so it publishes nothing either:
+    // the page is left with no verdict, which is the whole point of the case.
+    if (answerlessWrites) return Promise.resolve(undefined)
+    // The real transport resolves and then republishes the document, and the
+    // form notifies every subscriber with it — which is why the section re-reads
+    // its snapshot after a write. Publishing without notifying would make this
+    // fixture stricter than the browser and could fail a correct page.
     this.state = { ...this.state, value: { ...this.state.value, [field]: value } }
-    return Promise.resolve()
+    if (typeof this.listener === 'function') this.listener()
+    return Promise.resolve(true)
   },
-  unset() {
-    return Promise.resolve()
+  unset(field) {
+    writes.push({ field, value: undefined, seq: step++ })
+    if (answerlessWrites) return Promise.resolve(undefined)
+    return Promise.resolve(!refusedFields.has(field))
   },
   mutate() {
-    return Promise.resolve()
+    return Promise.resolve(false)
   },
 }
 
@@ -593,10 +625,10 @@ function materialize(React) {
   const exports = captured.factory(requireStub)
   assert.equal(exports.name, 'dsh-prompt-manager', 'the client plugin must expose its cordis name')
   assert.ok(exports.inject.includes('slots'), 'the client plugin must inject the slot service')
-  assert.ok(exports.inject.includes('settingsScope'), 'the client plugin must inject the settings scope service')
+  assert.ok(exports.inject.includes('configForms'), 'the client plugin must inject the settings forms service')
   assert.deepEqual(
     exports.inject,
-    ['slots', 'settingsScope'],
+    ['slots', 'configForms'],
     'and nothing else: which conversation a chip draws for comes from the session-scoped slot it fills, '
       + 'never from the session list — whose `current` field 0.1.6 removed, which is what left every '
       + 'switch on the composer row disabled',
@@ -606,9 +638,9 @@ function materialize(React) {
   const registrations = []
   const injections = []
   const ctx = {
-    settingsScope: {
-      bind: (spec) => {
-        assert.equal(spec.namespace, 'prompt-manager', 'the section must bind the prompt-manager namespace')
+    configForms: {
+      get: (entryId) => {
+        assert.equal(entryId, 'prompt-manager', 'the form must be the Loader entry that carries the index')
         return scope
       },
     },
@@ -2247,6 +2279,354 @@ assert.ok(
 assert.ok(lostAdd.text.includes('这一页没有浏览器会话'), 'and must answer in the page\'s own words')
 writeRefusal = null
 
+// ── a refused settings write is not a save ────────────────────────────────────
+//
+// DSH 0.1.7's form answers `false` when the Host refuses a write; it does not
+// reject. A page that only catches throws therefore tells a person their change
+// landed when nothing was stored. Every writer below is driven through a refusal
+// and then through the same action again once the Host accepts it: the retry is
+// part of the contract, because a refusal that cannot be retried is worse than
+// the refusal itself.
+
+/** The document every refusal case starts from. */
+const REFUSAL_DOCUMENT = { entries: ENTRIES, presets: PRESETS, activePreset: '', compaction: '' }
+
+/**
+ * Mount a fresh section over the shared stub scope.
+ *
+ * The document is reset and every refusal lifted, so one case cannot inherit the
+ * state another left behind — the scope is a singleton, exactly as the real form
+ * is for the page.
+ * @param value - the settings document to start from.
+ * @returns the renderer, already settled.
+ */
+async function freshRenderer(value) {
+  scope.state = { ...scope.state, revision: 3, value }
+  writes.length = 0
+  requests.length = 0
+  refusedFields.clear()
+  answerlessWrites = false
+  const fresh = createRenderer()
+  const section = materialize(fresh.React).registrations[0].component
+  fresh.mount(section, { scope })
+  await fresh.settle()
+  return fresh
+}
+
+/** Everything the page currently says, as one string. */
+const pageText = (renderer) => inspect(renderer.tree).text
+
+/** How many requests of one shape the page has made. */
+const countRequests = (method, includes = '') => requests.filter((request) => request.method === method && request.url.includes(includes)).length
+
+// The switch: one index write, and the report that must not lie about it.
+{
+  const refused = await freshRenderer(REFUSAL_DOCUMENT)
+  refusedFields.add('entries')
+  const attempted = writes.length
+  inspect(refused.tree, SWITCH).nodes[0].props.onChange()
+  await refused.settle()
+  assert.equal(writes.length, attempted + 1, 'a refused toggle must still have attempted the write')
+  assert.ok(!pageText(refused).includes('已关闭「第一条」。'), 'a refused toggle must not report the entry as switched off')
+  assert.ok(!pageText(refused).includes('已启用「第一条」。'), 'nor as switched on')
+  assert.ok(
+    pageText(refused).includes('索引没写进去'),
+    `the refusal must be named as the index write that did not land, got: ${pageText(refused)}`,
+  )
+  assert.equal(
+    scope.state.value.entries.find((entry) => entry.id === 'alpha').enabled,
+    true,
+    'and the value the Host refused must not be published as the current one',
+  )
+
+  refusedFields.delete('entries')
+  inspect(refused.tree, SWITCH).nodes[0].props.onChange()
+  await refused.settle()
+  assert.ok(pageText(refused).includes('已关闭「第一条」。'), 'the retry must report what it actually did')
+  assert.equal(
+    scope.state.value.entries.find((entry) => entry.id === 'alpha').enabled,
+    false,
+    'and the retry must land in the index',
+  )
+}
+
+// The save that half-lands: the body is on disk, the index write is refused, and
+// the retry has to finish the job. A draft that considered itself saved after the
+// refusal could never write its own record again — the index would be missing an
+// entry whose body file exists, with nothing on the page to fix it.
+{
+  const refused = await freshRenderer(REFUSAL_DOCUMENT)
+  button(refused.tree, '新增提示词').props.onClick()
+  await refused.settle()
+  inspect(refused.tree, 'textarea').nodes[0].props.onChange({ target: { value: 'NEW BODY' } })
+  await refused.settle()
+
+  refusedFields.add('entries')
+  const attempted = writes.length
+  button(refused.tree, '保存修改').props.onClick()
+  await refused.settle()
+  assert.ok(
+    requests.some((request) => request.method === 'PUT' && request.url.endsWith('/body/new-note')),
+    'the body must have been written before the index write was refused',
+  )
+  assert.equal(writes.length, attempted + 1, 'the index write must have been attempted')
+  assert.ok(
+    !pageText(refused).includes('已保存，下一个模型步骤生效'),
+    'a refused index write must not report the save as complete',
+  )
+  assert.ok(
+    pageText(refused).includes('正文已保存，但索引没写进去'),
+    `the half-save must be named precisely, got: ${pageText(refused)}`,
+  )
+  assert.equal(
+    scope.state.value.entries.some((entry) => entry.id === 'new-note'),
+    false,
+    'the refused index write must not have landed',
+  )
+
+  refusedFields.delete('entries')
+  const retry = button(refused.tree, '保存修改')
+  assert.ok(retry !== undefined, 'a save that only half-landed must stay retryable')
+  // Measure the retry against the writes it makes, not the writes already made:
+  // the refused attempt is itself on the list, so reading the last entry would
+  // pass even if the retry never wrote anything.
+  const beforeRetry = writes.length
+  retry.props.onClick()
+  await refused.settle()
+  const retried = writes.slice(beforeRetry).filter((write) => write.field === 'entries')
+  assert.equal(retried.length, 1, 'the retry must write the index once')
+  assert.equal(
+    retried[0].value.some((entry) => entry.id === 'new-note'),
+    true,
+    'and it must put the new entry into the index, not skip it as already there',
+  )
+  assert.equal(
+    scope.state.value.entries.some((entry) => entry.id === 'new-note'),
+    true,
+    'the entry must reach the document the Host now holds',
+  )
+  assert.ok(pageText(refused).includes('已保存，下一个模型步骤生效。'), 'and report the save as complete')
+}
+
+// Saving a preset: the list is one field, so a refusal is one honest sentence.
+{
+  const refused = await freshRenderer(REFUSAL_DOCUMENT)
+  button(refused.tree, '组合（').props.onClick()
+  await refused.settle()
+  button(refused.tree, '新建组合').props.onClick()
+  await refused.settle()
+  inspect(refused.tree, 'input').nodes
+    .find((node) => String(node.props.placeholder ?? '').includes('CTF 作业'))
+    .props.onChange({ target: { value: '交付检查' } })
+  await refused.settle()
+
+  refusedFields.add('presets')
+  button(refused.tree, '保存组合').props.onClick()
+  await refused.settle()
+  assert.ok(!pageText(refused).includes('已保存。'), 'a refused preset write must not report the preset as saved')
+  assert.ok(pageText(refused).includes('组合没保存'), `the refusal must name the preset, got: ${pageText(refused)}`)
+  assert.equal(scope.state.value.presets.length, PRESETS.length, 'and the list must be the one the Host still holds')
+
+  refusedFields.delete('presets')
+  button(refused.tree, '保存组合').props.onClick()
+  await refused.settle()
+  assert.ok(pageText(refused).includes('组合「交付检查」已保存。'), 'the retry must save it')
+  assert.equal(scope.state.value.presets.length, PRESETS.length + 1, 'and land in the document')
+}
+
+// Deleting a preset is the same single write, with a different sentence.
+{
+  const refused = await freshRenderer(REFUSAL_DOCUMENT)
+  button(refused.tree, '组合（').props.onClick()
+  await refused.settle()
+  refusedFields.add('presets')
+  rowMenuFor(refused.tree, 'CTF 作业').props.onSelect('delete')
+  await refused.settle()
+  assert.ok(!pageText(refused).includes('已删除组合'), 'a refused preset delete must not report it as deleted')
+  assert.ok(pageText(refused).includes('组合没删除'), `the refusal must name the preset, got: ${pageText(refused)}`)
+  assert.equal(scope.state.value.presets.length, PRESETS.length, 'and the preset must still be in the document')
+
+  refusedFields.delete('presets')
+  rowMenuFor(refused.tree, 'CTF 作业').props.onSelect('delete')
+  await refused.settle()
+  assert.ok(pageText(refused).includes('已删除组合「CTF 作业」。'), 'the retry must delete it')
+  assert.equal(scope.state.value.presets.some((preset) => preset.id === 'ctf'), false, 'and drop it from the document')
+}
+
+// Adding a source: the record has to be stored before the Host is asked to check
+// it, or the page reports a source the engine was never told about.
+{
+  const refused = await freshRenderer({ ...REFUSAL_DOCUMENT, sources: [] })
+  button(refused.tree, '来源（').props.onClick()
+  await refused.settle()
+  inspect(refused.tree, 'input').nodes
+    .find((node) => node.props.placeholder === 'owner/repo')
+    .props.onChange({ target: { value: 'o/r' } })
+  await refused.settle()
+
+  refusedFields.add('sources')
+  const checks = countRequests('POST', '/check')
+  button(refused.tree, '添加来源').props.onClick()
+  await refused.settle()
+  assert.ok(!pageText(refused).includes('已添加来源'), 'a refused source write must not report the source as added')
+  assert.ok(pageText(refused).includes('来源没添加'), `the refusal must name the source, got: ${pageText(refused)}`)
+  assert.equal(countRequests('POST', '/check'), checks, 'and a source that was not recorded must not be checked')
+
+  refusedFields.delete('sources')
+  button(refused.tree, '添加来源').props.onClick()
+  await refused.settle()
+  assert.ok(pageText(refused).includes('已添加来源'), 'the retry must add it')
+  assert.equal(countRequests('POST', '/check'), checks + 1, 'and then check it')
+}
+
+// Deleting an entry: the file goes first on purpose, so a refused index write
+// leaves a body-less record the page can still act on — and says so.
+{
+  const refused = await freshRenderer(REFUSAL_DOCUMENT)
+  refusedFields.add('entries')
+  rowMenuFor(refused.tree, '第一条').props.onSelect('delete')
+  await refused.settle()
+  assert.ok(
+    requests.some((request) => request.method === 'DELETE' && request.url.endsWith('/body/alpha')),
+    'the body file must have been deleted before the index write was refused',
+  )
+  assert.ok(!pageText(refused).includes('已删除「第一条」'), 'a refused index write must not report the entry as deleted')
+  assert.ok(
+    pageText(refused).includes('正文文件已删除，但索引没更新'),
+    `the half-delete must be named precisely, got: ${pageText(refused)}`,
+  )
+  assert.equal(
+    scope.state.value.entries.some((entry) => entry.id === 'alpha'),
+    true,
+    'and the entry must still be in the index the Host holds',
+  )
+
+  refusedFields.delete('entries')
+  rowMenuFor(refused.tree, '第一条').props.onSelect('delete')
+  await refused.settle()
+  assert.ok(pageText(refused).includes('已删除「第一条」。'), 'the retry must finish the delete')
+  assert.equal(scope.state.value.entries.some((entry) => entry.id === 'alpha'), false, 'and drop it from the index')
+}
+
+// Forking a subscribed entry: the index write is deliberately first, so a refusal
+// has to stop before the body is copied — otherwise the copy is a file no page can
+// reach.
+{
+  const refused = await freshRenderer({
+    entries: [...ENTRIES, { id: 'src-a-a', title: '订阅来的', order: 60, enabled: true, source: 'src-a' }],
+    sources: [{ id: 'src-a', repo: 'o/r', ref: 'main', mirror: '', enabled: true }],
+    presets: [],
+    activePreset: '',
+    compaction: '',
+  })
+  inspect(refused.tree, 'button').nodes.find((node) => textOf(node).includes('订阅来的')).props.onClick()
+  await refused.settle()
+  refusedFields.add('entries')
+  const copies = countRequests('PUT', '/body/')
+  button(refused.tree, 'fork 成本地条目').props.onClick()
+  await refused.settle()
+  assert.ok(!pageText(refused).includes('已 fork 成'), 'a refused fork must not report itself as done')
+  assert.ok(pageText(refused).includes('索引没写进去'), `the refusal must name the index write, got: ${pageText(refused)}`)
+  assert.equal(countRequests('PUT', '/body/'), copies, 'and no body may be copied for an entry the index does not carry')
+
+  refusedFields.delete('entries')
+  button(refused.tree, 'fork 成本地条目').props.onClick()
+  await refused.settle()
+  assert.ok(pageText(refused).includes('已 fork 成'), 'the retry must fork it')
+  assert.equal(countRequests('PUT', '/body/'), copies + 1, 'and copy the body')
+}
+
+// Removing a source is two writes — the index it contributed to, and the source
+// list itself — and each is refused on its own, so the page has to say which half
+// did not land rather than claiming the source is gone. The document carries the
+// source the Host lists, so the row that is clicked and the record that is written
+// are the same one.
+{
+  const subscribed = {
+    entries: [...ENTRIES, { id: 'o-r-a', title: '订阅来的', order: 60, enabled: true, source: 'o-r' }],
+    sources: [{ id: 'o-r', repo: 'o/r', ref: 'main', mirror: 'https://gh-proxy.example', enabled: true }],
+    presets: [],
+    activePreset: '',
+    compaction: '',
+  }
+  const refused = await freshRenderer(subscribed)
+  button(refused.tree, '来源（').props.onClick()
+  await refused.settle()
+
+  refusedFields.add('entries')
+  button(refused.tree, '删除来源').props.onClick()
+  await refused.settle()
+  assert.ok(!pageText(refused).includes('已删除来源'), 'a refused index write must not report the source as deleted')
+  assert.ok(
+    pageText(refused).includes('来源的文件已删除，但索引没更新'),
+    `the first half must be named precisely, got: ${pageText(refused)}`,
+  )
+  assert.equal(
+    scope.state.value.entries.some((entry) => entry.source === 'o-r'),
+    true,
+    'and the index must still carry the entry the source contributed',
+  )
+
+  // The same removal again, this time refused on the second write: the index is
+  // updated, the source list is not — and the page must say exactly that.
+  refusedFields.delete('entries')
+  refusedFields.add('sources')
+  button(refused.tree, '删除来源').props.onClick()
+  await refused.settle()
+  assert.ok(!pageText(refused).includes('已删除来源'), 'a refused source-list write must not report the source as deleted either')
+  assert.ok(
+    pageText(refused).includes('索引已更新，但来源列表没更新'),
+    `the second half must be named precisely, got: ${pageText(refused)}`,
+  )
+  assert.equal(
+    scope.state.value.sources.some((source) => source.id === 'o-r'),
+    true,
+    'and the source list must still carry it',
+  )
+  assert.equal(
+    scope.state.value.entries.some((entry) => entry.source === 'o-r'),
+    false,
+    'while the index write that was accepted stays accepted',
+  )
+
+  refusedFields.delete('sources')
+  button(refused.tree, '删除来源').props.onClick()
+  await refused.settle()
+  assert.ok(pageText(refused).includes('已删除来源「o-r」。'), 'the retry must finish the removal')
+  assert.equal(scope.state.value.sources.some((source) => source.id === 'o-r'), false, 'and drop the source')
+}
+
+// A form that answers nothing at all is not a form that said yes. This is the
+// provider boundary rather than a DSH mode: 0.1.7's form answers a boolean on every
+// path, so silence means the page has no verdict — and no verdict is not a save.
+{
+  const refused = await freshRenderer(REFUSAL_DOCUMENT)
+  answerlessWrites = true
+  inspect(refused.tree, SWITCH).nodes[0].props.onChange()
+  await refused.settle()
+  assert.ok(
+    !pageText(refused).includes('已关闭「第一条」。'),
+    'a form that answers no verdict must not be read as an accepted write',
+  )
+  assert.ok(
+    pageText(refused).includes('索引没写进去'),
+    `and the page must say which write it could not confirm, got: ${pageText(refused)}`,
+  )
+
+  answerlessWrites = false
+  inspect(refused.tree, SWITCH).nodes[0].props.onChange()
+  await refused.settle()
+  assert.ok(
+    pageText(refused).includes('已关闭「第一条」。'),
+    'while a form that answers true reports the write it was told about',
+  )
+  assert.equal(
+    scope.state.value.entries.find((entry) => entry.id === 'alpha').enabled,
+    false,
+    'and that write is the one the document holds',
+  )
+}
+
 console.log('client ok')
 console.log(`  bundle      factory id ${PACKAGE_NAME}, materialized and driven against stub modules`)
 console.log(`  section     settings.section id=prompt-manager order=${String(meta.order)}`)
@@ -2268,3 +2648,4 @@ console.log('  scripts     save and enable, test run stays a draft, the editor i
 console.log('  addrow      a fixed two-column grid, so the controls cannot re-flow when the panel width shifts')
 console.log('  refused     an unreachable store disables editing and says why, instead of quoting the Host or inventing facts')
 console.log('  lost-session a save refused for a missing session answers in the page\'s words, not the Host\'s English')
+console.log('  refused-write every settings write reads the Host\'s answer, and a save that half-landed stays retryable')

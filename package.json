@@ -1,6 +1,6 @@
 {
   "name": "@lolkda/dsh-prompt-manager",
-  "version": "3.3.3",
+  "version": "3.4.0-rc.1",
   "description": "Manage DeepSeek Harness system-prompt sections from the Web GUI: enable, edit, and subscribe markdown prompt entries, switch named presets from the composer, feed them machine facts as {{variables}}, replace the instruction DSH sends when it compacts the context, and carry a preset to another machine as a JSON pack.",
   "type": "module",
   "main": "lib/index.js",
@@ -28,7 +28,7 @@
     "check:pack": "node tools/check-pack.mjs",
     "prepublishOnly": "npm run build",
     "pretest": "npm run build",
-    "test": "node test/smoke.mjs && node test/probe.mjs && node test/guard.mjs && node test/store.mjs && node test/pack.mjs && node test/routes.mjs && node test/source.mjs && node test/net.mjs && node test/sync.mjs && node test/subscriptions.mjs && node test/scripts.mjs && node test/compaction.mjs && node test/client.mjs && node test/manifest.mjs"
+    "test": "node test/smoke.mjs && node test/probe.mjs && node test/guard.mjs && node test/store.mjs && node test/pack.mjs && node test/routes.mjs && node test/source.mjs && node test/net.mjs && node test/sync.mjs && node test/subscriptions.mjs && node test/scripts.mjs && node test/compaction.mjs && node test/client.mjs && node test/manifest.mjs && node test/settings-source.mjs"
   },
   "engines": {
     "node": ">=22"
@@ -63,28 +63,14 @@
       ]
     },
     "compatibility": {
-      "dsh": ">=0.1.5-rc.1 <0.2.0",
+      "dsh": "0.1.7-rc.1",
       "dshReleases": {
-        "0.1.5-alpha.2": "unknown",
-        "0.1.5-rc.1": "compatible",
-        "0.1.5-rc.2": "unknown"
+        "0.1.7-rc.1": "compatible"
       },
       "dshOperations": {
-        "0.1.5-rc.1": {
+        "0.1.7-rc.1": {
           "install": "passed",
           "start": "passed",
-          "uninstall": "passed",
-          "rollback": "passed"
-        },
-        "0.1.5-alpha.2": {
-          "install": "unknown",
-          "start": "unknown",
-          "uninstall": "unknown",
-          "rollback": "unknown"
-        },
-        "0.1.5-rc.2": {
-          "install": "unknown",
-          "start": "unknown",
           "uninstall": "unknown",
           "rollback": "unknown"
         }
@@ -95,10 +81,11 @@
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": ">=4.0.0",
-    "@deepseek-ai/dsh-llm": ">=0.0.1-rc.1",
-    "@deepseek-ai/dsh-system-prompt": ">=0.0.1-rc.1",
-    "@deepseek-ai/schemastery": ">=3.18.0"
+    "@deepseek-ai/cordis": "4.0.4",
+    "@deepseek-ai/cordis-plugin-loader": "1.0.5",
+    "@deepseek-ai/dsh-llm": "0.1.7-rc.1",
+    "@deepseek-ai/dsh-system-prompt": "0.1.7-rc.1",
+    "@deepseek-ai/schemastery": "3.18.4"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -115,11 +102,12 @@
     }
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh-llm": "^0.0.1-rc.1",
-    "@deepseek-ai/dsh-system-prompt": "^0.0.1-rc.1",
-    "@deepseek-ai/dsh-tools": "^0.0.1-rc.1",
-    "@deepseek-ai/schemastery": "^3.18.2",
+    "@deepseek-ai/cordis": "4.0.4",
+    "@deepseek-ai/cordis-plugin-loader": "1.0.5",
+    "@deepseek-ai/dsh-llm": "0.1.7-rc.1",
+    "@deepseek-ai/dsh-system-prompt": "0.1.7-rc.1",
+    "@deepseek-ai/dsh-tools": "0.1.7-rc.1",
+    "@deepseek-ai/schemastery": "3.18.4",
     "@types/node": "^26.5.0",
     "typescript": "^5.9.3"
   }

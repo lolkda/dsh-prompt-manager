@@ -16,8 +16,8 @@
 # changing those needs a restart. Installing the package AND keeping a block here
 # mounts the plugin twice — pick one.
 #
-# The row id is `dsh-prompt-manager`, not the bare `prompt-manager`: that id
-# belongs to an unrelated plugin of the same former package name.
+# DSH 0.1.7-rc.1 keys native settings by Loader entry id. Keep `prompt-manager`
+# so the previous settings.yaml section imports into this exact entry.
 
 # ── Option A: mount a local checkout by relative path ────────────────────────
 # The loader resolves a leading `./` against the profile directory
@@ -25,7 +25,7 @@
 # `$DSH_HOME/profiles/<profile>/vendor/dsh-prompt-manager/lib/index.js`.
 # Copy or symlink this repository to that path first.
 - insert:
-    - id: dsh-prompt-manager
+    - id: prompt-manager
       name: './vendor/dsh-prompt-manager/lib/index.js'
 
 # ── Option B: mount an installed package by name ────────────────────────────
@@ -33,7 +33,7 @@
 # use the installed package name. (Installing it already mounts it, so this block
 # is only for a profile whose layer list you manage yourself.)
 # - insert:
-#     - id: dsh-prompt-manager
+#     - id: prompt-manager
 #       name: '@lolkda/dsh-prompt-manager'
 
 # ── The whole config ────────────────────────────────────────────────────────
@@ -78,7 +78,7 @@
 #
 # Example with every value set:
 # - insert:
-#     - id: dsh-prompt-manager
+#     - id: prompt-manager
 #       name: './vendor/dsh-prompt-manager/lib/index.js'
 #       config:
 #         environment: true

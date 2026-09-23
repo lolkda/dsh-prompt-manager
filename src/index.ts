@@ -36,6 +36,10 @@ import type { Context } from '@deepseek-ai/cordis'
 // applies when its module is part of the program. Erased at emit, so there is no
 // runtime import.
 import type {} from '@deepseek-ai/dsh-system-prompt'
+// Type-only side-effect import for the same reason: `loader/volatile-update` is
+// declared by the Loader, and this plugin listens for it to learn that a
+// settings write has been committed into its live config fields. Erased at emit.
+import type {} from '@deepseek-ai/cordis-plugin-loader'
 import { createRequire } from 'node:module'
 import { homedir, hostname, release, userInfo } from 'node:os'
 import { join } from 'node:path'
@@ -43,8 +47,10 @@ import {
   activeCompactionOf,
   activePresetOf,
   BUILTIN_PROMPTS,
-  buildIndexSchema,
+  buildConfigSchema,
   builtinEntries,
+  compactionPointer,
+  compactionSeamEnabled,
   entryIdFor,
   MAX_ENTRIES,
   parseEntries,
@@ -206,8 +212,33 @@ export interface Config {
    * The default changes nothing: with no entry in force — which is every
    * deployment that never made one — every compaction call goes out exactly as
    * the engine built it.
+   *
+   * On 0.1.7 this key also carries the legacy index pointer to the entry holding
+   * the instruction, because the row config and the settings document are now
+   * one object. A string is that pointer; `false` is this switch.
    */
-  compaction?: boolean
+  compaction?: LiveField<string | boolean>
+  /**
+   * The entry index. Live: the Loader resolves it as a reference and a settings
+   * write commits into it, which is how the settings page edits the index.
+   * Defaults to the packaged entries, so a deployment that configures nothing
+   * still gets them.
+   */
+  entries?: LiveField<PromptEntry[]>
+  /** Named combinations of entries. Live, like every index field. */
+  presets?: LiveField<PromptPreset[]>
+  /**
+   * Index-level "which preset is in force" field. Retained for documents written
+   * before per-session choices existed; it decides nothing, and the settings page
+   * does not read it.
+   */
+  activePreset?: LiveField<string>
+  /** Git sources whose snapshots supply subscribed entry bodies. Live. */
+  sources?: LiveField<PromptSource[]>
+  /** Package mirror prefix substituted into a source's clone URL. Live. */
+  mirror?: LiveField<string>
+  /** Proxy settings for the source fetcher. Live. */
+  proxy?: LiveField<ProxyConfig>
 }
 
 /** Where one plugin-owned prompt variable's value came from. */
@@ -239,16 +270,49 @@ export interface VariableView {
   referencedBy: string[]
 }
 
-/** The `settings` service slice this plugin registers its index with. */
+/** The `settings` service slice this plugin writes its index through. */
 interface SettingsFace {
-  register(namespace: string, schema: unknown, options?: { base?: unknown }): {
-    /** The resolved index, deep-frozen. */
-    get(): unknown
-    /** Merge a patch into the user layer and persist it. */
-    update(patch: Record<string, unknown>): Promise<unknown>
-    /** Observe committed changes; returns the disposer. */
-    watch(callback: () => void): () => void
+  /**
+   * Merge editable fields into this plugin's own Loader entry.
+   *
+   * 0.1.7 replaced `register` with this: the entry IS the namespace, and the
+   * Loader commits the volatile fields afterwards. `expectedRevision` is left
+   * out on purpose — the page and this plugin both write the same entry, and a
+   * fence held across an HTTP round trip would refuse a save the user just made
+   * rather than merge it.
+   *
+   * @param ns - profile entry id, which is this plugin's own id.
+   * @param patch - the fields to merge.
+   */
+  update(ns: string, patch: Record<string, unknown>): Promise<void>
+}
+
+/** One config field the Loader resolved as live: the value is read through `get()`. */
+interface VolatileField<T> {
+  /** The value in force right now. */
+  get(): T
+}
+
+/**
+ * A config field that is a live reference when the Loader resolved this plugin's
+ * schema, and the plain value when a deployment composed no schema at all.
+ */
+type LiveField<T> = T | VolatileField<T>
+
+/**
+ * Read one config field that may be a live reference.
+ * @param field - the resolved field, or nothing when the deployment has none.
+ * @param fallback - the value to use when the field is absent or unresolved.
+ * @returns the value in force.
+ */
+function liveValue<T>(field: LiveField<T> | undefined, fallback: T): T {
+  if (field === undefined) return fallback
+  const candidate = field as { get?: unknown }
+  if (typeof field === 'object' && field !== null && typeof candidate.get === 'function') {
+    const value = (candidate.get as () => T | undefined)()
+    return value === undefined ? fallback : value
   }
+  return field as T
 }
 
 /** Friendly platform name for the running process. */
@@ -386,6 +450,25 @@ function ownManifest(): { name: string; version: string } {
 
 /** Cache for {@link ownManifest}. */
 let ownManifestCache: { name: string; version: string } | undefined
+
+/**
+ * The row-config schema the Loader resolves for this plugin's entry.
+ *
+ * DSH 0.1.7-rc.1 deleted `settings.register`, so this plugin no longer owns a
+ * settings namespace: its own Loader entry is the namespace, and the index
+ * travels as the `volatile()` fields declared here. Exported at module scope
+ * because that is where the Loader looks — a plugin that exports no schema has
+ * no settings surface at all.
+ *
+ * `undefined` when schemastery cannot be resolved from this package, which is
+ * the same deployment that has no settings capability: the plugin still mounts
+ * and serves its composed configuration, and the index falls back to the
+ * packaged entries.
+ */
+export const Config: unknown = (() => {
+  const factory = loadSchemaFactory()
+  return factory === undefined ? undefined : buildConfigSchema(factory)
+})()
 
 /**
  * Report a non-fatal problem without ever breaking the mount.
@@ -1307,13 +1390,20 @@ export function apply(ctx: Context, config: Config = {}): void {
   // the summarizer instead of the system prompt, and only when the index puts one
   // in force. Installed after the sections so a body can reference the variables
   // this mount just registered.
-  const compactionPrompt = config.compaction === false
-    ? undefined
-    : installCompactionPrompt(ctx, {
-        resolve: resolveCompaction,
-        variables: compactionVariables,
-        warn: (message) => warn(ctx, message),
-      })
+  //
+  // The listener is installed unconditionally, and the switch is read per call.
+  // `compaction` is a volatile config field: a deployment can turn the seam off
+  // and back on without a remount, and a listener that only existed when the
+  // switch happened to be on at mount could never be turned back on. The cost of
+  // always listening is one `purpose` comparison per model call.
+  const compactionPrompt = installCompactionPrompt(ctx, {
+    resolve: (sessionId) =>
+      compactionSeamEnabled(liveValue<string | boolean>(config.compaction, true))
+        ? resolveCompaction(sessionId)
+        : undefined,
+    variables: compactionVariables,
+    warn: (message) => warn(ctx, message),
+  })
 
   /** What the settings page reports about the compaction instruction. */
   function compactionStats(): CompactionPromptStats | undefined {
@@ -1363,48 +1453,54 @@ export function apply(ctx: Context, config: Config = {}): void {
   const factory = loadSchemaFactory()
   if (factory === undefined) {
     warn(ctx, 'schemastery is unavailable, so prompt entries cannot be edited from Settings')
-  } else {
-    ctx.inject(['settings'], (scoped) => {
-      const settings = (scoped as unknown as { settings?: SettingsFace }).settings
-      if (settings === undefined) return
-      let scope: ReturnType<SettingsFace['register']>
-      try {
-        scope = settings.register(SETTINGS_NAMESPACE, buildIndexSchema(factory), {
-          base: {
-            entries: builtinEntries(),
-            presets: [],
-            activePreset: '',
-            sources: [],
-            mirror: '',
-            proxy: { kind: 'none', url: '' },
-          },
-        })
-      } catch (error) {
-        warn(ctx, `cannot register the ${SETTINGS_NAMESPACE} settings namespace: ${messageOf(error)}`)
-        return
-      }
-      writeEntries = async (next) => {
-        await scope.update({ entries: next })
-      }
-      writeIndex = async (patch) => {
-        await scope.update({ entries: patch.entries, presets: patch.presets })
-      }
-      const sync = (): void => {
-        resolved = scope.get()
-        refreshPresets()
-        const entries = parseEntries(resolved)
-        reportTruncation(resolved, entries.length)
-        active.length = 0
-        active.push(...entries)
-        locations = subscriptions.refreshLocations()
-        reconcile(active)
-      }
-      sync()
-      ctx.effect(() => scope.watch(sync), 'dsh-prompt-manager: settings watcher')
-    })
   }
 
-  refreshPresets()
-  locations = subscriptions.refreshLocations()
-  reconcile(active)
+  /**
+   * Read the index off the row config and put it in force.
+   *
+   * On DSH 0.1.7-rc.1 this plugin's own Loader entry is the settings namespace:
+   * the index fields are `volatile()` Config fields, so the Loader hands them to
+   * `apply` as live references and commits every accepted write into those same
+   * references. Reading them is therefore the only read path, and it needs no
+   * settings service at all — which is what keeps the packaged sections in force
+   * on a deployment that composes no settings provider.
+   */
+  const sync = (): void => {
+    resolved = {
+      entries: liveValue(config.entries, builtinEntries()),
+      presets: liveValue(config.presets, []),
+      activePreset: liveValue(config.activePreset, ''),
+      compaction: compactionPointer(liveValue<string | boolean>(config.compaction, true)),
+      sources: liveValue(config.sources, []),
+      mirror: liveValue(config.mirror, ''),
+      proxy: liveValue(config.proxy, { kind: 'none', url: '' }),
+    }
+    refreshPresets()
+    const entries = parseEntries(resolved)
+    reportTruncation(resolved, entries.length)
+    active.length = 0
+    active.push(...entries)
+    locations = subscriptions.refreshLocations()
+    reconcile(active)
+  }
+
+  sync()
+  // The Loader commits a settings write into the live references and then
+  // announces it; nothing else notifies the owner, and the older
+  // `settings/updated` event is gone with the registration API.
+  ctx.on('loader/volatile-update', sync)
+
+  // Writes still need the settings service: it is the one component that can
+  // persist a profile patch. A deployment without one keeps reading the index
+  // and simply cannot edit it, which is what the page reports.
+  ctx.inject(['settings'], (scoped) => {
+    const settings = (scoped as unknown as { settings?: SettingsFace }).settings
+    if (settings === undefined) return
+    writeEntries = async (next) => {
+      await settings.update(SETTINGS_NAMESPACE, { entries: next })
+    }
+    writeIndex = async (patch) => {
+      await settings.update(SETTINGS_NAMESPACE, { entries: patch.entries, presets: patch.presets })
+    }
+  })
 }

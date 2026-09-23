@@ -30,9 +30,13 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { ROUTE_PREFIX, apply, inject, name } from '../lib/index.js'
+import { fakeSettings, mountable } from './helpers/settings-source.mjs'
 
 /** Throwaway home for the body files, so the test never touches a real one. */
 const STORE_ROOT = mkdtempSync(join(tmpdir(), 'prompt-manager-compaction-'))
+
+/** The plugin's real row-config schema, mounted with the plugin itself. */
+const moduleConfig = (await import('../lib/index.js')).Config
 
 /** Body directory the plugin derives from {@link STORE_ROOT}. */
 const SECTIONS = join(STORE_ROOT, 'sections')
@@ -66,40 +70,6 @@ async function load(packageName) {
 /** Let Cordis flush the fibers an injection created. */
 async function settle() {
   for (let tick = 0; tick < 3; tick += 1) await new Promise((resolve) => setTimeout(resolve, 0))
-}
-
-/**
- * A stand-in `settings` service: one namespace and a state handle the test
- * drives by hand, exactly as `test/smoke.mjs` does it.
- * @param initial - resolved index the namespace starts with.
- * @returns the plugin to mount and the state it exposes.
- */
-function fakeSettings(initial) {
-  const state = { value: initial, watcher: undefined, registered: undefined }
-  const plugin = {
-    name: 'fake-settings',
-    apply: (ctx) => {
-      ctx.provide('settings', {
-        register: (namespace, schema, options) => {
-          state.registered = { namespace, schema, options }
-          if (options?.base !== undefined) state.value = options.base
-          return {
-            get: () => state.value,
-            update: async (patch) => {
-              state.value = { ...state.value, ...patch }
-              state.watcher?.()
-              return state.value
-            },
-            watch: (callback) => {
-              state.watcher = callback
-              return () => { state.watcher = undefined }
-            },
-          }
-        },
-      })
-    },
-  }
-  return { plugin, state }
 }
 
 const { Context } = await load('@deepseek-ai/cordis')
@@ -235,7 +205,12 @@ async function mount(config = {}, options = {}) {
     ctx.llm.registerAdapter(['lab'], adapter)
   }
   if (options.settings !== undefined) await ctx.plugin(options.settings.plugin)
-  await ctx.plugin({ name, inject, apply }, { storeDir: STORE_ROOT, ...config })
+  // The plugin's own `Config` is mounted with it: that is what makes cordis
+  // resolve the index fields as live references, exactly as the Loader does.
+  await ctx.plugin(
+    mountable({ name, inject, apply, Config: moduleConfig }, options.settings?.state),
+    { storeDir: STORE_ROOT, ...config },
+  )
   await settle()
   return { ctx, warnings, adapter, settings: options.settings }
 }
@@ -520,26 +495,58 @@ try {
 
   const noLlm = fakeSettings([])
   const bare = await mount({}, { settings: noLlm, llm: false })
-  assert.equal(typeof noLlm.state.registered, 'object', 'the plugin must mount and register its index even with no llm service')
+  assert.equal(typeof moduleConfig?.toJSON, 'function', 'the plugin must expose the row-config schema the Loader resolves')
+  assert.deepEqual(
+    noLlm.state.value.entries,
+    [{ id: 'env', title: '机器环境', order: 5, enabled: true }],
+    'the plugin must mount and serve its index even with no llm service',
+  )
   assert.ok(
     bare.warnings.every((line) => !line.includes('compaction')),
     `mounting without an llm service is not a problem to report, got: ${bare.warnings.join(' | ')}`,
   )
 
-  // ── the config switch turns the feature off entirely ────────────────────────
+  // ── the config switch turns the feature off, and turns it back on live ──────
+  //
+  // `compaction` is a volatile config field, so it is read per call: a mount that
+  // cached the switch would turn the seam off forever the first time it saw
+  // `false`, and a deployment could never turn it back on without a restart.
 
   const off = fakeSettings([])
-  const disabled = await mount({ compaction: false }, { settings: off })
-  writeBody('compact-zh', 'MUST-NOT-APPEAR')
+  const switched = await mount({ compaction: false }, { settings: off })
+  writeBody('compact-zh', 'SWITCHED-BODY')
   off.state.value = indexWith()
-  off.state.watcher()
   // A session asking for one is exactly the case the switch has to override.
   choose(SESSION, { compaction: 'compact-zh' })
-  await send(disabled.ctx, compactionFor(compactionMessages()))
+  await send(switched.ctx, compactionFor(compactionMessages()))
   assert.equal(
-    lastText(disabled.adapter.requests.at(-1)),
+    lastText(switched.adapter.requests.at(-1)),
     STOCK_INSTRUCTION,
     'compaction: false must leave every request exactly as it was',
+  )
+
+  off.state.value = { compaction: true }
+  await send(switched.ctx, compactionFor(compactionMessages()))
+  assert.equal(
+    lastText(switched.adapter.requests.at(-1)),
+    'SWITCHED-BODY',
+    'a live commit back to true must re-enable the seam without a remount',
+  )
+
+  off.state.value = { compaction: 'compact-zh' }
+  await send(switched.ctx, compactionFor(compactionMessages()))
+  assert.equal(
+    lastText(switched.adapter.requests.at(-1)),
+    'SWITCHED-BODY',
+    'the legacy string pointer leaves the seam on: which entry is in force is still the session\'s own choice',
+  )
+
+  off.state.value = { compaction: false }
+  await send(switched.ctx, compactionFor(compactionMessages()))
+  assert.equal(
+    lastText(switched.adapter.requests.at(-1)),
+    STOCK_INSTRUCTION,
+    'and turning it off again takes effect on the very next call',
   )
 
   console.log('compaction ok')

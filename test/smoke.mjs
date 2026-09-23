@@ -26,9 +26,13 @@ import { MAX_PROBES, ROUTE_PREFIX, SETTINGS_NAMESPACE, apply, environmentFacts, 
 import { activeCompactionOf, activePresetOf, buildIndexSchema, parseEntries, parsePresets } from '../lib/entries.js'
 import { ESCAPE_MARK } from '../lib/guard.js'
 import { bodyHash } from '../lib/store.js'
+import { fakeSettings as fakeSettingsFixture, mountable } from './helpers/settings-source.mjs'
 
 /** Throwaway home for the body files, so the test never touches a real one. */
 const STORE_ROOT = mkdtempSync(join(tmpdir(), 'prompt-manager-smoke-'))
+
+/** The plugin's real row-config schema, mounted with the plugin itself. */
+const moduleConfig = (await import('../lib/index.js')).Config
 
 /** Body directory the plugin derives from {@link STORE_ROOT}. */
 const SECTIONS = join(STORE_ROOT, 'sections')
@@ -65,38 +69,18 @@ async function settle() {
 }
 
 /**
- * A stand-in `settings` service: one namespace, one watcher, and a state
- * handle the test drives by hand.
- * @param initial - resolved index the namespace starts with.
+ * A stand-in `settings` service, plus the fixture that drives the volatile
+ * index fields the Loader would otherwise commit into.
+ *
+ * DSH 0.1.7 deleted `settings.register`: the plugin's own Loader entry is the
+ * namespace, the index travels as `volatile()` Config fields, and a committed
+ * write moves those references and announces `loader/volatile-update`. The
+ * fixture reproduces exactly that, so `state.value = document` is the same act
+ * as a committed settings write.
+ * @param initial - the document to report before a mount attaches a config.
  * @returns the plugin to mount and the state it exposes.
  */
-function fakeSettings(initial) {
-  const state = { value: initial, watcher: undefined, registered: undefined }
-  const plugin = {
-    name: 'fake-settings',
-    apply: (ctx) => {
-      ctx.provide('settings', {
-        register: (namespace, schema, options) => {
-          state.registered = { namespace, schema, options }
-          if (options?.base !== undefined) state.value = options.base
-          return {
-            get: () => state.value,
-            update: async (patch) => {
-              state.value = { ...state.value, ...patch }
-              state.watcher?.()
-              return state.value
-            },
-            watch: (callback) => {
-              state.watcher = callback
-              return () => { state.watcher = undefined }
-            },
-          }
-        },
-      })
-    },
-  }
-  return { plugin, state }
-}
+const fakeSettings = (initial) => fakeSettingsFixture(initial)
 
 /**
  * A stand-in `webServer` service: it records the routes a row registers, so the
@@ -203,7 +187,10 @@ async function assembleWith(config, promptConfig, plugins = []) {
   ctx.logger.warn = (...args) => { warnings.push(args.map(String).join(' ')) }
   await ctx.plugin(SystemPrompt, promptConfig)
   for (const plugin of plugins) await ctx.plugin(plugin)
-  await ctx.plugin({ name, inject, apply }, { storeDir: STORE_ROOT, ...config })
+  // The plugin's own `Config` is mounted with it: that is what makes cordis
+  // resolve the index fields as live references, exactly as the Loader does.
+  const fixture = plugins.map((plugin) => plugin.settingsState).find((state) => state !== undefined)
+  await ctx.plugin(mountable({ name, inject, apply, Config: moduleConfig }, fixture), { storeDir: STORE_ROOT, ...config })
   await settle()
   const read = async (
     sessionId = SESSION,
@@ -390,12 +377,12 @@ try {
 
   const settings = fakeSettings([])
   const driven = await assembleWith({}, BARE, [settings.plugin])
-  assert.ok(settings.state.registered !== undefined, 'the plugin must register its settings namespace')
-  assert.equal(settings.state.registered.namespace, SETTINGS_NAMESPACE, 'the namespace must be prompt-manager')
+  assert.ok(moduleConfig !== undefined, 'the plugin must export the row-config schema the Loader resolves')
+  assert.equal(SETTINGS_NAMESPACE, 'prompt-manager', 'the namespace must be the Loader entry id the browser half reads')
   assert.deepEqual(
-    settings.state.registered.options?.base?.entries,
+    settings.state.value.entries,
     [{ id: 'env', title: '机器环境', order: 5, enabled: true }],
-    'the composition base layer must carry the built-in entry',
+    'an unconfigured row must resolve to the built-in entry',
   )
   assert.ok(driven.prompt.includes('# Machine environment'), 'the composed base must inject the built-in prompt')
 
@@ -695,10 +682,22 @@ try {
     `a configured probe must replace the default spec outright, its pattern included: ${restatedPrompt}`,
   )
 
+  // ── a document the schema refuses never reaches the plugin ──────────────────
+  // The row config is validated where every DSH plugin's config is, so a
+  // hand-edited patch that does not validate is refused as a write and the index
+  // in force is left alone — the same containment the Loader applies.
+  const beforeRefusal = settings.state.value.entries.map((entry) => entry.id)
+  settings.state.value = { entries: [{ id: '../escape', title: 'bad', order: 1, enabled: true }, 'nonsense'] }
+  assert.equal(settings.state.refusals.length, 1, 'a document the schema refuses must be refused, not delivered')
+  assert.deepEqual(
+    settings.state.value.entries.map((entry) => entry.id),
+    beforeRefusal,
+    'and the index in force must be the last one that validated',
+  )
+
   // ── unusable index entries are dropped, never thrown ────────────────────────
 
-  settings.state.value = { entries: [{ id: '../escape', title: 'bad', order: 1, enabled: true }, 'nonsense'] }
-  settings.state.watcher()
+  settings.state.value = { entries: [{ id: '../escape', title: 'bad', order: 1, enabled: true }] }
   const sanitized = await driven.read()
   assert.equal(sanitized.prompt, '', 'unusable index entries must be dropped, not injected')
   assert.ok(
@@ -713,10 +712,9 @@ try {
   settings.state.value = {
     entries: [{ id: 'kept', title: '留下的', order: 10, enabled: false }],
     presets: [
-      { id: 'ok', name: '好的', entries: ['kept', '../escape', 'kept', 7] },
+      { id: 'ok', name: '好的', entries: ['kept', '../escape', 'kept'] },
       { id: '../escape', name: '坏的', entries: ['kept'] },
       { id: 'ok', name: '重名', entries: ['kept'] },
-      'nonsense',
     ],
   }
   settings.state.watcher()
