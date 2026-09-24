@@ -50,6 +50,12 @@ dsh plugin --profile web add github:lolkda/dsh-prompt-manager
 dsh plugin --profile web add @lolkda/dsh-prompt-manager
 ```
 
+`latest` 停在最后一个稳定版（面向 DSH 0.1.6）。面向 DSH 0.1.7-rc.1 的 `3.4.0-rc.x` 按预发布标签发布，装它要显式点名 `@next`：
+
+```bash
+dsh plugin --profile web add @lolkda/dsh-prompt-manager@next
+```
+
 ### 方式 B：相对路径挂载（离线 / 开发用，不装包）
 
 ```bash

@@ -7,7 +7,13 @@ name: release
 #   git tag v3.0.2
 #   git push origin main --follow-tags
 #
-# The tag is the confirmation, so nothing reaches npm by accident. Authentication is
+# The tag is the confirmation, so nothing reaches npm by accident. The dist-tag
+# follows the version: a prerelease (`3.4.0-rc.2`) publishes under `next` and
+# leaves `latest` on the newest stable, while a plain version publishes as
+# `latest`. Install a prerelease explicitly:
+#
+#   dsh plugin --profile web add @lolkda/dsh-prompt-manager@next
+# Authentication is
 # npm's trusted publishing (OIDC) — there is no NPM_TOKEN secret here, and none is
 # wanted: npm is retiring the bypass-2FA tokens that a secret would have to hold. Set
 # it up once, on the package page:
@@ -71,7 +77,15 @@ jobs:
 
       - name: publish to npm
         if: github.event_name == 'push' || inputs.publish
-        run: npm publish --provenance --access public
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          # A prerelease must not take `latest` away from the newest stable: this
+          # plugin's compatibility is pinned per DSH release, so a 0.1.7-rc build
+          # installed by a 0.1.6 deployment is a plugin the version gate refuses.
+          tag=latest
+          case "$version" in *-*) tag=next ;; esac
+          echo "publishing ${version} under dist-tag ${tag}"
+          npm publish --provenance --access public --tag "$tag"
 
       - name: GitHub release
         if: github.event_name == 'push'
