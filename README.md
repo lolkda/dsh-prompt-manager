@@ -1,5 +1,13 @@
 # dsh-prompt-manager
 
+## 3.4.0-rc.2：修掉启动竞态下丢失的设置命名空间
+
+`3.4.0-rc.1` 把索引改成 Loader entry 上的 volatile `Config` 字段，但那个 schema 是在模块求值时用**同步 `require('@deepseek-ai/schemastery')`** 拿工厂再构建的。0.1.7-rc.1 的 Loader 会并发 import 整个 Profile 的条目，同步 require 撞上「正在加载的 ESM-only 依赖（cosmokit）」时 Node 抛 `ERR_REQUIRE_ESM_RACE_CONDITION`，而当时的 `catch` 把它静默吞掉 —— 于是 `Config` 变成 `undefined`，这个 entry 在宿主眼里没有 schema，`dsh-settings` 直接跳过它：**设置命名空间从不对外服务**。表现出来就是输入框旁两个芯片消失、新增/订阅都报「宿主没有接受这次保存」，而已有订阅索引滞留在 `settings.yaml.imported` 里读不出来；插件自身的 HTTP 路由一切正常，所以看起来"没报错但什么都不工作"。
+
+本版把工厂改为经 ESM 图解析（顶层 `await import('@deepseek-ai/schemastery')`），不再与加载器抢同一条同步路径；解析失败时改为在挂载时通过 `ctx.logger.warn` 说明原因，不再静默。`test/config-schema.mjs` 注入加载器那条真实错误做回归，`tools/check-boot-acceptance.mjs` 对真实冷启动验收。
+
+升级后请**重启 dsh 进程**（`Config` 在模块求值时定死，刷新页面无效），并把 `settings.yaml.imported` 里旧的 `prompt-manager:` 段重新导回（在「设置 → 提示词 → 来源」重新添加来源并应用即可，本地快照仍在）。
+
 ## 3.4.0-rc.1：DSH 0.1.7-rc.1 本地适配
 
 本版使用原生 `Config`/volatile 与 `configForms`，不修改 DSH 核心。Loader entry id 保持 `prompt-manager`，旧同名 `settings.yaml` 段由 DSH 自动导入 Profile patch，原文件保留为 `.imported`；正文、脚本、订阅与每会话选择的数据目录不变。设置被宿主拒绝时明确显示失败，正文已保存而索引失败时保持可重试，不误报成功。下文旧版本迁移章节中的旧 Settings API 与存储路径仅说明历史版本。

@@ -226,6 +226,11 @@ export declare function resolveStoreDir(config?: Config): string;
  * the same deployment that has no settings capability: the plugin still mounts
  * and serves its composed configuration, and the index falls back to the
  * packaged entries.
+ *
+ * Built behind a top-level `await` so the factory is reached through the ESM
+ * graph; see {@link loadSchemaFactory} for why a synchronous require cannot be
+ * used here. The Loader awaits this module, so the schema is in place before the
+ * entry is mounted.
  */
 export declare const Config: unknown;
 /**

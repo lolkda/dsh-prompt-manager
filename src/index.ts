@@ -399,15 +399,26 @@ export function resolveStoreDir(config: Config = {}): string {
 /**
  * Load the schemastery factory a settings namespace needs.
  *
- * Read through `createRequire` rather than a static import: a deployment
- * without the settings capability also has no schemastery, and this plugin must
- * still mount there with its composed configuration.
+ * Reached through the ESM graph rather than `createRequire`, and that is not a
+ * style choice. The Loader imports every entry of the profile concurrently, so
+ * this module is evaluated while other graphs are still loading; a synchronous
+ * `require()` issued in that window meets schemastery's CJS entry, which in turn
+ * requires the ESM-only cosmokit, and a `require()` that meets a module still
+ * loading cannot wait for it — Node raises `ERR_REQUIRE_ESM_RACE_CONDITION`.
+ * That error left `Config` undefined, and a plugin whose entry has no schema has
+ * no settings namespace at all on 0.1.7-rc.1: no composer chip, and every write
+ * refused as an unknown entry. An `import()` joins the same queue as the Loader's
+ * own imports instead of racing it.
+ *
+ * Still resolved lazily and still allowed to fail: a deployment without the
+ * settings capability has no schemastery, and this plugin must mount there with
+ * its composed configuration and no settings surface.
  *
  * @returns the schema factory, or `undefined` when it cannot be resolved.
  */
-function loadSchemaFactory(): SchemaFactory | undefined {
+async function loadSchemaFactory(): Promise<SchemaFactory | undefined> {
   try {
-    const loaded: unknown = createRequire(import.meta.url)('@deepseek-ai/schemastery')
+    const loaded: unknown = await import('@deepseek-ai/schemastery')
     const candidate: unknown = typeof loaded === 'function'
       ? loaded
       : (loaded as { default?: unknown } | null)?.default
@@ -415,10 +426,22 @@ function loadSchemaFactory(): SchemaFactory | undefined {
     const factory = candidate as unknown as Partial<SchemaFactory>
     if (typeof factory.object !== 'function' || typeof factory.array !== 'function') return undefined
     return factory as SchemaFactory
-  } catch {
+  } catch (error) {
+    // Recorded rather than swallowed: the mount still has to happen, and a
+    // deployment that loses its settings surface without a word is exactly how
+    // this went unnoticed. `apply` reports it once it has a logger.
+    configSchemaFailure = messageOf(error)
     return undefined
   }
 }
+
+/**
+ * Why the schema factory could not be reached, when it could not be.
+ *
+ * Module scope, because the factory is resolved while this module is evaluated
+ * and the logger only exists at mount time.
+ */
+let configSchemaFailure: string | undefined
 
 /**
  * This package's own manifest identity, read at most once.
@@ -464,9 +487,14 @@ let ownManifestCache: { name: string; version: string } | undefined
  * the same deployment that has no settings capability: the plugin still mounts
  * and serves its composed configuration, and the index falls back to the
  * packaged entries.
+ *
+ * Built behind a top-level `await` so the factory is reached through the ESM
+ * graph; see {@link loadSchemaFactory} for why a synchronous require cannot be
+ * used here. The Loader awaits this module, so the schema is in place before the
+ * entry is mounted.
  */
-export const Config: unknown = (() => {
-  const factory = loadSchemaFactory()
+export const Config: unknown = await (async () => {
+  const factory = await loadSchemaFactory()
   return factory === undefined ? undefined : buildConfigSchema(factory)
 })()
 
@@ -1450,9 +1478,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     )
   }
 
-  const factory = loadSchemaFactory()
-  if (factory === undefined) {
-    warn(ctx, 'schemastery is unavailable, so prompt entries cannot be edited from Settings')
+  if (configSchemaFailure !== undefined) {
+    warn(ctx, `schemastery is unavailable, so prompt entries cannot be edited from Settings: ${configSchemaFailure}`)
   }
 
   /**
