@@ -79,9 +79,8 @@ jobs:
         if: github.event_name == 'push' || inputs.publish
         run: |
           version="$(node -p "require('./package.json').version")"
-          # A prerelease must not take `latest` away from the newest stable: this
-          # plugin's compatibility is pinned per DSH release, so a 0.1.7-rc build
-          # installed by a 0.1.6 deployment is a plugin the version gate refuses.
+          # Keep prereleases opt-in under `next`; only stable versions update
+          # `latest`. This is independent of the plugin's runtime peer ranges.
           tag=latest
           case "$version" in *-*) tag=next ;; esac
           echo "publishing ${version} under dist-tag ${tag}"

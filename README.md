@@ -1,5 +1,14 @@
 # dsh-prompt-manager
 
+## 3.4.0：解除 DSH 精确版本绑定
+
+- `@deepseek-ai/dsh-llm`、`@deepseek-ai/dsh-system-prompt` 的运行时 peer 范围改为 `*`，商店范围 `dsh.compatibility.dsh` 同步改为 `*`。DSH 升级（包括 RC 版本）不再仅因旧版本号而跳过本插件，无需添加 `allow-version` 豁免。
+- 开发依赖仍固定到 `0.2.0-rc.2`，用于可复现的编译和测试，不限制安装时的宿主版本。已在该依赖版本上通过完整测试，覆盖提示词组装、volatile 设置更新、每会话选择、压缩替换及客户端交互测试。
+- **不限制版本不等于保证所有未来版本兼容**。已验证当前 DSH `0.2.0-rc.2` 的真实启动器准入检查；客户端测试使用模拟宿主，尚未完成本版真实 Profile 的安装、浏览器冷启动、卸载和回滚验收，因此新版商店证据仍为 `unknown`，不把单元测试当成部署验收。
+- 本次不改变正文、订阅、设置索引或会话选择的存储结构；也不改变其他插件的兼容声明。
+
+源码构建后可用 `npm pack` 生成本地安装包，再通过 `dsh plugin --profile web add /absolute/path/to/lolkda-dsh-prompt-manager-3.4.0.tgz` 安装，**重启 DSH 进程并刷新页面**。本地修改不会自动更新正在运行的 Profile；正式版经 GitHub Release 工作流发布到 npm 的 `latest` 标签，发布后可使用 `@latest` 或显式指定 `@3.4.0` 安装。
+
 ## 3.4.0-rc.2：修掉启动竞态下丢失的设置命名空间
 
 `3.4.0-rc.1` 把索引改成 Loader entry 上的 volatile `Config` 字段，但那个 schema 是在模块求值时用**同步 `require('@deepseek-ai/schemastery')`** 拿工厂再构建的。0.1.7-rc.1 的 Loader 会并发 import 整个 Profile 的条目，同步 require 撞上「正在加载的 ESM-only 依赖（cosmokit）」时 Node 抛 `ERR_REQUIRE_ESM_RACE_CONDITION`，而当时的 `catch` 把它静默吞掉 —— 于是 `Config` 变成 `undefined`，这个 entry 在宿主眼里没有 schema，`dsh-settings` 直接跳过它：**设置命名空间从不对外服务**。表现出来就是输入框旁两个芯片消失、新增/订阅都报「宿主没有接受这次保存」，而已有订阅索引滞留在 `settings.yaml.imported` 里读不出来；插件自身的 HTTP 路由一切正常，所以看起来"没报错但什么都不工作"。
@@ -50,11 +59,13 @@ dsh plugin --profile web add github:lolkda/dsh-prompt-manager
 dsh plugin --profile web add @lolkda/dsh-prompt-manager
 ```
 
-`latest` 停在最后一个稳定版（面向 DSH 0.1.6）。面向 DSH 0.1.7-rc.1 的 `3.4.0-rc.x` 按预发布标签发布，装它要显式点名 `@next`：
+正式版 `3.4.0` 发布到 `latest`，不再锁定 DSH 精确版本。要明确安装本次正式版：
 
 ```bash
-dsh plugin --profile web add @lolkda/dsh-prompt-manager@next
+dsh plugin --profile web add @lolkda/dsh-prompt-manager@3.4.0
 ```
+
+`next` 仅用于预发布，可能仍指向旧 RC；升级本次正式版请使用 `@latest` 或 `@3.4.0`。
 
 ### 方式 B：相对路径挂载（离线 / 开发用，不装包）
 

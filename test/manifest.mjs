@@ -27,6 +27,13 @@ const root = new URL('../', import.meta.url)
 const read = (relative) => readFileSync(new URL(relative, root), 'utf8')
 const manifest = JSON.parse(read('package.json'))
 
+// Restoring an exact peer pin (even an optional one) makes the boot loader skip
+// this bundle. Release evidence below is separate from runtime admission.
+for (const name of ['@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-system-prompt']) {
+  assert.equal(manifest.peerDependencies[name], '*', `${name} must not gate runtime versions`)
+}
+assert.equal(manifest.dsh.compatibility.dsh, '*', 'marketplace range must not pin a runtime release')
+
 // ── the compatibility window ─────────────────────────────────────────────────
 
 /** Release states the store accepts, and the one that keeps an entry listed. */
