@@ -293,25 +293,11 @@ const scope = {
 /**
  * What each conversation has chosen, keyed by session id.
  *
- * This is the Host's `sessions/<id>.json` stood up in memory: the two chips read
+ * This is the Host's `sessions/<id>.json` stood up in memory: the two commands read
  * and write it through the choice route, so the fake transport has to answer the
  * way the real one does — with what was stored, not with what was sent.
  */
 const CHOICES = new Map()
-
-/**
- * Which conversation the chips are drawn for.
- *
- * The slot is session-scoped, so this is a prop the framework resolves — the
- * `sessionId` standard source of `ui-session` — and a case below changes it the
- * way a person changes conversations: by mounting the chip for another one.
- *
- * It used to be a fake session-list store with a `current` field, which is what
- * hid the 3.2.1 breakage: `current` stopped existing in DSH 0.1.6, so the real
- * chip got `undefined` for every conversation while this suite kept handing it a
- * store that answered.
- */
-let chipSessionId = 'session-open'
 
 /**
  * Whether an element type is a mountable component: a plain function, or a
@@ -502,7 +488,7 @@ function materialize(React) {
           json: async () => ({ error: writeRefusal.error, code: writeRefusal.code }),
         }
       }
-      if (storeRefusal !== null && (url.endsWith('/status') || url.endsWith('/sources') || url.endsWith('/variables'))) {
+      if (storeRefusal !== null && (url.endsWith('/status') || url.endsWith('/sources') || url.endsWith('/variables') || url.includes('/session/'))) {
         return {
           ok: false,
           status: storeRefusal.status,
@@ -628,16 +614,22 @@ function materialize(React) {
   assert.ok(exports.inject.includes('configForms'), 'the client plugin must inject the settings forms service')
   assert.deepEqual(
     exports.inject,
-    ['slots', 'configForms'],
-    'and nothing else: which conversation a chip draws for comes from the session-scoped slot it fills, '
-      + 'never from the session list — whose `current` field 0.1.6 removed, which is what left every '
-      + 'switch on the composer row disabled',
+    ['slots', 'configForms', 'commandUi'],
+    'commands use the native command UI and its captured session context',
   )
   assert.equal(typeof exports.apply, 'function', 'the client plugin must expose apply')
 
+  const commands = []
+  const disposers = []
   const registrations = []
   const injections = []
   const ctx = {
+    commandUi: {
+      register(command) {
+        commands.push(command)
+        return () => commands.splice(commands.indexOf(command), 1)
+      },
+    },
     configForms: {
       get: (entryId) => {
         assert.equal(entryId, 'prompt-manager', 'the form must be the Loader entry that carries the index')
@@ -657,11 +649,12 @@ function materialize(React) {
     },
     effect: (execute) => {
       const disposer = execute()
+      if (typeof disposer === 'function') disposers.push(disposer)
       return typeof disposer === 'function' ? disposer : () => {}
     },
   }
   exports.apply(ctx)
-  return { registrations, injections }
+  return { registrations, injections, commands, disposers }
 }
 
 /** Flatten an element tree into its texts and the nodes of one type. */
@@ -718,24 +711,15 @@ const { registrations, injections } = materialize(renderer.React)
 
 assert.deepEqual(
   injections,
-  ['settings.section', 'conversation.input.right'],
-  'the bundle must contribute the settings section and both composer controls',
+  ['settings.section'],
+  'the composer must no longer contain either button',
 )
-assert.equal(registrations.length, 3, 'exactly one settings section and two composer controls must be registered')
+assert.equal(registrations.length, 1, 'only the settings section is registered as a slot')
 const { meta, component } = registrations[0]
 assert.equal(meta.name, 'settings.section', 'the registration must name its slot')
 assert.equal(meta.id, 'prompt-manager', 'the section id must be the namespace')
 assert.equal(meta.order, 60, 'the section must sit after the shipped settings sections')
 assert.equal(meta.label(), '提示词', 'the navigation label must be the Chinese one')
-const { meta: chipMeta } = registrations[1]
-assert.equal(chipMeta.name, 'conversation.input.right', 'the preset chip must sit in the composer tool row')
-assert.equal(chipMeta.id, 'prompt-manager', 'the chip id must be the namespace')
-assert.equal(chipMeta.order, 10, 'and come first of the two that share that row')
-const { meta: compactionChipMeta } = registrations[2]
-assert.equal(compactionChipMeta.name, 'conversation.input.right', 'the compaction chip rides the same row')
-assert.equal(compactionChipMeta.id, 'prompt-manager-compaction', 'under an id of its own, since a slot lists both')
-assert.equal(compactionChipMeta.order, 11, 'right after the preset chip it sits beside')
-
 // ── the list page ─────────────────────────────────────────────────────────────
 
 let tree = renderer.mount(component, { scope })
@@ -1238,270 +1222,86 @@ assert.ok(
 )
 assert.equal(droppedEntry.value.some((entry) => entry.id === 'alpha'), false, 'and the dropped id is the one that was deleted')
 
-/// ── the composer chip ─────────────────────────────────────────────────────────
-
-// The chip is a second surface of the same bundle, driven through a renderer of
-// its own because it is a component of its own: two components cannot share one
-// hook-slot table. The catalog it offers comes from the settings namespace; which
-// one it says is in force comes from the conversation it belongs to.
-const chipRenderer = createRenderer()
-const chipRegistration = materialize(chipRenderer.React).registrations
-  .find((registration) => registration.meta.name === 'conversation.input.right')
-assert.ok(chipRegistration !== undefined, 'the bundle must offer the preset chip to the composer tool row')
-
-/** The chip's own label — which rides the anchor the menu is attached to. */
-const chipMenuNode = () => inspect(chipRenderer.tree, MENU).nodes[0]
-const chipText = () => textOf(chipMenuNode().props.anchor)
-const chipMenu = () => chipMenuNode()
-
-/** What the slot hands a chip: the settings scope, plus the `sessionId` standard
- * prop of the session-scoped slot it fills. */
-const chipProps = () => ({ scope, sessionId: chipSessionId })
-/** The last choice request sent since one point in the log. */
-const lastChoice = (after) => requests.slice(after).filter((request) => request.url.includes('/session/')).at(-1)
-
-// The seam the chips have to use. `conversation.input.right` is declared
-// `scope: 'session'`, so the renderer hands every entry the conversation it draws
-// for as the `sessionId` prop; 3.2.1 read it off the session list instead
-// (`sessions.list.getSnapshot().current`), 0.1.6 removed that field, and every
-// item in both menus silently came out disabled. A source read is the only way
-// this suite can hold the bundle to a prop the framework supplies at render time.
-assert.equal(
-  /getSnapshot\(\)\.current\b/.test(readFileSync(BUNDLE, 'utf8')),
-  false,
-  'the bundle must not read the `current` field off the session list: it is gone, and reading it disables every switch',
-)
-
-scope.state = { ...scope.state, value: { ...scope.state.value, presets: PRESETS } }
+// ── native slash selection panels ────────────────────────────────────────────
+// Regressions: removing registration, writing the wrong field/session, trusting a
+// stale catalog, or swallowing HTTP errors must each fail these behavior checks.
+const commandHost = materialize(createRenderer().React)
+assert.deepEqual(commandHost.commands.map(c => c.name), ['prompt', 'compression'])
+const [promptCommand, compressionCommand] = commandHost.commands
+const sessionA = { sessionId: 'session-open' }
+const sessionB = { sessionId: 'session-other' }
+const signal = new AbortController().signal
+const options = (command, session = sessionA) => command.ui.options(session, signal)
+const select = (command, id, session = sessionA) => command.ui.onSelect({ id }, session)
+scope.state = { ...scope.state, status: 'ready', mode: 'host', writable: true,
+  value: { ...scope.state.value, entries: ENTRIES, presets: PRESETS } }
 CHOICES.clear()
-chipSessionId = 'session-open'
-chipRenderer.mount(chipRegistration.component, chipProps())
-await chipRenderer.settle()
-assert.ok(chipText().includes('提示词 · 按开关'), 'a conversation that chose nothing must read as the switches deciding')
-assert.deepEqual(
-  chipMenu().props.items.map((entry) => entry.id),
-  ['', 'ctf', 'plain'],
-  'the menu must offer no-preset plus every preset',
-)
-assert.ok(item(chipMenu(), '').label.includes('（当前）'), 'the no-preset entry must be marked as the one in force')
-assert.ok(item(chipMenu(), 'ctf').label.includes('CTF 作业'), 'a preset entry must carry its name')
-assert.ok(item(chipMenu(), 'ctf').label.includes('2 条'), 'and how many entries it selects')
-
-// The chip reads the conversation's own file to find out what is in force, which
-// is the whole difference from the settings document it used to read.
-const chipRead = requests.find((request) => request.url === `${ROUTE}/session/session-open`)
-assert.ok(chipRead !== undefined && chipRead.method === 'GET', 'the chip must read this session\'s choice from the Host')
-
-// A switch is one request naming one conversation, and nothing else — the Host acts
-// on it at the next model step, so the chip has nothing to coordinate.
-const chipWritesBefore = writes.length
-const chipRequestsBefore = requests.length
-chipMenu().props.onSelect('ctf')
-await chipRenderer.settle()
-const chosePreset = lastChoice(chipRequestsBefore)
-assert.ok(chosePreset !== undefined, 'choosing a preset must tell the Host what this conversation chose')
-assert.equal(chosePreset.method, 'POST', 'as a write')
-assert.equal(chosePreset.url, `${ROUTE}/session/session-open`, 'naming this conversation and no other')
-assert.deepEqual(
-  JSON.parse(chosePreset.body),
-  { preset: 'ctf' },
-  'a preset switch must write only the preset, even when legacy settings carry a compaction binding',
-)
-assert.equal(writes.length, chipWritesBefore, 'and it must not touch the settings document at all')
-
-// The answer is what was stored, so a re-render shows the choice the Host will act
-// on rather than the one the page hoped for.
-chipRenderer.mount(chipRegistration.component, chipProps())
-await chipRenderer.settle()
-assert.ok(chipText().includes('CTF 作业'), 'the chip must show the preset this conversation is using')
-assert.ok(item(chipMenu(), 'ctf').label.includes('（当前）'), 'and mark it in the menu')
-
-// The point of the whole change: the same bundle, a different conversation.
-chipSessionId = 'session-other'
-chipRenderer.mount(chipRegistration.component, chipProps())
-await chipRenderer.settle()
-assert.ok(chipText().includes('提示词 · 按开关'), 'another conversation must not inherit a choice made in the first one')
-assert.ok(item(chipMenu(), '').label.includes('（当前）'), 'which leaves it choosing nothing')
-assert.ok(!item(chipMenu(), 'ctf').label.includes('（当前）'), 'and marking no preset at all')
-
-// Back to the first conversation, and its choice is still there: the choice is a
-// file, not a value this component holds.
-chipSessionId = 'session-open'
-chipRenderer.mount(chipRegistration.component, chipProps())
-await chipRenderer.settle()
-assert.ok(chipText().includes('CTF 作业'), 'and coming back reads the same stored choice again')
-
-// A page whose settings channel is process-local can offer the catalog but not make
-// a choice: the same refusal every write on this page makes. Every item is refused,
-// including the way back to the per-entry switches — that is a write too.
-scope.state = { ...scope.state, mode: 'memory', writable: false }
-chipRenderer.mount(chipRegistration.component, chipProps())
-await chipRenderer.settle()
-assert.equal(item(chipMenu(), 'ctf').disabled, true, 'a memory-mode page must refuse to switch a preset')
-assert.equal(item(chipMenu(), '').disabled, true, 'and refuse the way back to the per-entry switches as well')
-scope.state = { ...scope.state, mode: 'host', writable: true }
-
-// A deployment with no presets still renders: the chip says where to make one.
-chipSessionId = 'session-open'
-scope.state = { ...scope.state, value: { ...scope.state.value, presets: [] } }
-chipRenderer.mount(chipRegistration.component, chipProps())
-await chipRenderer.settle()
-assert.ok(
-  chipMenu().props.items[0].label.includes('还没有组合'),
-  'with no presets the chip must point at the settings page',
-)
-assert.equal(chipMenu().props.items[0].disabled, true, 'and that hint must not be selectable')
-
-// ── the compaction chip ───────────────────────────────────────────────────────
-
-// The second control in that row: the preset chip answers "which sections this
-// conversation works with", this one answers "which compaction instruction". A
-// component of its own, so it is driven through a renderer of its own — two
-// components cannot share one hook-slot table.
-const compactionChipRenderer = createRenderer()
-const compactionChipRegistration = materialize(compactionChipRenderer.React).registrations
-  .find((registration) => registration.meta.id === 'prompt-manager-compaction')
-assert.ok(compactionChipRegistration !== undefined, 'the composer row must also carry the compaction chip')
-
-const compactionChipMenu = () => inspect(compactionChipRenderer.tree, MENU).nodes[0]
-const compactionChipText = () => textOf(compactionChipMenu().props.anchor)
-/** The same props the slot hands this chip. */
-const compactionChipProps = () => ({ scope, sessionId: chipSessionId })
-
-scope.state = {
-  ...scope.state,
-  mode: 'host',
-  writable: true,
-  value: { ...scope.state.value, entries: ENTRIES, presets: PRESETS },
+const settingsWritesBeforeCommands = writes.length
+for (const command of commandHost.commands) {
+  assert.equal(command.ui.kind, 'popupSelect')
+  assert.equal(command.available(sessionA), true)
+  assert.equal(command.available({}), false)
+  assert.ok(command.label().length > 0)
+  assert.ok(command.description().includes('本会话'))
+  assert.ok(command.ui.searchLabels().placeholder.length > 0)
 }
-CHOICES.clear()
-chipSessionId = 'session-open'
-compactionChipRenderer.mount(compactionChipRegistration.component, compactionChipProps())
-await compactionChipRenderer.settle()
-assert.ok(
-  compactionChipText().includes('DSH'),
-  `a conversation that chose nothing must name the built-in instruction, got ${compactionChipText()}`,
-)
-
-// Only the compaction entries belong in this menu. Offering a section would promise
-// to make it the compaction instruction, which is a different thing — and offering
-// the whole index would bury the entries this control is actually about.
-assert.deepEqual(
-  compactionChipMenu().props.items.map((entry) => entry.id),
-  ['', 'compact-zh'],
-  'the menu must offer the built-in instruction plus every compaction entry',
-)
-assert.ok(item(compactionChipMenu(), 'compact-zh').label.includes('压缩指令（中文版）'), 'naming the entry it offers')
-assert.ok(item(compactionChipMenu(), '').label.includes('（当前）'), 'and marking what is in force right now')
-
-// One field of one conversation's file, patched rather than replaced: the preset
-// this conversation is using has to survive a change of instruction.
-const compactionWritesBefore = writes.length
-const compactionRequestsBefore = requests.length
-compactionChipMenu().props.onSelect('compact-zh')
-await compactionChipRenderer.settle()
-const choseInstruction = lastChoice(compactionRequestsBefore)
-assert.ok(choseInstruction !== undefined, 'choosing an entry must tell the Host what this conversation chose')
-assert.equal(choseInstruction.url, `${ROUTE}/session/session-open`, 'naming this conversation')
-assert.deepEqual(JSON.parse(choseInstruction.body), { compaction: 'compact-zh' }, 'and only the field it owns')
-assert.equal(writes.length, compactionWritesBefore, 'leaving the settings document alone')
-
-compactionChipRenderer.mount(compactionChipRegistration.component, compactionChipProps())
-await compactionChipRenderer.settle()
-assert.ok(compactionChipText().includes('压缩指令（中文版）'), 'the chip follows the answer the Host gave, like the preset chip')
-
-// The instruction is the conversation's, so a second one is unaffected by it —
-// the same isolation the preset chip just demonstrated.
-chipSessionId = 'session-other'
-compactionChipRenderer.mount(compactionChipRegistration.component, compactionChipProps())
-await compactionChipRenderer.settle()
-assert.ok(
-  compactionChipText().includes('DSH'),
-  `a conversation that chose nothing must still get the built-in instruction, got ${compactionChipText()}`,
-)
-assert.ok(item(compactionChipMenu(), '').label.includes('（当前）'), 'with the built-in one marked for it')
-
-// Clearing is the same patch with the empty id, which is how a conversation goes
-// back to what DSH ships.
-chipSessionId = 'session-open'
-compactionChipRenderer.mount(compactionChipRegistration.component, compactionChipProps())
-await compactionChipRenderer.settle()
-const clearRequestsBefore = requests.length
-compactionChipMenu().props.onSelect('')
-await compactionChipRenderer.settle()
-const clearedChoice = lastChoice(clearRequestsBefore)
-assert.deepEqual(JSON.parse(clearedChoice.body), { compaction: '' }, 'choosing the built-in one writes the empty id')
-assert.ok(compactionChipText().includes('DSH'), 'and the chip goes back to naming the built-in instruction')
-
-// A page whose settings channel is process-local can offer the catalog but not make
-// a choice — the same refusal the preset chip makes, because it is the same kind of write.
-scope.state = { ...scope.state, mode: 'memory', writable: false }
-compactionChipRenderer.mount(compactionChipRegistration.component, compactionChipProps())
-await compactionChipRenderer.settle()
-assert.equal(
-  item(compactionChipMenu(), 'compact-zh').disabled,
-  true,
-  'a memory-mode page must refuse to switch the compaction instruction',
-)
-assert.equal(
-  item(compactionChipMenu(), '').disabled,
-  true,
-  'and refuse the way back to DSH\'s own instruction, which is a write as well',
-)
-scope.state = { ...scope.state, mode: 'host', writable: true }
-
-// A deployment with no compaction entries still renders: the chip says where to make one.
+let rows = await options(promptCommand)
+assert.deepEqual(rows.map(row => row.id), ['', 'ctf', 'plain'])
+assert.equal(rows[0].active, true)
+assert.ok(rows[1].label.includes('CTF 作业'))
+assert.ok(rows[1].detail.includes('2'))
+rows = await options(compressionCommand)
+assert.deepEqual(rows.map(row => row.id), ['', 'compact-zh'])
+assert.equal(rows[0].active, true)
+await select(promptCommand, 'ctf')
+assert.deepEqual(CHOICES.get(sessionA.sessionId), { preset: 'ctf', compaction: '' })
+await select(compressionCommand, 'compact-zh')
+assert.deepEqual(CHOICES.get(sessionA.sessionId), { preset: 'ctf', compaction: 'compact-zh' })
+for (const id of ['plain', '', 'ctf']) {
+  await select(promptCommand, id)
+  assert.deepEqual(CHOICES.get(sessionA.sessionId), { preset: id, compaction: 'compact-zh' })
+}
+assert.equal((await options(promptCommand)).find(row => row.id === 'ctf').active, true)
+assert.equal((await options(compressionCommand)).find(row => row.id === 'compact-zh').active, true)
+for (const command of commandHost.commands) assert.equal((await options(command, sessionB))[0].active, true)
+await select(promptCommand, 'plain', sessionB)
+assert.equal(CHOICES.get(sessionA.sessionId).preset, 'ctf')
+await select(compressionCommand, '')
+assert.deepEqual(CHOICES.get(sessionA.sessionId), { preset: 'ctf', compaction: '' })
+assert.equal(writes.length, settingsWritesBeforeCommands, 'choices never write global settings')
+for (const command of commandHost.commands) {
+  await assert.rejects(select(command, 'missing'), /不存在/)
+  scope.state = { ...scope.state, mode: 'memory', writable: false }
+  assert.equal(command.available(sessionA), false)
+  await assert.rejects(select(command, ''), /只读/)
+  scope.state = { ...scope.state, mode: 'host', writable: true }
+  scope.state = { ...scope.state, status: 'loading' }
+  assert.equal(command.available(sessionA), false)
+  await assert.rejects(options(command), /载入/)
+  scope.state = { ...scope.state, status: 'ready' }
+  await assert.rejects(select(command, '', {}), /会话/)
+  storeRefusal = { status: 500, error: 'read failed' }
+  await assert.rejects(options(command), /read failed/)
+  storeRefusal = null
+  const before = structuredClone(CHOICES.get(sessionA.sessionId))
+  writeRefusal = { status: 500, error: 'write failed' }
+  await assert.rejects(select(command, ''), /write failed/)
+  writeRefusal = null
+  assert.deepEqual(CHOICES.get(sessionA.sessionId), before)
+}
+// Catalog deletion while a panel is open must not write a stale option.
 scope.state = { ...scope.state, value: { ...scope.state.value, entries: SECTION_ENTRIES, presets: [] } }
-compactionChipRenderer.mount(compactionChipRegistration.component, compactionChipProps())
-await compactionChipRenderer.settle()
-assert.deepEqual(compactionChipMenu().props.items.map((entry) => entry.id), ['no-entries'], 'with none there is one hint')
-assert.equal(compactionChipMenu().props.items[0].disabled, true, 'and it is not selectable')
-// ── both composer controls stay independent while mounted together ───────────
-
-const independentSession = 'session-independent'
-CHOICES.clear()
-CHOICES.set('session-neighbour', { preset: 'plain', compaction: 'compact-custom' })
-scope.state = { ...scope.state, status: 'ready', writable: true, mode: 'host', value: {
-  entries: [...ENTRIES, { id: 'compact-custom', title: '独立压缩 Y', order: 100, enabled: false, kind: 'compaction' }],
-  presets: PRESETS,
-} }
-const pairedRenderer = createRenderer()
-const pairedRegistrations = materialize(pairedRenderer.React).registrations
-const pairedPreset = pairedRegistrations.find((entry) => entry.meta.name === 'conversation.input.right' && entry.meta.id === 'prompt-manager')
-const pairedCompaction = pairedRegistrations.find((entry) => entry.meta.id === 'prompt-manager-compaction')
-pairedRenderer.mount(() => [
-  createElement(pairedPreset.component, { scope, sessionId: independentSession }),
-  createElement(pairedCompaction.component, { scope, sessionId: independentSession }),
-], {})
-await pairedRenderer.settle()
-const pairedMenus = () => inspect(pairedRenderer.tree, MENU).nodes
-const pairedCompressionLabel = () => textOf(pairedMenus()[1].props.anchor)
-assert.equal(pairedMenus().length, 2, 'the regression must exercise both composer controls together')
-pairedMenus()[0].props.onSelect('ctf')
-await pairedRenderer.settle()
-assert.deepEqual(CHOICES.get(independentSession), { preset: 'ctf', compaction: '' }, 'a legacy preset must not auto-select any compression')
-assert.ok(pairedCompressionLabel().includes('DSH'), 'the displayed default must agree with the stored default')
-pairedMenus()[1].props.onSelect('compact-custom')
-await pairedRenderer.settle()
-assert.deepEqual(CHOICES.get(independentSession), { preset: 'ctf', compaction: 'compact-custom' }, 'manual compression changes must keep the preset')
-for (const presetId of ['plain', 'ctf', '', 'ctf']) {
-  const before = requests.length
-  pairedMenus()[0].props.onSelect(presetId)
-  await pairedRenderer.settle()
-  assert.deepEqual(JSON.parse(lastChoice(before).body), { preset: presetId }, 'changing or cancelling a preset must patch only its own field')
-  assert.deepEqual(CHOICES.get(independentSession), { preset: presetId, compaction: 'compact-custom' }, 'manual compression must survive every preset transition')
-  assert.ok(pairedCompressionLabel().includes('独立压缩 Y'), 'the compression label must still agree with the stored selection')
+await assert.rejects(select(promptCommand, 'ctf'), /不存在/)
+await assert.rejects(select(compressionCommand, 'compact-zh'), /不存在/)
+for (const command of commandHost.commands) {
+  rows = await options(command)
+  assert.deepEqual(rows.map(row => row.id), [''])
+  assert.equal(rows[0].active, true, 'missing selections show the effective default')
+  await select(command, '')
 }
-pairedMenus()[1].props.onSelect('')
-await pairedRenderer.settle()
-assert.deepEqual(CHOICES.get(independentSession), { preset: 'ctf', compaction: '' }, 'only the compression control may restore the DSH default')
-pairedMenus()[0].props.onSelect('plain')
-await pairedRenderer.settle()
-pairedMenus()[0].props.onSelect('ctf')
-await pairedRenderer.settle()
-assert.equal(CHOICES.get(independentSession).compaction, '', 'the manually selected default must also survive preset switches')
-assert.ok(pairedCompressionLabel().includes('DSH'), 'both controls must remain consistent without remounting')
-assert.deepEqual(CHOICES.get('session-neighbour'), { preset: 'plain', compaction: 'compact-custom' }, 'other conversations must remain unchanged')
+assert.deepEqual(CHOICES.get(sessionA.sessionId), { preset: '', compaction: '' })
+for (const dispose of commandHost.disposers.toReversed()) dispose()
+assert.equal(commandHost.commands.length, 0, 'unloading unregisters both commands')
 
 // ── the presets page ─────────────────────────────────────────────────────────
 
@@ -1797,7 +1597,7 @@ assert.equal(
 assert.equal(button(compactRenderer.tree, '设为当前'), undefined, 'the editor must offer no way to make a draft current')
 assert.equal(button(compactRenderer.tree, '取消当前'), undefined, 'nor a way to release one')
 assert.ok(
-  compactText().includes('哪个会话用它，就在那个会话输入框那行的「压缩」芯片里选'),
+  compactText().includes('哪个会话用它，就在那个会话的 /compression 选择面板里选'),
   `and it must say where that choice is made instead, got: ${compactText()}`,
 )
 
@@ -1856,7 +1656,7 @@ assert.ok(
   'the body exists first, then the index record that names it',
 )
 assert.ok(
-  compactText().includes('想让某个会话用它，在那个会话输入框那行的「压缩」芯片里选它'),
+  compactText().includes('想让某个会话用它，在那个会话的 /compression 选择面板里选它'),
   `and the page says where it becomes usable, got: ${compactText()}`,
 )
 assert.ok(!compactText().includes('尚未保存'), 'so the editor is no longer holding a draft')
@@ -1944,7 +1744,7 @@ assert.equal(inspect(compactRenderer.tree, 'textarea').nodes.length, 1, 'while t
 assert.equal(button(compactRenderer.tree, '设为当前'), undefined, 'the editor must not offer to make this current')
 assert.equal(button(compactRenderer.tree, '取消当前'), undefined, 'nor to take it back out')
 assert.ok(
-  compactText().includes('哪个会话用它，就在那个会话输入框那行的「压缩」芯片里选'),
+  compactText().includes('哪个会话用它，就在那个会话的 /compression 选择面板里选'),
   'it has to say where that is done instead',
 )
 
@@ -1975,7 +1775,7 @@ assert.equal(
   'and aims nothing: a body is not a choice about who uses it',
 )
 assert.ok(
-  compactText().includes('想让某个会话用它，在那个会话输入框那行的「压缩」芯片里选它'),
+  compactText().includes('想让某个会话用它，在那个会话的 /compression 选择面板里选它'),
   `and says where it becomes usable, not that a compaction will send it, got: ${compactText()}`,
 )
 
@@ -2630,8 +2430,8 @@ const countRequests = (method, includes = '') => requests.filter((request) => re
 console.log('client ok')
 console.log(`  bundle      factory id ${PACKAGE_NAME}, materialized and driven against stub modules`)
 console.log(`  section     settings.section id=prompt-manager order=${String(meta.order)}`)
-console.log(`  chip        ${chipMeta.name} id=prompt-manager, reads and writes one session's own choice`)
-console.log('  sessions    both chips read and write the Host\'s per-session file, and no other conversation feels it')
+console.log('  commands    /prompt and /compression use native selection panels')
+console.log('  sessions    both commands read and write the Host\'s per-session file, and no other conversation feels it')
 console.log(`  list        ${String(ENTRIES.length)} rows, switches, kebab menus, the plugin's own repo link, add control refused at the cap`)
 console.log('  views       row menu -> editor page -> save -> back to the list')
 console.log('  compaction  a row of its own kind: own badge, no switch, and nothing here that could make it current')

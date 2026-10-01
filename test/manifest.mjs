@@ -34,6 +34,9 @@ for (const name of ['@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-system-prompt']) {
 }
 assert.equal(manifest.dsh.compatibility.dsh, '*', 'marketplace range must not pin a runtime release')
 
+assert.ok(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-commands'),
+  'the client command provider must load before this plugin')
+
 // ── the compatibility window ─────────────────────────────────────────────────
 
 /** Release states the store accepts, and the one that keeps an entry listed. */
